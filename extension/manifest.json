@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "Privacy-Preserving Agentic Browser (SIH)",
+  "version": "1.0.0",
+  "description": "Autonomous browser agent combining DOM + VLM perception with strict client-side PII redaction and local secret resolution.",
+  "permissions": [
+    "sidePanel",
+    "activeTab",
+    "tabs",
+    "scripting",
+    "storage"
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "sidepanel/index.html"
+  },
+  "action": {
+    "default_title": "Open Privacy Agent Side Panel"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content/content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "shared/*",
+        "content/*",
+        "privacy/*"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

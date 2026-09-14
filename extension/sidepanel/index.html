@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Privacy Browser Agent - SIH</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="header">
+      <div class="brand">
+        <div class="shield-badge">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+            <path d="m9 12 2 2 4-4"/>
+          </svg>
+        </div>
+        <div>
+          <h1 class="brand-title">PrivAgent</h1>
+          <span class="brand-subtitle">SIH Privacy-Preserving Agent</span>
+        </div>
+      </div>
+      <button id="vault-btn" class="icon-button" title="Local Secret Vault Settings">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect width="18" height="18" x="3" y="3" rx="2"/>
+          <circle cx="12" cy="10" r="3"/>
+          <path d="M7 21v-2a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v2"/>
+        </svg>
+      </button>
+    </header>
+
+    <!-- Task Input Section -->
+    <section class="task-input-card">
+      <label for="task-prompt" class="card-label">Task Objective</label>
+      <div class="input-wrapper">
+        <textarea 
+          id="task-prompt" 
+          placeholder="e.g. 'Fill this Aadhaar application using my saved profile' or 'Find the cheapest flight from Pune to Delhi'"
+          rows="3"
+        ></textarea>
+      </div>
+      <div class="quick-prompts">
+        <span class="quick-tag" data-prompt="Fill this Aadhaar application using my saved profile">Fill Aadhaar Form</span>
+        <span class="quick-tag" data-prompt="Upload my Aadhaar PDF document to the verification field">Upload Aadhaar PDF</span>
+        <span class="quick-tag" data-prompt="Find the cheapest flight from Pune to Delhi">Find Flight</span>
+      </div>
+      <div class="control-actions">
+        <button id="start-task-btn" class="btn btn-primary">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+            <polygon points="5 3 19 12 5 21 5 3"/>
+          </svg>
+          Start Agent
+        </button>
+        <button id="pause-task-btn" class="btn btn-secondary" style="display: none;">Pause</button>
+        <button id="cancel-task-btn" class="btn btn-danger" style="display: none;">Stop</button>
+      </div>
+    </section>
+
+    <!-- Real-time Agent Status Banner -->
+    <div id="status-banner" class="status-banner state-idle">
+      <div class="pulse-indicator"></div>
+      <div class="status-info">
+        <span id="agent-state-text" class="status-state">IDLE</span>
+        <span id="agent-substatus-text" class="status-detail">Awaiting task prompt...</span>
+      </div>
+      <div id="step-counter" class="step-badge">Step 0</div>
+    </div>
+
+    <!-- Dual Privacy Boundary Dashboard -->
+    <section class="privacy-dashboard-card">
+      <div class="card-header-flex">
+        <span class="card-label">Privacy Boundary Guarantee</span>
+        <span class="shield-tag">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <polyline points="20 6 9 17 4 12"/>
+          </svg>
+          Zero Plaintext Leaks
+        </span>
+      </div>
+
+      <div class="boundary-grid">
+        <!-- Local Only Column -->
+        <div class="boundary-col local-col">
+          <div class="col-title">
+            <span class="dot dot-green"></span>
+            LOCAL ONLY (Vault)
+          </div>
+          <ul id="local-items-list" class="boundary-list">
+            <li><span class="check-icon">✓</span> Aadhaar & PAN Numbers</li>
+            <li><span class="check-icon">✓</span> Passwords & OTPs</li>
+            <li><span class="check-icon">✓</span> Identity Documents (PDF)</li>
+            <li><span class="check-icon">✓</span> Form Input Keystrokes</li>
+          </ul>
+        </div>
+
+        <!-- Shared with Server Column -->
+        <div class="boundary-col server-col">
+          <div class="col-title">
+            <span class="dot dot-blue"></span>
+            SHARED WITH AI (VLM + LLM)
+          </div>
+          <ul class="boundary-list">
+            <li><span class="share-icon">→</span> Redacted Screenshot (Canvas blackout)</li>
+            <li><span class="share-icon">→</span> Sanitized DOM Structure & Roles</li>
+            <li><span class="share-icon">→</span> Non-sensitive Task Intent</li>
+            <li><span class="share-icon">→</span> Symbolic IDs (e.g. LOCAL_AADHAAR)</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- Live Counters -->
+      <div class="metrics-row">
+        <div class="metric-box">
+          <span id="metric-sensitive-count" class="metric-num">0</span>
+          <span class="metric-name">Sensitive Fields Kept Local</span>
+        </div>
+        <div class="metric-box">
+          <span id="metric-server-calls" class="metric-num">0</span>
+          <span class="metric-name">Server API Calls (Sanitized)</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Execution Steps / Activity Feed -->
+    <section class="activity-section">
+      <div class="card-label">Activity & Observation Feed</div>
+      <div id="activity-feed" class="activity-feed">
+        <div class="empty-feed">No active execution. Start a task to observe autonomous reasoning and local execution.</div>
+      </div>
+    </section>
+  </div>
+
+  <!-- User Confirmation Modal for High-Risk Actions -->
+  <div id="confirmation-modal" class="modal-backdrop" style="display: none;">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div class="warning-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/>
+            <line x1="12" y1="9" x2="12" y2="13"/>
+            <line x1="12" y1="17" x2="12.01" y2="17"/>
+          </svg>
+        </div>
+        <div>
+          <h3 class="modal-title">Action Confirmation Required</h3>
+          <span class="modal-subtitle">High-Risk Operation Detected</span>
+        </div>
+      </div>
+
+      <div class="modal-body">
+        <p id="confirm-reason" class="confirm-reason-text">The agent is requesting to submit the application.</p>
+        
+        <div class="disclosure-box">
+          <div class="disclosure-row">
+            <span class="disclosure-label">Action:</span>
+            <span id="confirm-action-verb" class="disclosure-value font-mono">SUBMIT</span>
+          </div>
+          <div class="disclosure-row">
+            <span class="disclosure-label">Target:</span>
+            <span id="confirm-action-target" class="disclosure-value">Submit Button</span>
+          </div>
+          <div class="disclosure-row">
+            <span class="disclosure-label">Data Kept Local:</span>
+            <span id="confirm-data-local" class="disclosure-value highlight-green">LOCAL_AADHAAR (Protected)</span>
+          </div>
+          <div class="disclosure-row">
+            <span class="disclosure-label">Shared with AI:</span>
+            <span class="disclosure-value">Zero plain secrets</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button id="modal-reject-btn" class="btn btn-secondary">Decline & Stop</button>
+        <button id="modal-approve-btn" class="btn btn-primary">Approve & Execute</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Local Vault Settings Modal -->
+  <div id="vault-modal" class="modal-backdrop" style="display: none;">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div>
+          <h3 class="modal-title">Local Secret Vault</h3>
+          <span class="modal-subtitle">Managed 100% on your device</span>
+        </div>
+        <button id="close-vault-btn" class="icon-button">✕</button>
+      </div>
+
+      <div class="modal-body vault-body">
+        <p class="vault-info">
+          These credentials are used by the local executor when the reasoning model requests symbolic tokens. 
+          Values are never sent to external AI servers.
+        </p>
+
+        <div class="vault-field">
+          <label>Aadhaar Number (LOCAL_AADHAAR)</label>
+          <input type="text" id="vault-aadhaar" placeholder="4821 7392 0184">
+        </div>
+
+        <div class="vault-field">
+          <label>PAN Card (LOCAL_PAN)</label>
+          <input type="text" id="vault-pan" placeholder="ABCDE1234F">
+        </div>
+
+        <div class="vault-field">
+          <label>Full Name (LOCAL_FULL_NAME)</label>
+          <input type="text" id="vault-name" placeholder="Vishal Agrawal">
+        </div>
+
+        <div class="vault-field">
+          <label>Date of Birth (LOCAL_DOB)</label>
+          <input type="text" id="vault-dob" placeholder="15/08/2002">
+        </div>
+
+        <div class="vault-field">
+          <label>Phone Number (LOCAL_PHONE)</label>
+          <input type="text" id="vault-phone" placeholder="9876543210">
+        </div>
+
+        <div class="vault-field">
+          <label>Password (LOCAL_PASSWORD)</label>
+          <input type="password" id="vault-password" placeholder="••••••••">
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button id="save-vault-btn" class="btn btn-primary" style="width: 100%;">Save Vault Credentials</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

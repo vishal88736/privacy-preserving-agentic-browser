@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>KYC Document Verification Portal</title>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --accent: #6366f1;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --border: #334155;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Outfit', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 40px 20px;
+    }
+    .container {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      width: 100%;
+      max-width: 540px;
+      padding: 30px;
+    }
+    h1 { font-size: 22px; margin-bottom: 12px; }
+    p.desc { font-size: 14px; color: var(--muted); margin-bottom: 24px; }
+    .upload-zone {
+      border: 2px dashed #4f46e5;
+      border-radius: 12px;
+      padding: 32px;
+      text-align: center;
+      background: rgba(99, 102, 241, 0.05);
+      cursor: pointer;
+      margin-bottom: 20px;
+    }
+    .file-input { display: none; }
+    .upload-label { font-size: 14px; font-weight: 600; color: #a5b4fc; display: block; margin-top: 8px; cursor: pointer; }
+    .status-box {
+      display: none;
+      background: rgba(16, 185, 129, 0.15);
+      border: 1px solid #10b981;
+      color: #10b981;
+      padding: 12px;
+      border-radius: 8px;
+      margin-top: 14px;
+      font-size: 14px;
+      font-weight: 500;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Identity KYC Document Upload</h1>
+    <p class="desc">Upload your government-issued identity proof (Aadhaar or PAN Card PDF) for digital onboarding.</p>
+
+    <div class="upload-zone" onclick="document.getElementById('aadhaar_doc_upload').click()">
+      <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+        <polyline points="17 8 12 3 7 8"/>
+        <line x1="12" y1="3" x2="12" y2="15"/>
+      </svg>
+      <label for="aadhaar_doc_upload" class="upload-label">Select or drop your Aadhaar PDF document</label>
+      <input 
+        type="file" 
+        id="aadhaar_doc_upload" 
+        name="aadhaar_document" 
+        class="file-input" 
+        accept=".pdf"
+        onchange="document.getElementById('upload-status').style.display='block'; document.getElementById('upload-status').innerText='✓ Attached file: ' + this.files[0].name;"
+      >
+    </div>
+
+    <div id="upload-status" class="status-box"></div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SkyRoute - Flight Search & Comparison</title>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0b1120;
+      --card: #1e293b;
+      --accent: #0284c7;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --border: #334155;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Outfit', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 40px 20px;
+    }
+    .container {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      width: 100%;
+      max-width: 680px;
+      padding: 30px;
+    }
+    h1 { font-size: 24px; margin-bottom: 20px; }
+    .search-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+      margin-bottom: 16px;
+    }
+    .form-group { display: flex; flex-direction: column; gap: 6px; }
+    label { font-size: 13px; font-weight: 600; color: var(--muted); }
+    input {
+      background: #0f172a;
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-family: 'Outfit', sans-serif;
+      font-size: 14px;
+      padding: 10px 14px;
+      border-radius: 8px;
+    }
+    .btn-search {
+      width: 100%;
+      background: var(--accent);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    #flight-results {
+      margin-top: 24px;
+      display: none;
+    }
+    .flight-card {
+      background: #0f172a;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+    .airline-name { font-weight: 700; font-size: 16px; }
+    .flight-timing { font-size: 13px; color: var(--muted); }
+    .flight-price { font-size: 18px; font-weight: 700; color: #38bdf8; }
+    .btn-book {
+      background: #10b981;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      padding: 8px 14px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>✈️ SkyRoute Flight Comparison</h1>
+    <div class="search-grid">
+      <div class="form-group">
+        <label for="origin_city">Origin City (From)</label>
+        <input type="text" id="origin_city" name="origin" placeholder="e.g. Pune">
+      </div>
+      <div class="form-group">
+        <label for="dest_city">Destination City (To)</label>
+        <input type="text" id="dest_city" name="destination" placeholder="e.g. Delhi">
+      </div>
+    </div>
+    <button id="search-flights-btn" class="btn-search" onclick="document.getElementById('flight-results').style.display='block';">
+      Search Flights
+    </button>
+
+    <div id="flight-results">
+      <h3 style="margin-bottom: 12px;">Available Flights (Pune → Delhi):</h3>
+      <div class="flight-card">
+        <div>
+          <div class="airline-name">IndiGo (6E-241)</div>
+          <div class="flight-timing">06:15 AM - 08:30 AM (Non-stop)</div>
+        </div>
+        <div style="text-align: right;">
+          <div class="flight-price">₹4,299</div>
+          <button id="book-indigo" class="btn-book" onclick="alert('IndiGo Flight Selected!')">Select Cheapest</button>
+        </div>
+      </div>
+
+      <div class="flight-card">
+        <div>
+          <div class="airline-name">Air India (AI-852)</div>
+          <div class="flight-timing">11:00 AM - 01:15 PM (Non-stop)</div>
+        </div>
+        <div style="text-align: right;">
+          <div class="flight-price">₹5,150</div>
+          <button class="btn-book" onclick="alert('Air India Flight Selected!')">Select</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

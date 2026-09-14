@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>National Identity & Citizen Services Portal</title>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --accent: #2563eb;
+      --accent-hover: #1d4ed8;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --border: #334155;
+      --success: #10b981;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Outfit', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+      padding: 40px 20px;
+    }
+    .gov-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(37, 99, 235, 0.15);
+      border: 1px solid var(--accent);
+      color: #60a5fa;
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 13px;
+      font-weight: 600;
+      margin-bottom: 20px;
+    }
+    .container {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      width: 100%;
+      max-width: 580px;
+      padding: 32px;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.4);
+    }
+    h1 { font-size: 22px; font-weight: 700; margin-bottom: 8px; }
+    p.desc { font-size: 14px; color: var(--muted); margin-bottom: 24px; }
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-bottom: 18px;
+    }
+    label { font-size: 13px; font-weight: 600; color: #cbd5e1; }
+    input {
+      background: #0f172a;
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-family: 'Outfit', sans-serif;
+      font-size: 14px;
+      padding: 10px 14px;
+      border-radius: 8px;
+      outline: none;
+      transition: all 0.2s;
+    }
+    input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.25); }
+    .btn-submit {
+      width: 100%;
+      background: var(--accent);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 10px;
+      transition: background 0.2s;
+    }
+    .btn-submit:hover { background: var(--accent-hover); }
+    #submission-banner {
+      display: none;
+      margin-top: 20px;
+      background: rgba(16, 185, 129, 0.15);
+      border: 1px solid var(--success);
+      color: var(--success);
+      padding: 14px;
+      border-radius: 8px;
+      text-align: center;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <div class="gov-badge">Official Citizen Verification Portal</div>
+  <div class="container">
+    <h1>Aadhaar & Citizen Verification Form</h1>
+    <p class="desc">Please verify your national identity records for citizen social welfare benefits.</p>
+
+    <form id="aadhaar-form" onsubmit="event.preventDefault(); document.getElementById('submission-banner').style.display='block';">
+      <div class="form-group">
+        <label for="full_name">Applicant Full Name</label>
+        <input type="text" id="full_name" name="full_name" placeholder="As per official ID" required>
+      </div>
+
+      <div class="form-group">
+        <label for="aadhaar_num">12-Digit Aadhaar Number</label>
+        <input type="text" id="aadhaar_num" name="aadhaar_number" placeholder="XXXX XXXX XXXX" maxlength="14" required>
+      </div>
+
+      <div class="form-group">
+        <label for="pan_num">Permanent Account Number (PAN)</label>
+        <input type="text" id="pan_num" name="pan_number" placeholder="ABCDE1234F" maxlength="10" required>
+      </div>
+
+      <div class="form-group">
+        <label for="dob">Date of Birth</label>
+        <input type="text" id="dob" name="dob" placeholder="DD/MM/YYYY" required>
+      </div>
+
+      <div class="form-group">
+        <label for="phone">Registered Mobile Number</label>
+        <input type="tel" id="phone" name="phone" placeholder="9876543210" required>
+      </div>
+
+      <button type="submit" id="submit-btn" class="btn-submit">Submit Application</button>
+    </form>
+
+    <div id="submission-banner">
+      ✓ Application successfully submitted and verified!
+    </div>
+  </div>
+</body>
+</html>

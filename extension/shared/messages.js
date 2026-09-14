@@ -1,0 +1,35 @@
+/**
+ * Internal Chrome Extension Message Types and Factories
+ */
+
+export const MessageType = Object.freeze({
+  // Side Panel <-> Background
+  START_TASK: 'START_TASK',
+  PAUSE_TASK: 'PAUSE_TASK',
+  RESUME_TASK: 'RESUME_TASK',
+  CANCEL_TASK: 'CANCEL_TASK',
+  USER_CONFIRM_ACTION: 'USER_CONFIRM_ACTION',
+  GET_AGENT_STATUS: 'GET_AGENT_STATUS',
+  AGENT_STATUS_UPDATE: 'AGENT_STATUS_UPDATE',
+  PRIVACY_EVENT: 'PRIVACY_EVENT',
+  UPDATE_VAULT: 'UPDATE_VAULT',
+  GET_VAULT: 'GET_VAULT',
+
+  // Background <-> Content Script
+  EXTRACT_DOM: 'EXTRACT_DOM',
+  EXTRACT_DOM_RESPONSE: 'EXTRACT_DOM_RESPONSE',
+  EXECUTE_ACTION: 'EXECUTE_ACTION',
+  EXECUTE_ACTION_RESPONSE: 'EXECUTE_ACTION_RESPONSE',
+  HIGHLIGHT_ELEMENT: 'HIGHLIGHT_ELEMENT',
+  SHOW_VISUAL_CURSOR: 'SHOW_VISUAL_CURSOR',
+  CLEAR_OVERLAYS: 'CLEAR_OVERLAYS',
+  CHECK_PAGE_STABILITY: 'CHECK_PAGE_STABILITY'
+});
+
+export function createMessage(type, payload = {}) {
+  return {
+    type,
+    payload,
+    timestamp: Date.now()
+  };
+}
