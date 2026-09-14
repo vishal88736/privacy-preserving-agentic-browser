@@ -80,6 +80,40 @@ export class GPTOSSClient {
       };
     }
 
+    // Task Type 0: Direct Navigation ("open youtube", "go to ...")
+    if (lowerTask.startsWith('open') || lowerTask.startsWith('go to') || lowerTask.startsWith('navigate to')) {
+      const alreadyNavigated = taskHistory.some(h => h.action?.action === ActionType.NAVIGATE);
+      if (alreadyNavigated && !lowerTask.includes(' and ') && !lowerTask.includes('search') && !lowerTask.includes('then')) {
+        return {
+          thought: 'Target website opened successfully. Task goal fulfilled.',
+          action: {
+            action: ActionType.DONE,
+            risk: RiskLevel.LOW,
+            requires_confirmation: false
+          },
+          isTerminal: true
+        };
+      }
+
+      if (taskHistory.length === 0) {
+        let url = 'https://www.google.com';
+        if (lowerTask.includes('youtube')) url = 'https://www.youtube.com';
+        else if (lowerTask.includes('localhost') || lowerTask.includes('benchmark')) url = 'http://localhost:5000';
+        else if (lowerTask.includes('github')) url = 'https://www.github.com';
+
+        return {
+          thought: `Opening target website: ${url}`,
+          action: {
+            action: ActionType.NAVIGATE,
+            target: { url },
+            risk: RiskLevel.LOW,
+            requires_confirmation: false
+          },
+          isTerminal: false
+        };
+      }
+    }
+
     // Task Type 1: Document Upload
     if (lowerTask.includes('upload') || lowerTask.includes('document')) {
       const uploadField = elements.find(el => el.dom?.type === 'file' || el.interaction?.uploadable);

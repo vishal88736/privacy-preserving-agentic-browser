@@ -88,6 +88,50 @@ export class AgentController {
         break;
       }
 
+      // Check current tab URL and handle restricted pages / navigation
+      let currentTab = null;
+      try {
+        currentTab = await chrome.tabs.get(task.tabId);
+      } catch (e) {
+        console.warn('[AgentController] Could not get tab info:', e);
+      }
+
+      const isRestrictedUrl = !currentTab?.url || (
+        currentTab.url.startsWith('chrome://') ||
+        currentTab.url.startsWith('chrome-extension://') ||
+        currentTab.url.startsWith('edge://') ||
+        currentTab.url === 'about:blank' ||
+        currentTab.url.startsWith('view-source:')
+      );
+
+      // If user asks to open/navigate to a website, or is currently on a blank/restricted page:
+      const navUrl = this._extractNavigationUrl(task.prompt, isRestrictedUrl);
+      if (navUrl && (isRestrictedUrl || task.currentStep === 0)) {
+        taskManager.updateState(AgentState.EXECUTING);
+        this.notify('STATE_CHANGED', { state: AgentState.EXECUTING });
+        await defaultActionExecutor.execute(task.tabId, {
+          action: ActionType.NAVIGATE,
+          target: { url: navUrl }
+        });
+        taskManager.recordStep({
+          thought: `Navigating to ${navUrl}`,
+          action: { action: ActionType.NAVIGATE, target: { url: navUrl }, risk: RiskLevel.LOW },
+          success: true
+        });
+        this.notify('STEP_COMPLETED', {
+          stepNumber: task.currentStep,
+          thought: `Navigating to ${navUrl}`,
+          action: { action: ActionType.NAVIGATE, target: { url: navUrl } },
+          success: true
+        });
+        await this.sleep(1000);
+        continue;
+      }
+
+      if (isRestrictedUrl) {
+        throw new Error('Chrome does not permit extensions on internal chrome:// pages. Please open a website or test portal (e.g. http://localhost:5000).');
+      }
+
       // STEP 1: OBSERVE
       taskManager.updateState(AgentState.OBSERVING);
       this.notify('STATE_CHANGED', { state: AgentState.OBSERVING, step: task.currentStep + 1 });
@@ -98,7 +142,7 @@ export class AgentController {
       ]);
 
       if (!domResponse?.success) {
-        throw new Error(`Failed to extract DOM from tab: ${domResponse?.error || 'Unknown error'}`);
+        throw new Error(`Failed to observe tab: ${domResponse?.error || 'Target page not responding'}. If on a new tab, navigate to a website first.`);
       }
 
       const rawDOM = domResponse.data;
@@ -304,6 +348,70 @@ export class AgentController {
         }
       });
     });
+  }
+
+  _extractNavigationUrl(prompt, isRestrictedUrl = false) {
+    if (!prompt || typeof prompt !== 'string') return null;
+    const text = prompt.trim().toLowerCase();
+
+    // Direct URLs
+    if (text.startsWith('http://') || text.startsWith('https://')) {
+      return text;
+    }
+
+    // Direct domain names or local addresses
+    if (/^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:\/.*)?$/.test(text)) {
+      return `https://${text}`;
+    }
+    if (/^localhost:[0-9]+(?:\/.*)?$/.test(text)) {
+      return `http://${text}`;
+    }
+
+    // Explicit navigation verbs: open, navigate to, go to, visit, launch, browse to
+    const navMatch = text.match(/(?:open|navigate to|go to|visit|launch|browse to)\s+([^\s]+)/i);
+    if (navMatch) {
+      let target = navMatch[1].toLowerCase().replace(/['"]/g, '');
+      if (target === 'youtube' || target === 'yt') return 'https://www.youtube.com';
+      if (target === 'google') return 'https://www.google.com';
+      if (target === 'github') return 'https://www.github.com';
+      if (target === 'wikipedia') return 'https://www.wikipedia.org';
+      if (target.startsWith('http://') || target.startsWith('https://')) return target;
+      if (target.startsWith('localhost:')) return `http://${target}`;
+      if (target.includes('.')) return `https://${target}`;
+      
+      // Portal keywords
+      if (target.includes('aadhaar')) return 'http://localhost:5000/government-aadhaar.html';
+      if (target.includes('flight')) return 'http://localhost:5000/flight-search.html';
+      if (target.includes('upload') || target.includes('document')) return 'http://localhost:5000/document-upload.html';
+      if (target.includes('injection') || target.includes('prompt')) return 'http://localhost:5000/prompt-injection.html';
+
+      return `https://www.google.com/search?q=${encodeURIComponent(target)}`;
+    }
+
+    // Standalone words
+    if (text === 'youtube' || text === 'yt') return 'https://www.youtube.com';
+    if (text === 'google') return 'https://www.google.com';
+    if (text === 'github') return 'https://www.github.com';
+
+    // If currently on a blank / restricted tab (e.g. chrome://newtab), auto-route to evaluation portals:
+    if (isRestrictedUrl) {
+      if (text.includes('aadhaar') || text.includes('pan') || text.includes('profile')) {
+        return 'http://localhost:5000/government-aadhaar.html';
+      }
+      if (text.includes('flight') || text.includes('delhi') || text.includes('pune') || text.includes('ticket')) {
+        return 'http://localhost:5000/flight-search.html';
+      }
+      if (text.includes('upload') || text.includes('pdf') || text.includes('document')) {
+        return 'http://localhost:5000/document-upload.html';
+      }
+      if (text.includes('injection') || text.includes('jailbreak') || text.includes('ignore')) {
+        return 'http://localhost:5000/prompt-injection.html';
+      }
+      if (text.includes('youtube')) return 'https://www.youtube.com';
+      if (text.includes('google')) return 'https://www.google.com';
+    }
+
+    return null;
   }
 
   sleep(ms) {

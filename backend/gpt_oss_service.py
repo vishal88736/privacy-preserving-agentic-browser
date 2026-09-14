@@ -41,6 +41,34 @@ class GPTOSSService:
                 "is_terminal": True
             }
 
+        # Scenario 0: Navigation / Open Website
+        if any(lower_task.startswith(w) for w in ["open", "go to", "navigate to"]):
+            already_navigated = any(h.get("action", {}).get("action") == "NAVIGATE" for h in task_history)
+            if already_navigated and not any(w in lower_task for w in ["search", "find", "click", "then", "and"]):
+                return {
+                    "thought": "Target website loaded successfully. Navigation task completed.",
+                    "action": {
+                        "action": "DONE",
+                        "risk": "LOW",
+                        "requires_confirmation": False
+                    },
+                    "is_terminal": True
+                }
+            if not task_history:
+                target_url = "https://www.youtube.com" if "youtube" in lower_task else \
+                             ("https://www.google.com" if "google" in lower_task else \
+                             ("http://localhost:5000" if "localhost" in lower_task else "https://www.google.com"))
+                return {
+                    "thought": f"Opening target website: {target_url}",
+                    "action": {
+                        "action": "NAVIGATE",
+                        "target": { "url": target_url },
+                        "risk": "LOW",
+                        "requires_confirmation": False
+                    },
+                    "is_terminal": False
+                }
+
         # Scenario 1: Document Upload
         if any(w in lower_task for w in ["upload", "document", "pdf"]):
             upload_el = next((e for e in elements if e.get("dom", {}).get("type") == "file" or e.get("interaction", {}).get("uploadable")), None)

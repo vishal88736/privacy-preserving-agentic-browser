@@ -84,7 +84,10 @@ class SidePanelApp {
 
   async getActiveTabId() {
     if (typeof chrome !== 'undefined' && chrome.tabs?.query) {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      let [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab) {
+        [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      }
       return tab?.id || null;
     }
     return 1;

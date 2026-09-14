@@ -28,6 +28,44 @@ export class ActionExecutor {
       return { success: true, isTerminal: true };
     }
 
+    if (action.action === ActionType.NAVIGATE) {
+      let targetUrl = action.target?.url || action.value;
+      if (!targetUrl) {
+        throw new Error('NAVIGATE action requires a target URL');
+      }
+      if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
+        targetUrl = 'https://' + targetUrl;
+      }
+      await chrome.tabs.update(tabId, { url: targetUrl });
+
+      // Wait for navigation and document load
+      await new Promise((resolve) => {
+        let timer = null;
+        const listener = (updatedTabId, changeInfo) => {
+          if (updatedTabId === tabId && changeInfo.status === 'complete') {
+            if (chrome.tabs?.onUpdated?.removeListener) {
+              chrome.tabs.onUpdated.removeListener(listener);
+            }
+            clearTimeout(timer);
+            resolve();
+          }
+        };
+        if (chrome.tabs?.onUpdated?.addListener) {
+          chrome.tabs.onUpdated.addListener(listener);
+        }
+        timer = setTimeout(() => {
+          if (chrome.tabs?.onUpdated?.removeListener) {
+            chrome.tabs.onUpdated.removeListener(listener);
+          }
+          resolve();
+        }, 3000);
+      });
+
+      // Brief delay to allow content script initialization on the new page
+      await new Promise(r => setTimeout(r, 600));
+      return { success: true, navigatedTo: targetUrl };
+    }
+
     // Resolve local secret if symbolic source is provided
     let resolvedValue = null;
     if (action.value_source || action.value) {
