@@ -4,15 +4,80 @@ Interprets unified observation, performs goal decomposition, and produces
 structured JSON action plans with symbolic value references.
 """
 
+import json
+import re
 from typing import Dict, Any, List
+import requests
+from config import settings
 
 class GPTOSSService:
     def __init__(self):
         pass
 
+    def _call_live_model(self, task: str, fused_observation: Dict[str, Any], task_history: List[Dict[str, Any]]) -> Dict[str, Any]:
+        if not settings.API_KEY:
+            return None
+
+        try:
+            system_prompt = """You are PrivAgent, an autonomous privacy-preserving browser agent.
+Given the sanitized webpage observation and the user's task, decide the next single action to take.
+Output ONLY a valid JSON object matching this schema:
+{
+  "thought": "Brief explanation of observation and next step",
+  "action": {
+    "action": "CLICK" | "TYPE" | "NAVIGATE" | "SUBMIT" | "UPLOAD" | "DONE" | "WAIT",
+    "target": { "element_id": "...", "label": "..." },
+    "value": "...",
+    "value_source": "LOCAL_AADHAAR" | "LOCAL_PAN" | "LOCAL_DOCUMENT" | "LOCAL_PASSWORD",
+    "risk": "LOW" | "MEDIUM" | "HIGH",
+    "requires_confirmation": boolean
+  },
+  "is_terminal": boolean
+}
+Do not output markdown fences or explanatory text. Never output plaintext Aadhaar, PAN, passwords or documents."""
+
+            user_msg = {
+                "task": task,
+                "observation": fused_observation,
+                "history": task_history[-5:] if task_history else []
+            }
+
+            headers = {
+                "Authorization": f"Bearer {settings.API_KEY}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": settings.REASONING_MODEL,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(user_msg)}
+                ],
+                "temperature": 0.2,
+                "max_tokens": 1000
+            }
+
+            resp = requests.post(f"{settings.AI_BASE_URL}/chat/completions", headers=headers, json=payload, timeout=12)
+            if resp.status_code == 200:
+                content = resp.json()["choices"][0]["message"]["content"].strip()
+                if content.startswith("```"):
+                    content = re.sub(r"^```(?:json)?\n?", "", content)
+                    content = re.sub(r"\n?```$", "", content)
+                parsed = json.loads(content)
+                if isinstance(parsed, dict) and "action" in parsed:
+                    return parsed
+        except Exception as e:
+            print(f"[GPTOSS] Live model notice ({e}), falling back to deterministic planner")
+            return None
+        return None
+
     def plan_step(self, task: str, fused_observation: Dict[str, Any], task_history: List[Dict[str, Any]]) -> Dict[str, Any]:
         lower_task = task.lower()
         elements = fused_observation.get("elements", [])
+
+        # Try live model first if API key is configured
+        live_plan = self._call_live_model(task, fused_observation, task_history)
+        if live_plan:
+            return live_plan
 
         # Check prompt injection heuristic in page content
         for el in elements:
