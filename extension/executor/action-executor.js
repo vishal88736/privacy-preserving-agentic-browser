@@ -24,6 +24,10 @@ export class ActionExecutor {
       throw new Error('ActionExecutor requires a valid target tabId');
     }
 
+    if (action.action === ActionType.DONE) {
+      return { success: true, isTerminal: true };
+    }
+
     // Resolve local secret if symbolic source is provided
     let resolvedValue = null;
     if (action.value_source || action.value) {
@@ -35,6 +39,8 @@ export class ActionExecutor {
       target: action.target,
       resolvedValue,
       coordinates: action.target?.coordinates,
+      deltaX: action.deltaX || action.target?.deltaX || 0,
+      deltaY: action.deltaY || action.target?.deltaY || 300,
       timestamp: Date.now()
     };
 
@@ -43,11 +49,36 @@ export class ActionExecutor {
       chrome.tabs.sendMessage(
         tabId,
         { type: MessageType.EXECUTE_ACTION, payload },
-        (response) => {
+        async (response) => {
           if (chrome.runtime.lastError) {
+            const errMsg = chrome.runtime.lastError.message;
+            // Resilient auto-injection if tab existed prior to extension reload
+            if (errMsg.includes('Could not establish connection') && typeof chrome !== 'undefined' && chrome.scripting) {
+              try {
+                await chrome.scripting.executeScript({
+                  target: { tabId },
+                  files: ['content/content.js']
+                });
+                chrome.tabs.sendMessage(
+                  tabId,
+                  { type: MessageType.EXECUTE_ACTION, payload },
+                  (retryRes) => {
+                    if (chrome.runtime.lastError) {
+                      resolve({ success: false, error: chrome.runtime.lastError.message });
+                    } else {
+                      resolve(retryRes || { success: true });
+                    }
+                  }
+                );
+                return;
+              } catch (injectErr) {
+                resolve({ success: false, error: injectErr.message });
+                return;
+              }
+            }
             resolve({
               success: false,
-              error: chrome.runtime.lastError.message
+              error: errMsg
             });
           } else {
             resolve(response || { success: true });

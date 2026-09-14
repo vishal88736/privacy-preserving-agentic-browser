@@ -276,9 +276,29 @@ export class AgentController {
 
   async _extractDOM(tabId) {
     return new Promise((resolve) => {
-      chrome.tabs.sendMessage(tabId, { type: MessageType.EXTRACT_DOM }, (response) => {
+      chrome.tabs.sendMessage(tabId, { type: MessageType.EXTRACT_DOM }, async (response) => {
         if (chrome.runtime.lastError) {
-          resolve({ success: false, error: chrome.runtime.lastError.message });
+          const errMsg = chrome.runtime.lastError.message;
+          if (errMsg.includes('Could not establish connection') && typeof chrome !== 'undefined' && chrome.scripting) {
+            try {
+              await chrome.scripting.executeScript({
+                target: { tabId },
+                files: ['content/content.js']
+              });
+              chrome.tabs.sendMessage(tabId, { type: MessageType.EXTRACT_DOM }, (retryRes) => {
+                if (chrome.runtime.lastError) {
+                  resolve({ success: false, error: chrome.runtime.lastError.message });
+                } else {
+                  resolve(retryRes || { success: false, error: 'Empty response' });
+                }
+              });
+              return;
+            } catch (injectErr) {
+              resolve({ success: false, error: injectErr.message });
+              return;
+            }
+          }
+          resolve({ success: false, error: errMsg });
         } else {
           resolve(response || { success: false, error: 'Empty response' });
         }
