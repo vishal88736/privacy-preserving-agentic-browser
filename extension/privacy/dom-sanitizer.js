@@ -28,13 +28,13 @@ export class DOMSanitizer {
 
       // 1. Check structural/attribute sensitivity
       const secretCheck = this.secretDetector.classifyElement({
-        type: el.type,
-        name: el.name,
-        id: el.id,
-        placeholder: el.placeholder,
-        label: el.label,
-        ariaLabel: el.ariaLabel,
-        autocomplete: el.autocomplete
+        type: el.type || '',
+        name: el.name || '',
+        id: el.id || '',
+        placeholder: el.placeholder || '',
+        label: el.label || '',
+        ariaLabel: el.ariaLabel || '',
+        autocomplete: el.autocomplete || ''
       });
 
       // 2. Check value-based PII if value exists
@@ -55,7 +55,7 @@ export class DOMSanitizer {
       } else {
         sanitized.sensitive = false;
         // Also scrub any unexpected values from generic inputs to avoid accidental leakage
-        if (el.tag === 'input' && ['text', 'search', 'email', 'tel', 'number'].includes(el.type)) {
+        if (el.tag === 'input' && ['text', 'search', 'email', 'tel', 'number'].includes(el.type || '')) {
           // If value is present but wasn't flagged as strict PII, check if it looks like a long string or potential leak
           if (el.value && el.value.length > 20) {
             sanitized.value = '[NON_SENSITIVE_TEXT]';

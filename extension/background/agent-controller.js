@@ -367,6 +367,17 @@ export class AgentController {
       return `http://${text}`;
     }
 
+    // Media Playback verbs: play, watch, listen
+    if (text.startsWith('play ') || text.startsWith('watch ') || text.startsWith('listen to ') || text.startsWith('listen ')) {
+      let query = text.replace(/^(?:play|watch|listen to|listen)\s+/i, '')
+                      .replace(/\s+on\s+youtube/i, '')
+                      .trim();
+      if (query) {
+        return `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
+      }
+      return 'https://www.youtube.com';
+    }
+
     // Explicit navigation verbs: open, navigate to, go to, visit, launch, browse to
     const navMatch = text.match(/(?:open|navigate to|go to|visit|launch|browse to)\s+([^\s]+)/i);
     if (navMatch) {
@@ -407,7 +418,9 @@ export class AgentController {
       if (text.includes('injection') || text.includes('jailbreak') || text.includes('ignore')) {
         return 'http://localhost:5000/prompt-injection.html';
       }
-      if (text.includes('youtube')) return 'https://www.youtube.com';
+      if (text.includes('song') || text.includes('music') || text.includes('video') || text.includes('youtube')) {
+        return 'https://www.youtube.com';
+      }
       if (text.includes('google')) return 'https://www.google.com';
     }
 

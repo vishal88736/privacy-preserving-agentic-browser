@@ -100,3 +100,40 @@ test('PolicyEngine - Blocks outbound payloads containing unredacted secrets', ()
     'Must throw OutboundPolicyViolationError when raw secret is leaked'
   );
 });
+
+test('DOMSanitizer - Handles elements with null attributes gracefully without toLowerCase errors', () => {
+  const sanitizer = new DOMSanitizer();
+
+  const elementsWithNulls = [
+    {
+      id: 'div_1',
+      tag: 'div',
+      type: null,
+      name: null,
+      label: null,
+      placeholder: null,
+      value: '',
+      autocomplete: null,
+      ariaLabel: null,
+      role: null
+    },
+    {
+      id: 'input_search',
+      tag: 'input',
+      type: null,
+      name: 'search_query',
+      label: 'Search',
+      placeholder: 'Search YouTube',
+      value: '',
+      autocomplete: null,
+      ariaLabel: 'Search',
+      role: null
+    }
+  ];
+
+  assert.doesNotThrow(() => {
+    const result = sanitizer.sanitizeElements(elementsWithNulls);
+    assert.strictEqual(result.sanitizedElements.length, 2);
+  }, 'Must not throw TypeError: Cannot read properties of null (reading toLowerCase)');
+});
+

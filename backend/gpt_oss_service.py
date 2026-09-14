@@ -202,6 +202,83 @@ class GPTOSSService:
                     "is_terminal": False
                 }
 
+        # Scenario 4: Media Playback / YouTube ("play ...", "watch ...", "listen ...", "song ...")
+        if any(w in lower_task for w in ["play", "song", "video", "youtube", "music", "watch", "listen"]):
+            # Check if video was already clicked
+            already_clicked_video = any(h.get("action", {}).get("action") == "CLICK" and
+                                       any(w in (h.get("action", {}).get("target", {}).get("label") or "").lower() for w in ["video", "play", "song"])
+                                       for h in task_history)
+            if already_clicked_video:
+                return {
+                    "thought": "Selected video is playing. Task completed.",
+                    "action": {
+                        "action": "DONE",
+                        "risk": "LOW",
+                        "requires_confirmation": False
+                    },
+                    "is_terminal": True
+                }
+
+            # If there's a video link on screen (e.g. on search results), click to play!
+            video_link = next((e for e in elements if "/watch" in (e.get("dom", {}).get("href") or "") or
+                               "video-title" in (e.get("dom", {}).get("id") or "") or
+                               any(w in (e.get("dom", {}).get("label") or "").lower() for w in ["video", "watch"])), None)
+
+            if video_link:
+                v_label = video_link.get("dom", {}).get("label") or "Play Video"
+                return {
+                    "thought": f"Identified top video result '{v_label}'. Playing video.",
+                    "action": {
+                        "action": "CLICK",
+                        "target": { "element_id": video_link.get("id"), "label": v_label },
+                        "risk": "LOW",
+                        "requires_confirmation": False
+                    },
+                    "is_terminal": False
+                }
+
+            # Search elements
+            search_input = next((e for e in elements if e.get("dom", {}).get("tag") == "input" and
+                                (any(w in (e.get("dom", {}).get("placeholder") or "").lower() for w in ["search", "find"]) or
+                                 e.get("dom", {}).get("name") == "search_query" or
+                                 e.get("dom", {}).get("id") == "search")), None)
+            search_btn = next((e for e in elements if "search" in (e.get("dom", {}).get("label") or "").lower() or
+                               e.get("dom", {}).get("id") == "search-icon-legacy"), None)
+
+            clean_query = lower_task
+            for w in ["play", "watch", "listen to", "search for", "on youtube", "song of", "song by"]:
+                clean_query = clean_query.replace(w, "")
+            clean_query = clean_query.strip() or "karan aujla popular song"
+
+            typed_search = any(h.get("action", {}).get("action") == "TYPE" and
+                              h.get("action", {}).get("target", {}).get("element_id") == getattr(search_input, "id", None)
+                              for h in task_history)
+
+            if search_input and not typed_search:
+                return {
+                    "thought": f"Entering search query: '{clean_query}' into search bar.",
+                    "action": {
+                        "action": "TYPE",
+                        "target": { "element_id": search_input.get("id"), "label": "Search" },
+                        "value": clean_query,
+                        "risk": "LOW",
+                        "requires_confirmation": False
+                    },
+                    "is_terminal": False
+                }
+
+            if search_btn and typed_search and not any(h.get("action", {}).get("target", {}).get("element_id") == search_btn.get("id") for h in task_history):
+                return {
+                    "thought": "Submitting search query to fetch video results.",
+                    "action": {
+                        "action": "CLICK",
+                        "target": { "element_id": search_btn.get("id"), "label": "Search" },
+                        "risk": "LOW",
+                        "requires_confirmation": False
+                    },
+                    "is_terminal": False
+                }
+
         # Default completion
         return {
             "thought": "All tasks steps completed.",

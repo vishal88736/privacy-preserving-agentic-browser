@@ -132,7 +132,8 @@ export class PIIDetector {
 
     // Check Phone (specifically if context indicates mobile/phone or 10-digit Indian pattern)
     const phoneMatch = trimmed.match(this.phoneRegex);
-    if (phoneMatch && (contextHint.toLowerCase().includes('phone') || contextHint.toLowerCase().includes('mobile') || contextHint.toLowerCase().includes('tel') || trimmed.startsWith('+91'))) {
+    const safeHint = (contextHint || '').toLowerCase();
+    if (phoneMatch && (safeHint.includes('phone') || safeHint.includes('mobile') || safeHint.includes('tel') || trimmed.startsWith('+91'))) {
       return {
         category: PIICategory.PHONE,
         source: SymbolicSecretSource.LOCAL_PHONE,

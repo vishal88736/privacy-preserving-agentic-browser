@@ -29,19 +29,17 @@ export class SecretDetector {
    * Evaluates an element's structural attributes to determine if it is a sensitive field.
    * @param {Object} elementMetadata - Attributes like { type, name, id, placeholder, label, ariaLabel, autocomplete }
    */
-  classifyElement(elementMetadata) {
-    const {
-      type = '',
-      name = '',
-      id = '',
-      placeholder = '',
-      label = '',
-      ariaLabel = '',
-      autocomplete = ''
-    } = elementMetadata;
+  classifyElement(elementMetadata = {}) {
+    const type = (elementMetadata?.type || '').toLowerCase();
+    const name = (elementMetadata?.name || '').toLowerCase();
+    const id = (elementMetadata?.id || '').toLowerCase();
+    const placeholder = (elementMetadata?.placeholder || '').toLowerCase();
+    const label = (elementMetadata?.label || '').toLowerCase();
+    const ariaLabel = (elementMetadata?.ariaLabel || '').toLowerCase();
+    const autoLower = (elementMetadata?.autocomplete || '').toLowerCase();
 
     // 1. Definite password type
-    if (type.toLowerCase() === 'password') {
+    if (type === 'password') {
       return {
         isSensitive: true,
         category: PIICategory.PASSWORD,
@@ -51,7 +49,6 @@ export class SecretDetector {
     }
 
     // 2. Autocomplete attribute hints
-    const autoLower = autocomplete.toLowerCase();
     if (autoLower.includes('current-password') || autoLower.includes('new-password')) {
       return {
         isSensitive: true,
@@ -78,7 +75,7 @@ export class SecretDetector {
     }
 
     // 3. File upload fields for identity documents
-    if (type.toLowerCase() === 'file') {
+    if (type === 'file') {
       const combinedDocText = `${name} ${id} ${placeholder} ${label} ${ariaLabel}`;
       if (/aadhaar|pan|id|identity|passport|document|kyc/i.test(combinedDocText)) {
         return {

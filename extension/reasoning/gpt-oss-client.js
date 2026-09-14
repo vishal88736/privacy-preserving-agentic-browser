@@ -238,6 +238,84 @@ export class GPTOSSClient {
       }
     }
 
+    // Task Type 4: Media Playback / YouTube ("play ...", "watch ...", "listen ...", "song ...")
+    if (lowerTask.includes('play') || lowerTask.includes('song') || lowerTask.includes('video') || lowerTask.includes('youtube') || lowerTask.includes('music')) {
+      const alreadyClickedVideo = taskHistory.some(h => h.action?.action === ActionType.CLICK &&
+        ((h.action?.target?.label || '').toLowerCase().includes('video') ||
+         (h.action?.target?.label || '').toLowerCase().includes('play') ||
+         (h.action?.target?.label || '').toLowerCase().includes('song') ||
+         (h.action?.target?.url || '').includes('/watch')));
+
+      if (alreadyClickedVideo) {
+        return {
+          thought: 'Selected video is playing. Task goal fulfilled.',
+          action: {
+            action: ActionType.DONE,
+            risk: RiskLevel.LOW,
+            requires_confirmation: false
+          },
+          isTerminal: true
+        };
+      }
+
+      // Check if video link is present on page
+      const videoLink = elements.find(el => (el.dom?.href && el.dom.href.includes('/watch')) ||
+        (el.dom?.id && el.dom.id.includes('video-title')) ||
+        /video|song|watch/i.test(el.dom?.label || ''));
+
+      if (videoLink) {
+        const vLabel = videoLink.dom?.label || 'Play Video';
+        return {
+          thought: `Found video result "${vLabel}". Playing video.`,
+          action: {
+            action: ActionType.CLICK,
+            target: { element_id: videoLink.id, label: vLabel },
+            risk: RiskLevel.LOW,
+            requires_confirmation: false
+          },
+          isTerminal: false
+        };
+      }
+
+      const searchInput = elements.find(el => el.dom?.tag === 'input' && (/search|find/i.test(el.dom?.placeholder || '') || el.dom?.name === 'search_query' || el.dom?.id === 'search'));
+      const searchBtn = elements.find(el => /search/i.test(el.dom?.label || '') || el.dom?.id === 'search-icon-legacy');
+
+      let cleanQuery = lowerTask;
+      for (const w of ['play', 'watch', 'listen to', 'search for', 'on youtube', 'song of', 'song by']) {
+        cleanQuery = cleanQuery.replace(w, '');
+      }
+      cleanQuery = cleanQuery.trim() || 'karan aujla popular song';
+
+      const typedSearch = taskHistory.some(h => h.action?.action === ActionType.TYPE && h.action?.target?.element_id === searchInput?.id);
+
+      if (searchInput && !typedSearch) {
+        return {
+          thought: `Entering search query "${cleanQuery}" into search field.`,
+          action: {
+            action: ActionType.TYPE,
+            target: { element_id: searchInput.id, label: 'Search' },
+            value: cleanQuery,
+            risk: RiskLevel.LOW,
+            requires_confirmation: false
+          },
+          isTerminal: false
+        };
+      }
+
+      if (searchBtn && typedSearch && !taskHistory.some(h => h.action?.target?.element_id === searchBtn.id)) {
+        return {
+          thought: 'Submitting search query to display video results.',
+          action: {
+            action: ActionType.CLICK,
+            target: { element_id: searchBtn.id, label: 'Search' },
+            risk: RiskLevel.LOW,
+            requires_confirmation: false
+          },
+          isTerminal: false
+        };
+      }
+    }
+
     // Default terminal state
     return {
       thought: 'No additional steps required or task completed.',
