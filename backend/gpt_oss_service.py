@@ -315,8 +315,9 @@ Do not output markdown fences or explanatory text. Never output plaintext Aadhaa
                 clean_query = clean_query.replace(w, "")
             clean_query = clean_query.strip() or "karan aujla popular song"
 
+            search_input_id = search_input.get("id") if search_input else None
             typed_search = any(h.get("action", {}).get("action") == "TYPE" and
-                              h.get("action", {}).get("target", {}).get("element_id") == getattr(search_input, "id", None)
+                              h.get("action", {}).get("target", {}).get("element_id") == search_input_id
                               for h in task_history)
 
             if search_input and not typed_search:

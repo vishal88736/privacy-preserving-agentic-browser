@@ -4,7 +4,7 @@ import { GPTOSSClient } from '../../extension/reasoning/gpt-oss-client.js';
 import { ActionType, RiskLevel, SymbolicSecretSource } from '../../extension/shared/constants.js';
 
 test('Integration - Multi-step Aadhaar form filling scenario', async () => {
-  const client = new GPTOSSClient('http://localhost:8000');
+  const client = new GPTOSSClient('http://127.0.0.1:9999');
 
   // Step 1: Provide observation with Aadhaar, PAN, Name, DOB, Phone and Submit button
   const fusedObservation = {
@@ -56,7 +56,7 @@ test('Integration - Multi-step Aadhaar form filling scenario', async () => {
 });
 
 test('Integration - Document Upload scenario', async () => {
-  const client = new GPTOSSClient('http://localhost:8000');
+  const client = new GPTOSSClient('http://127.0.0.1:9999');
   const fusedObservation = {
     elements: [
       { id: 'el_upload', dom: { tag: 'input', type: 'file', label: 'Upload Identity PDF' }, interaction: { uploadable: true } }
@@ -71,7 +71,7 @@ test('Integration - Document Upload scenario', async () => {
 });
 
 test('Integration - Flight Search comparison scenario', async () => {
-  const client = new GPTOSSClient('http://localhost:8000');
+  const client = new GPTOSSClient('http://127.0.0.1:9999');
   const fusedObservation = {
     elements: [
       { id: 'el_from', dom: { tag: 'input', label: 'Origin City (From)' } },

@@ -64,8 +64,10 @@ def process_vision(req: VisionRequest):
         )
         return {"status": "success", "visual_observation": result}
     except ValueError as val_err:
+        import traceback; traceback.print_exc()
         raise HTTPException(status_code=400, detail=str(val_err))
     except Exception as e:
+        import traceback; traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"VLM processing error: {str(e)}")
 
 @app.post("/reason")
@@ -78,6 +80,7 @@ def process_reason(req: ReasonRequest):
         )
         return plan
     except Exception as e:
+        import traceback; traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Reasoning error: {str(e)}")
 
 if __name__ == "__main__":
