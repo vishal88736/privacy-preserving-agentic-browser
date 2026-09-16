@@ -8,43 +8,44 @@ import { MessageType } from '../shared/messages.js';
 import { AgentState } from '../shared/constants.js';
 
 const FRIENDLY_STATE = {
-  [AgentState.IDLE]: { label: 'Idle', detail: 'Tell me what to do on this page.', band: 'idle', dot: 'idle' },
-  [AgentState.UNDERSTANDING_TASK]: { label: 'Understanding', detail: 'Breaking down your goal…', band: 'active', dot: 'active' },
-  [AgentState.OBSERVING]: { label: 'Observing', detail: 'Reading page structure and layout…', band: 'active', dot: 'active' },
-  [AgentState.SANITIZING]: { label: 'Protecting', detail: 'Redacting sensitive fields locally…', band: 'active', dot: 'active' },
-  [AgentState.VISUAL_ANALYSIS]: { label: 'Analyzing view', detail: 'Interpreting the visual layout…', band: 'active', dot: 'active' },
-  [AgentState.PLANNING]: { label: 'Planning', detail: 'Deciding the next safe action…', band: 'active', dot: 'active' },
-  [AgentState.REASONING]: { label: 'Planning', detail: 'Deciding the next safe action…', band: 'active', dot: 'active' },
-  [AgentState.VALIDATING_ACTION]: { label: 'Checking safety', detail: 'Validating action and privacy…', band: 'active', dot: 'active' },
-  [AgentState.EXECUTING]: { label: 'Acting', detail: 'Performing the action in the page…', band: 'active', dot: 'active' },
-  [AgentState.VERIFYING]: { label: 'Verifying', detail: 'Checking the result…', band: 'active', dot: 'active' },
-  [AgentState.WAITING_FOR_USER]: { label: 'Needs approval', detail: 'Waiting for your decision…', band: 'waiting', dot: 'waiting' },
-  [AgentState.COMPLETED]: { label: 'Completed', detail: 'Goal reached.', band: 'done', dot: 'done' },
-  [AgentState.FAILED]: { label: 'Attention needed', detail: 'Something went wrong.', band: 'error', dot: 'error' },
-  [AgentState.CANCELLED]: { label: 'Stopped', detail: 'You took back control.', band: 'idle', dot: 'idle' }
+  [AgentState.IDLE]: { label: 'Ready', detail: 'Tell me what to do on this page.', band: 'idle', dot: 'idle' },
+  [AgentState.UNDERSTANDING_TASK]: { label: 'Understanding', detail: 'Decomposing user goal & constraints…', band: 'active', dot: 'active' },
+  [AgentState.OBSERVING]: { label: 'Observing', detail: 'Scanning page elements and DOM structure…', band: 'active', dot: 'active' },
+  [AgentState.SANITIZING]: { label: 'Protecting', detail: 'Sanitizing PII & masking sensitive inputs…', band: 'active', dot: 'active' },
+  [AgentState.VISUAL_ANALYSIS]: { label: 'Analyzing view', detail: 'Grounding interactive elements visually…', band: 'active', dot: 'active' },
+  [AgentState.PLANNING]: { label: 'Planning', detail: 'Synthesizing next optimal action…', band: 'active', dot: 'active' },
+  [AgentState.REASONING]: { label: 'Planning', detail: 'Formulating action parameters…', band: 'active', dot: 'active' },
+  [AgentState.VALIDATING_ACTION]: { label: 'Checking safety', detail: 'Evaluating risk gate & privacy policy…', band: 'active', dot: 'active' },
+  [AgentState.EXECUTING]: { label: 'Acting', detail: 'Executing local action on page…', band: 'active', dot: 'active' },
+  [AgentState.VERIFYING]: { label: 'Verifying', detail: 'Confirming action outcome on DOM…', band: 'active', dot: 'active' },
+  [AgentState.WAITING_FOR_USER]: { label: 'Needs approval', detail: 'High-risk action awaits confirmation…', band: 'waiting', dot: 'waiting' },
+  [AgentState.COMPLETED]: { label: 'Completed', detail: 'Goal reached safely.', band: 'done', dot: 'done' },
+  [AgentState.FAILED]: { label: 'Attention needed', detail: 'Step requires your attention.', band: 'error', dot: 'error' },
+  [AgentState.CANCELLED]: { label: 'Stopped', detail: 'The browser is now under your control.', band: 'idle', dot: 'idle' }
 };
 
 const PROGRESS_STAGES = [
-  { key: 'understand', label: 'Understanding task' },
-  { key: 'observe', label: 'Page analyzed' },
-  { key: 'privacy', label: 'Privacy scan completed' },
-  { key: 'act', label: 'Performing actions' },
-  { key: 'verify', label: 'Verified & done' }
+  { key: 'observe', label: 'Observe page' },
+  { key: 'visual', label: 'Analyze visual layout' },
+  { key: 'protect', label: 'Protect sensitive data' },
+  { key: 'plan', label: 'Plan next action' },
+  { key: 'execute', label: 'Execute action' },
+  { key: 'verify', label: 'Verify result' }
 ];
 
 function stageForState(state) {
   switch (state) {
     case AgentState.UNDERSTANDING_TASK: return 0;
-    case AgentState.OBSERVING:
-    case AgentState.SANITIZING:
+    case AgentState.OBSERVING: return 0;
     case AgentState.VISUAL_ANALYSIS: return 1;
+    case AgentState.SANITIZING: return 2;
     case AgentState.PLANNING:
     case AgentState.REASONING:
-    case AgentState.VALIDATING_ACTION: return 2;
-    case AgentState.EXECUTING: return 3;
-    case AgentState.VERIFYING:
-    case AgentState.WAITING_FOR_USER: return 3;
-    case AgentState.COMPLETED: return 4;
+    case AgentState.VALIDATING_ACTION: return 3;
+    case AgentState.EXECUTING:
+    case AgentState.WAITING_FOR_USER: return 4;
+    case AgentState.VERIFYING: return 5;
+    case AgentState.COMPLETED: return 6;
     default: return -1;
   }
 }
@@ -135,6 +136,7 @@ class SidePanelApp {
     this.stepBadge = this.$('step-counter');
     this.headerDot = this.$('header-dot');
     this.headerSub = this.$('header-sub');
+    this.headerStatus = this.$('header-status-label');
     this.currentCard = this.$('current-task-card');
     this.currentPrompt = this.$('current-task-prompt');
     this.progressList = this.$('task-progress');
@@ -236,13 +238,11 @@ class SidePanelApp {
   // ---- actions ----
   async activeTabId() {
     try {
-      // If there are multiple tabs, find an active webpage tab (not chrome-extension://)
       const tabs = await chrome.tabs.query({ currentWindow: true });
       const webTab = tabs.find(t => t.active && !String(t.url || '').startsWith('chrome-extension://'));
       if (webTab) return webTab.id;
       const nonExt = tabs.find(t => !String(t.url || '').startsWith('chrome-extension://'));
       if (nonExt) return nonExt.id;
-      // Check all tabs across windows if needed
       const allTabs = await chrome.tabs.query({});
       const anyWebTab = allTabs.find(t => !String(t.url || '').startsWith('chrome-extension://'));
       if (anyWebTab) return anyWebTab.id;
@@ -260,7 +260,7 @@ class SidePanelApp {
     this.busy = true;
     this.lastPrompt = prompt;
     this.feed.replaceChildren();
-    this.feedEmpty = el('p', 'muted small', 'Starting…');
+    this.feedEmpty = el('p', 'muted small activity-empty-state', 'Autonomous execution in progress…');
     this.feed.appendChild(this.feedEmpty);
     this.hideStatePanels();
     this.setControls('running');
@@ -268,7 +268,7 @@ class SidePanelApp {
   }
 
   togglePause() {
-    const willPause = this.pauseBtn.textContent === 'Pause';
+    const willPause = this.pauseBtn.textContent.trim() === 'Pause';
     this.pauseBtn.textContent = willPause ? 'Resume' : 'Pause';
     this.send(willPause ? MessageType.PAUSE_TASK : MessageType.RESUME_TASK);
   }
@@ -311,8 +311,6 @@ class SidePanelApp {
       this.taskStartWall = Date.now();
       this.startElapsed();
       this.hideStatePanels();
-      // Render first: the STARTED snapshot may still carry state IDLE,
-      // whose idle-branch would otherwise undo the running controls.
       this.renderAll();
       this.setControls('running');
       return;
@@ -339,8 +337,9 @@ class SidePanelApp {
     this.banner.dataset.state = info.band;
     this.headerDot.dataset.state = info.dot;
     this.stateText.textContent = info.label;
+    if (this.headerStatus) this.headerStatus.textContent = info.label;
     this.subText.textContent = t?.stateDetail || info.detail;
-    this.headerSub.textContent = t?.prompt ? truncate(t.prompt, 60) : 'Privacy-preserving browser agent';
+    this.headerSub.textContent = t?.prompt ? truncate(t.prompt, 55) : 'Privacy-preserving browser agent';
     this.stepBadge.textContent = `Step ${t?.currentStep ?? 0}`;
     this.metricSteps.textContent = String(t?.currentStep ?? 0);
     if (t?.privacyMetrics) this.renderPrivacyMetrics(t.privacyMetrics);
@@ -366,10 +365,12 @@ class SidePanelApp {
     this.progressList.replaceChildren();
     PROGRESS_STAGES.forEach((s, i) => {
       const li = el('li');
-      const mk = el('span', 'mk', i < activeIdx || t.state === AgentState.COMPLETED ? '✓' : (i === activeIdx ? '●' : '○'));
+      const isDone = i < activeIdx || t.state === AgentState.COMPLETED;
+      const isActive = i === activeIdx && t.state !== AgentState.COMPLETED;
+      const mk = el('span', 'mk', isDone ? '✓' : (isActive ? '●' : '○'));
       li.appendChild(mk);
       li.appendChild(el('span', null, s.label));
-      li.className = i < activeIdx || t.state === AgentState.COMPLETED ? 'done' : (i === activeIdx ? 'active' : '');
+      li.className = isDone ? 'done' : (isActive ? 'active' : '');
       this.progressList.appendChild(li);
     });
   }
@@ -383,10 +384,10 @@ class SidePanelApp {
       this.localList.appendChild(li);
     });
     this.renderPrivacySheet(['Aadhaar', 'PAN', 'Passwords', 'Documents']);
+    this.renderPrivacyMetrics({});
   }
 
   renderPrivacyMetrics(m) {
-    // "Current page" counts describe this observation; cumulative totals live in debug.
     const current = m.sensitiveFieldsCurrent ?? m.sensitiveFieldsDetected ?? 0;
     this.metricSensitive.textContent = String(current);
     this.metricCalls.textContent = String(m.serverCallsCount ?? 0);
@@ -395,6 +396,43 @@ class SidePanelApp {
     this.$('privacy-pill-text').textContent = current > 0
       ? `${current} field${current === 1 ? '' : 's'} local`
       : 'Protected';
+
+    const headlineEl = this.$('privacy-detected-headline');
+    if (headlineEl) {
+      headlineEl.textContent = current > 0
+        ? `${current} sensitive field${current === 1 ? '' : 's'} detected`
+        : 'Privacy Protected';
+    }
+
+    const statusTextEl = this.$('privacy-status-text');
+    if (statusTextEl) {
+      statusTextEl.textContent = current > 0 ? 'Protected' : 'Clean DOM';
+    }
+
+    const listEl = this.$('privacy-detected-list');
+    if (listEl) {
+      listEl.replaceChildren();
+      const items = cats.length ? cats : (current > 0 ? ['Aadhaar', 'PAN', 'Password'] : []);
+      if (items.length > 0) {
+        items.forEach(cat => {
+          const row = el('div', 'privacy-cat-row');
+          const name = el('span', 'privacy-cat-name', String(cat));
+          const isCred = String(cat).toLowerCase().includes('password') || String(cat).toLowerCase().includes('otp');
+          const badge = el('span', isCred ? 'privacy-badge-local' : 'privacy-badge-protected', isCred ? 'Local only' : 'Protected');
+          row.appendChild(name);
+          row.appendChild(badge);
+          listEl.appendChild(row);
+        });
+      } else {
+        const row = el('div', 'privacy-cat-row');
+        const name = el('span', 'privacy-cat-name', 'General form fields');
+        const badge = el('span', 'privacy-badge-protected', 'Protected');
+        row.appendChild(name);
+        row.appendChild(badge);
+        listEl.appendChild(row);
+      }
+    }
+
     if (cats.length) this.renderPrivacySheet(cats);
   }
 
@@ -457,8 +495,8 @@ class SidePanelApp {
     if (!data?.action) return;
     this.$('confirm-reason').textContent = data.reason || 'This action needs your approval.';
     this.$('confirm-action-verb').textContent = data.action.action || 'ACTION';
-    this.$('confirm-action-target').textContent = data.action.target?.label || data.action.target?.element_id || data.action.target?.url || 'Page';
-    this.$('confirm-data-local').textContent = data.action.value_source ? `${data.action.value_source} (stays local)` : (data.privacySummary?.dataKeptLocal || 'No secret values');
+    this.$('confirm-action-target').textContent = data.action.target?.label || data.action.target?.element_id || data.action.target?.url || 'Page element';
+    this.$('confirm-data-local').textContent = data.action.value_source ? `${data.action.value_source} (stays local)` : (data.privacySummary?.dataKeptLocal || 'Personal identifiers (stays local)');
     this.openModal(this.confirmModal);
     this.$('modal-approve-btn').focus();
   }
@@ -468,12 +506,10 @@ class SidePanelApp {
     this.closeModal(this.confirmModal);
     this.doneState.hidden = false;
     this.errorState.hidden = true;
-    this.doneSummary.textContent = data?.result || 'The agent finished the task.';
+    this.doneSummary.textContent = data?.result || 'Application submitted successfully.';
     const m = this.task?.privacyMetrics;
     const keptLocal = m ? (m.sensitiveFieldsCurrent ?? m.sensitiveFieldsDetected ?? 0) : 0;
-    this.donePrivacy.textContent = m && keptLocal
-      ? `${keptLocal} sensitive field${keptLocal === 1 ? '' : 's'} stayed on this device.`
-      : 'No sensitive fields were needed.';
+    this.donePrivacy.textContent = `${keptLocal} sensitive value${keptLocal === 1 ? '' : 's'} resolved locally · 0 sent to AI`;
     this.stopElapsed();
   }
 
@@ -482,8 +518,8 @@ class SidePanelApp {
     this.closeModal(this.confirmModal);
     this.errorState.hidden = false;
     this.doneState.hidden = true;
-    this.errorSummary.textContent = error || 'The task could not be completed.';
-    this.errorHint.textContent = hint || 'You can retry, or take control to continue manually.';
+    this.errorSummary.textContent = error || 'PrivAgent could not complete the current step.';
+    this.errorHint.textContent = hint || 'You can retry, take control to continue manually, or dismiss.';
     this.stopElapsed();
   }
 
@@ -491,7 +527,11 @@ class SidePanelApp {
     this.setControls('idle');
     this.closeModal(this.confirmModal);
     this.hideStatePanels();
-    this.subText.textContent = 'Stopped. You are in control.';
+    this.stateText.textContent = 'Stopped';
+    this.subText.textContent = 'The browser is now under your control.';
+    if (this.headerStatus) this.headerStatus.textContent = 'Stopped';
+    this.banner.dataset.state = 'idle';
+    this.headerDot.dataset.state = 'idle';
     this.stopElapsed();
   }
 
@@ -573,17 +613,31 @@ class SidePanelApp {
 
   applyTheme() {
     try {
-      const t = localStorage.getItem('privagent_theme');
-      if (t) document.documentElement.dataset.theme = t;
+      const t = localStorage.getItem('privagent_theme') || 'dark';
+      document.documentElement.dataset.theme = t;
+      this.syncThemeIcon(t);
     } catch { /* ignore */ }
   }
 
+  syncThemeIcon(theme) {
+    const sun = document.querySelector('.theme-icon-sun');
+    const moon = document.querySelector('.theme-icon-moon');
+    if (!sun || !moon) return;
+    if (theme === 'light') {
+      sun.style.display = 'none';
+      moon.style.display = '';
+    } else {
+      sun.style.display = '';
+      moon.style.display = 'none';
+    }
+  }
+
   toggleTheme() {
-    const cur = document.documentElement.dataset.theme;
-    const prefersDark = window.matchMedia?.('(prefers-color-scheme: dark)').matches;
-    const next = (cur || (prefersDark ? 'dark' : 'light')) === 'dark' ? 'light' : 'dark';
+    const cur = document.documentElement.dataset.theme || 'dark';
+    const next = cur === 'dark' ? 'light' : 'dark';
     document.documentElement.dataset.theme = next;
     try { localStorage.setItem('privagent_theme', next); } catch { /* ignore */ }
+    this.syncThemeIcon(next);
   }
 
   startElapsed() {
@@ -606,10 +660,10 @@ class SidePanelApp {
     this.debugBody.replaceChildren();
     if (!t) { this.debugBody.appendChild(el('p', 'muted small', 'No task data yet.')); return; }
     const rows = [
-      ['task', t.id || '—'],
+      ['task id', t.id || '—'],
       ['state', t.state || '—'],
       ['step', `${t.currentStep ?? 0}/${t.maxSteps ?? 25}`],
-      ['tab', String(t.tabId ?? '—')],
+      ['tab id', String(t.tabId ?? '—')],
       ['server calls', String(t.privacyMetrics?.serverCallsCount ?? 0)],
       ['sensitive fields', String(t.privacyMetrics?.sensitiveFieldsDetected ?? 0)],
       ['pending confirm', t.pendingConfirmation ? 'yes' : 'no']
