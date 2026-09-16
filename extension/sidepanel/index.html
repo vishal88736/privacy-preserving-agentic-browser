@@ -3,235 +3,265 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Privacy Browser Agent - SIH</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <title>PrivAgent — Privacy-Preserving Browser Agent</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <div class="app-container">
+  <div class="app" id="app">
     <!-- Header -->
-    <header class="header">
+    <header class="topbar">
       <div class="brand">
-        <div class="shield-badge">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-            <path d="m9 12 2 2 4-4"/>
-          </svg>
-        </div>
-        <div>
+        <span class="status-dot" id="header-dot" data-state="idle" aria-hidden="true"></span>
+        <div class="brand-text">
           <h1 class="brand-title">PrivAgent</h1>
-          <span class="brand-subtitle">SIH Privacy-Preserving Agent</span>
+          <p class="brand-sub" id="header-sub">Privacy-preserving browser agent</p>
         </div>
       </div>
-      <button id="vault-btn" class="icon-button" title="Local Secret Vault Settings">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <rect width="18" height="18" x="3" y="3" rx="2"/>
-          <circle cx="12" cy="10" r="3"/>
-          <path d="M7 21v-2a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v2"/>
-        </svg>
-      </button>
+      <div class="topbar-actions">
+        <button id="privacy-pill" class="privacy-pill" title="Show privacy status" aria-haspopup="dialog">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+          <span id="privacy-pill-text">Protected</span>
+        </button>
+        <button id="theme-btn" class="icon-btn" title="Toggle light / dark theme" aria-label="Toggle theme">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+        </button>
+        <button id="settings-btn" class="icon-btn" title="Agent settings" aria-label="Open settings">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </button>
+        <button id="vault-btn" class="icon-btn" title="Local vault (stays on this device)" aria-label="Open local vault">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        </button>
+      </div>
     </header>
 
-    <!-- Task Input Section -->
-    <section class="task-input-card">
-      <label for="task-prompt" class="card-label">Task Objective</label>
-      <div class="input-wrapper">
-        <textarea 
-          id="task-prompt" 
-          placeholder="e.g. 'Fill this Aadhaar application using my saved profile' or 'Find the cheapest flight from Pune to Delhi'"
-          rows="3"
-        ></textarea>
+    <!-- Agent status -->
+    <div id="status-banner" class="status-banner" data-state="idle" role="status" aria-live="polite">
+      <span class="pulse" aria-hidden="true"></span>
+      <div class="status-text">
+        <span id="agent-state-text" class="status-state">Idle</span>
+        <span id="agent-substatus-text" class="status-detail">Tell me what to do on this page.</span>
       </div>
-      <div class="quick-prompts">
-        <span class="quick-tag" data-prompt="Fill this Aadhaar application using my saved profile">Fill Aadhaar Form</span>
-        <span class="quick-tag" data-prompt="Upload my Aadhaar PDF document to the verification field">Upload Aadhaar PDF</span>
-        <span class="quick-tag" data-prompt="Find the cheapest flight from Pune to Delhi">Find Flight</span>
-      </div>
-      <div class="control-actions">
-        <button id="start-task-btn" class="btn btn-primary">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-            <polygon points="5 3 19 12 5 21 5 3"/>
-          </svg>
-          Start Agent
-        </button>
-        <button id="pause-task-btn" class="btn btn-secondary" style="display: none;">Pause</button>
-        <button id="cancel-task-btn" class="btn btn-danger" style="display: none;">Stop</button>
-      </div>
-    </section>
-
-    <!-- Real-time Agent Status Banner -->
-    <div id="status-banner" class="status-banner state-idle">
-      <div class="pulse-indicator"></div>
-      <div class="status-info">
-        <span id="agent-state-text" class="status-state">IDLE</span>
-        <span id="agent-substatus-text" class="status-detail">Awaiting task prompt...</span>
-      </div>
-      <div id="step-counter" class="step-badge">Step 0</div>
+      <span id="step-counter" class="step-badge">Step 0</span>
     </div>
 
-    <!-- Dual Privacy Boundary Dashboard -->
-    <section class="privacy-dashboard-card">
-      <div class="card-header-flex">
-        <span class="card-label">Privacy Boundary Guarantee</span>
-        <span class="shield-tag">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-            <polyline points="20 6 9 17 4 12"/>
-          </svg>
-          Zero Plaintext Leaks
-        </span>
-      </div>
+    <main class="scroll">
+      <!-- Task input -->
+      <section class="card" aria-labelledby="task-label">
+        <div class="card-head">
+          <span class="card-label" id="task-label">Task</span>
+          <button id="clear-task-btn" class="link-btn" title="Clear task input">Clear</button>
+        </div>
+        <div class="input-wrap">
+          <textarea id="task-prompt" rows="3" maxlength="2000" spellcheck="false"
+            placeholder="e.g. Fill this form using my saved profile — ask me before submitting."
+            aria-label="Describe the task for the agent"></textarea>
+          <button id="submit-task-btn" class="send-btn" title="Start agent (Ctrl+Enter)" aria-label="Start agent">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          </button>
+        </div>
+        <p class="hint">Ctrl+Enter to start. The agent observes the page, then acts step by step.</p>
+        <div class="quick-row" role="group" aria-label="Suggested tasks">
+          <button class="chip" data-prompt="Fill this application form using my saved profile, but ask me before submitting.">Fill form</button>
+          <button class="chip" data-prompt="Find the cheapest flight from Pune to Delhi.">Find flight</button>
+          <button class="chip" data-prompt="Upload my identity document to the verification field. Ask me before uploading.">Upload doc</button>
+          <button class="chip" data-prompt="Search this site for citizen benefits.">Search site</button>
+        </div>
+        <div class="control-row">
+          <button id="start-task-btn" class="btn btn-primary">Start agent</button>
+          <button id="pause-task-btn" class="btn btn-ghost" hidden>Pause</button>
+          <button id="stop-task-btn" class="btn btn-danger-ghost" hidden>Stop</button>
+          <button id="retry-task-btn" class="btn btn-secondary" hidden>Retry</button>
+        </div>
+      </section>
 
-      <div class="boundary-grid">
-        <!-- Local Only Column -->
-        <div class="boundary-col local-col">
-          <div class="col-title">
-            <span class="dot dot-green"></span>
-            LOCAL ONLY (Vault)
+      <!-- Current task / progress -->
+      <section class="card" id="current-task-card" aria-labelledby="current-task-label" hidden>
+        <div class="card-head">
+          <span class="card-label" id="current-task-label">Current task</span>
+          <span id="task-elapsed" class="mono muted"></span>
+        </div>
+        <p id="current-task-prompt" class="task-prompt-text"></p>
+        <ol id="task-progress" class="progress-list"></ol>
+      </section>
+
+      <!-- State panels: empty / done / error (mutually exclusive) -->
+      <section class="card empty-state" id="empty-state">
+        <h2 class="empty-title">Your browser, with a careful agent.</h2>
+        <p class="empty-sub">Describe a goal for this page. Sensitive values are resolved on this device and never sent to the AI.</p>
+        <ul class="empty-points">
+          <li><strong>Observe</strong> — reads page structure + layout</li>
+          <li><strong>Protect</strong> — redacts Aadhaar, PAN, passwords locally</li>
+          <li><strong>Act</strong> — fills, clicks, uploads with your approval for risky steps</li>
+        </ul>
+      </section>
+
+      <section class="card state-done" id="done-state" hidden role="status">
+        <div class="state-head"><span class="state-icon ok" aria-hidden="true">✓</span><h2>Task completed</h2></div>
+        <p id="done-summary" class="state-sub"></p>
+        <p id="done-privacy" class="state-sub muted"></p>
+        <div class="control-row">
+          <button id="done-dismiss-btn" class="btn btn-secondary">Done</button>
+          <button id="done-new-btn" class="btn btn-ghost">Run another task</button>
+        </div>
+      </section>
+
+      <section class="card state-error" id="error-state" hidden role="alert">
+        <div class="state-head"><span class="state-icon warn" aria-hidden="true">!</span><h2>Task needs attention</h2></div>
+        <p id="error-summary" class="state-sub"></p>
+        <p id="error-hint" class="state-sub muted"></p>
+        <div class="control-row">
+          <button id="error-retry-btn" class="btn btn-primary">Retry</button>
+          <button id="error-takeover-btn" class="btn btn-secondary">Take control</button>
+          <button id="error-dismiss-btn" class="btn btn-ghost">Dismiss</button>
+        </div>
+      </section>
+
+      <!-- Activity -->
+      <section class="card" aria-labelledby="activity-label">
+        <div class="card-head">
+          <span class="card-label" id="activity-label">Activity</span>
+          <span id="activity-count" class="mono muted"></span>
+        </div>
+        <div id="activity-feed" class="activity-feed">
+          <p class="muted small" id="activity-empty">No steps yet. Activity will appear here as the agent works.</p>
+        </div>
+      </section>
+
+      <!-- Privacy -->
+      <section class="card" aria-labelledby="privacy-label">
+        <div class="card-head">
+          <span class="card-label" id="privacy-label">Privacy</span>
+          <span class="pill-ok">Local-first</span>
+        </div>
+        <div class="privacy-cols">
+          <div class="privacy-col">
+            <p class="privacy-col-title ok">Stays on this device</p>
+            <ul id="local-items-list" class="privacy-list"></ul>
           </div>
-          <ul id="local-items-list" class="boundary-list">
-            <li><span class="check-icon">✓</span> Aadhaar & PAN Numbers</li>
-            <li><span class="check-icon">✓</span> Passwords & OTPs</li>
-            <li><span class="check-icon">✓</span> Identity Documents (PDF)</li>
-            <li><span class="check-icon">✓</span> Form Input Keystrokes</li>
-          </ul>
-        </div>
-
-        <!-- Shared with Server Column -->
-        <div class="boundary-col server-col">
-          <div class="col-title">
-            <span class="dot dot-blue"></span>
-            SHARED WITH AI (VLM + LLM)
+          <div class="privacy-col">
+            <p class="privacy-col-title info">Shared with AI (sanitized)</p>
+            <ul class="privacy-list">
+              <li>Redacted screenshot (masked regions)</li>
+              <li>Sanitized page structure &amp; roles</li>
+              <li>Non-sensitive task description</li>
+              <li>Symbolic refs (e.g. LOCAL_AADHAAR)</li>
+            </ul>
           </div>
-          <ul class="boundary-list">
-            <li><span class="share-icon">→</span> Redacted Screenshot (Canvas blackout)</li>
-            <li><span class="share-icon">→</span> Sanitized DOM Structure & Roles</li>
-            <li><span class="share-icon">→</span> Non-sensitive Task Intent</li>
-            <li><span class="share-icon">→</span> Symbolic IDs (e.g. LOCAL_AADHAAR)</li>
-          </ul>
         </div>
-      </div>
+        <div class="metrics-row">
+          <div class="metric"><span id="metric-sensitive-count" class="metric-num">0</span><span class="metric-name">Fields kept local</span></div>
+          <div class="metric"><span id="metric-server-calls" class="metric-num">0</span><span class="metric-name">Sanitized AI calls</span></div>
+          <div class="metric"><span id="metric-steps" class="metric-num">0</span><span class="metric-name">Steps done</span></div>
+        </div>
+        <p id="privacy-categories" class="muted small"></p>
+      </section>
 
-      <!-- Live Counters -->
-      <div class="metrics-row">
-        <div class="metric-box">
-          <span id="metric-sensitive-count" class="metric-num">0</span>
-          <span class="metric-name">Sensitive Fields Kept Local</span>
+      <!-- Debug -->
+      <details class="card debug-card" id="debug-panel">
+        <summary class="card-label">Developer debug</summary>
+        <div id="debug-body" class="debug-body">
+          <p class="muted small">No task data yet.</p>
         </div>
-        <div class="metric-box">
-          <span id="metric-server-calls" class="metric-num">0</span>
-          <span class="metric-name">Server API Calls (Sanitized)</span>
-        </div>
-      </div>
-    </section>
-
-    <!-- Execution Steps / Activity Feed -->
-    <section class="activity-section">
-      <div class="card-label">Activity & Observation Feed</div>
-      <div id="activity-feed" class="activity-feed">
-        <div class="empty-feed">No active execution. Start a task to observe autonomous reasoning and local execution.</div>
-      </div>
-    </section>
+      </details>
+    </main>
   </div>
 
-  <!-- User Confirmation Modal for High-Risk Actions -->
-  <div id="confirmation-modal" class="modal-backdrop" style="display: none;">
-    <div class="modal-card">
-      <div class="modal-header">
-        <div class="warning-icon">
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/>
-            <line x1="12" y1="9" x2="12" y2="13"/>
-            <line x1="12" y1="17" x2="12.01" y2="17"/>
-          </svg>
-        </div>
+  <!-- Confirmation modal -->
+  <div id="confirmation-modal" class="backdrop" hidden>
+    <div class="modal" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-reason">
+      <div class="modal-head">
+        <span class="state-icon warn" aria-hidden="true">!</span>
         <div>
-          <h3 class="modal-title">Action Confirmation Required</h3>
-          <span class="modal-subtitle">High-Risk Operation Detected</span>
+          <h3 id="confirm-title" class="modal-title">Confirmation required</h3>
+          <p class="modal-sub">A risky action needs your approval</p>
         </div>
       </div>
-
-      <div class="modal-body">
-        <p id="confirm-reason" class="confirm-reason-text">The agent is requesting to submit the application.</p>
-        
-        <div class="disclosure-box">
-          <div class="disclosure-row">
-            <span class="disclosure-label">Action:</span>
-            <span id="confirm-action-verb" class="disclosure-value font-mono">SUBMIT</span>
-          </div>
-          <div class="disclosure-row">
-            <span class="disclosure-label">Target:</span>
-            <span id="confirm-action-target" class="disclosure-value">Submit Button</span>
-          </div>
-          <div class="disclosure-row">
-            <span class="disclosure-label">Data Kept Local:</span>
-            <span id="confirm-data-local" class="disclosure-value highlight-green">LOCAL_AADHAAR (Protected)</span>
-          </div>
-          <div class="disclosure-row">
-            <span class="disclosure-label">Shared with AI:</span>
-            <span class="disclosure-value">Zero plain secrets</span>
-          </div>
-        </div>
-      </div>
-
-      <div class="modal-footer">
-        <button id="modal-reject-btn" class="btn btn-secondary">Decline & Stop</button>
-        <button id="modal-approve-btn" class="btn btn-primary">Approve & Execute</button>
+      <p id="confirm-reason" class="confirm-reason"></p>
+      <dl class="disclosure">
+        <div><dt>Action</dt><dd id="confirm-action-verb" class="mono"></dd></div>
+        <div><dt>Target</dt><dd id="confirm-action-target"></dd></div>
+        <div><dt>Data involved</dt><dd id="confirm-data-local"></dd></div>
+        <div><dt>Sent to AI</dt><dd>Sanitized layout only — no secret values</dd></div>
+      </dl>
+      <div class="modal-actions">
+        <button id="modal-reject-btn" class="btn btn-secondary">Cancel</button>
+        <button id="modal-approve-btn" class="btn btn-primary">Approve &amp; run</button>
       </div>
     </div>
   </div>
 
-  <!-- Local Vault Settings Modal -->
-  <div id="vault-modal" class="modal-backdrop" style="display: none;">
-    <div class="modal-card">
-      <div class="modal-header">
+  <!-- Privacy sheet -->
+  <div id="privacy-modal" class="backdrop" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="privacy-sheet-title">
+      <div class="modal-head">
         <div>
-          <h3 class="modal-title">Local Secret Vault</h3>
-          <span class="modal-subtitle">Managed 100% on your device</span>
+          <h3 id="privacy-sheet-title" class="modal-title">Privacy status</h3>
+          <p class="modal-sub">What the current task protects</p>
         </div>
-        <button id="close-vault-btn" class="icon-button">✕</button>
+        <button id="close-privacy-btn" class="icon-btn" aria-label="Close privacy status">✕</button>
       </div>
-
-      <div class="modal-body vault-body">
-        <p class="vault-info">
-          These credentials are used by the local executor when the reasoning model requests symbolic tokens. 
-          Values are never sent to external AI servers.
-        </p>
-
-        <div class="vault-field">
-          <label>Aadhaar Number (LOCAL_AADHAAR)</label>
-          <input type="text" id="vault-aadhaar" placeholder="4821 7392 0184">
+      <div class="privacy-cols">
+        <div class="privacy-col">
+          <p class="privacy-col-title ok">Local only</p>
+          <ul id="privacy-sheet-local" class="privacy-list"></ul>
         </div>
-
-        <div class="vault-field">
-          <label>PAN Card (LOCAL_PAN)</label>
-          <input type="text" id="vault-pan" placeholder="ABCDE1234F">
-        </div>
-
-        <div class="vault-field">
-          <label>Full Name (LOCAL_FULL_NAME)</label>
-          <input type="text" id="vault-name" placeholder="Vishal Agrawal">
-        </div>
-
-        <div class="vault-field">
-          <label>Date of Birth (LOCAL_DOB)</label>
-          <input type="text" id="vault-dob" placeholder="15/08/2002">
-        </div>
-
-        <div class="vault-field">
-          <label>Phone Number (LOCAL_PHONE)</label>
-          <input type="text" id="vault-phone" placeholder="9876543210">
-        </div>
-
-        <div class="vault-field">
-          <label>Password (LOCAL_PASSWORD)</label>
-          <input type="password" id="vault-password" placeholder="••••••••">
+        <div class="privacy-col">
+          <p class="privacy-col-title info">Shared (sanitized)</p>
+          <ul class="privacy-list">
+            <li>Redacted screenshot</li>
+            <li>Sanitized DOM structure</li>
+            <li>Non-sensitive task text</li>
+          </ul>
         </div>
       </div>
+      <p class="muted small">Sensitive values are referenced symbolically (e.g. LOCAL_AADHAAR) and resolved in this browser. Outbound requests are scanned before sending; blocked requests never leave the device.</p>
+      <div class="modal-actions">
+        <button id="privacy-sheet-close-btn" class="btn btn-secondary" style="width:100%">Close</button>
+      </div>
+    </div>
+  </div>
 
-      <div class="modal-footer">
-        <button id="save-vault-btn" class="btn btn-primary" style="width: 100%;">Save Vault Credentials</button>
+  <!-- Vault modal -->
+  <div id="vault-modal" class="backdrop" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="vault-title">
+      <div class="modal-head">
+        <div>
+          <h3 id="vault-title" class="modal-title">Local vault</h3>
+          <p class="modal-sub">Stored only in this browser · never sent to AI</p>
+        </div>
+        <button id="close-vault-btn" class="icon-btn" aria-label="Close vault">✕</button>
+      </div>
+      <p class="muted small">Used when the agent requests a symbolic value such as LOCAL_AADHAAR. Values are injected into the page locally.</p>
+      <div class="vault-grid">
+        <label class="vault-field"><span>Aadhaar (LOCAL_AADHAAR)</span><input id="vault-aadhaar" inputmode="numeric" autocomplete="off" placeholder="XXXX XXXX XXXX"></label>
+        <label class="vault-field"><span>PAN (LOCAL_PAN)</span><input id="vault-pan" autocomplete="off" placeholder="ABCDE1234F"></label>
+        <label class="vault-field"><span>Full name (LOCAL_FULL_NAME)</span><input id="vault-name" autocomplete="name" placeholder="Full name"></label>
+        <label class="vault-field"><span>Date of birth (LOCAL_DOB)</span><input id="vault-dob" autocomplete="bday" placeholder="DD/MM/YYYY"></label>
+        <label class="vault-field"><span>Phone (LOCAL_PHONE)</span><input id="vault-phone" inputmode="tel" autocomplete="tel" placeholder="10-digit mobile"></label>
+        <label class="vault-field"><span>Password (LOCAL_PASSWORD)</span><input id="vault-password" type="password" autocomplete="new-password" placeholder="••••••••"></label>
+      </div>
+      <div class="modal-actions">
+        <button id="save-vault-btn" class="btn btn-primary" style="width:100%">Save vault locally</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings modal -->
+  <div id="settings-modal" class="backdrop" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <div class="modal-head">
+        <div>
+          <h3 id="settings-title" class="modal-title">Settings</h3>
+          <p class="modal-sub">Agent behaviour &amp; diagnostics</p>
+        </div>
+        <button id="close-settings-btn" class="icon-btn" aria-label="Close settings">✕</button>
+      </div>
+      <label class="vault-field"><span>Backend endpoint</span><input id="settings-backend" inputmode="url" placeholder="http://localhost:8000"></label>
+      <label class="vault-field"><span>Max steps per task</span><input id="settings-maxsteps" inputmode="numeric" placeholder="25"></label>
+      <label class="check-row"><input type="checkbox" id="settings-confirm"> <span>Always confirm before submit / upload (recommended)</span></label>
+      <label class="check-row"><input type="checkbox" id="settings-debug"> <span>Show developer debug panel</span></label>
+      <div class="modal-actions">
+        <button id="save-settings-btn" class="btn btn-primary" style="width:100%">Save settings</button>
       </div>
     </div>
   </div>

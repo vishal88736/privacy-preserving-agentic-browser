@@ -14,6 +14,7 @@ export const MessageType = Object.freeze({
   PRIVACY_EVENT: 'PRIVACY_EVENT',
   UPDATE_VAULT: 'UPDATE_VAULT',
   GET_VAULT: 'GET_VAULT',
+  UPDATE_SETTINGS: 'UPDATE_SETTINGS',
 
   // Background <-> Content Script
   EXTRACT_DOM: 'EXTRACT_DOM',

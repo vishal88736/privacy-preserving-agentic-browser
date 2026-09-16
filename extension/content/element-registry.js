@@ -13,6 +13,10 @@ export class ElementRegistry {
 
   clear() {
     this.idToElement.clear();
+    // WeakMap has no .clear(): allocate a fresh one, otherwise re-extracted
+    // identical nodes resolve to stale ids that are absent from idToElement
+    // and every lookup after the first extraction returns null.
+    this.elementToId = new WeakMap();
     this.counter = 1;
   }
 

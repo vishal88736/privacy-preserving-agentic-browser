@@ -16,6 +16,10 @@ export class RiskGate {
   evaluate(action, context = {}) {
     const { action: verb, target, value, value_source } = action;
     const targetLabel = (target?.label || '').toLowerCase();
+    // DOM-level type of the target when the caller resolved it from the
+    // latest observation (e.g. <button type="submit">, <input type="submit">).
+    const targetType = String(context.targetDom?.type || '').toLowerCase();
+    const targetTag = String(context.targetDom?.tag || '').toLowerCase();
 
     // 1. Critical Security Rejections
     // Prevent exfiltration: Never allow a LOCAL_* secret to be entered into search or query fields
@@ -30,8 +34,16 @@ export class RiskGate {
       }
     }
 
-    // 2. High-Risk Action: Form Submissions
-    if (verb === ActionType.SUBMIT || (verb === ActionType.CLICK && /submit|apply|pay|proceed to pay|checkout|confirm booking|agree and continue/i.test(targetLabel))) {
+    // 2. High-Risk Action: Form Submissions.
+    // Covers explicit SUBMIT, label-matched commit buttons, AND clicks on
+    // native submit controls that are actually form-associated
+    // (e.g. <button type="submit">Send message</button> inside a <form>).
+    // A typeless <button> outside any form cannot submit, so it stays low-risk.
+    const inForm = context.targetDom?.in_form === true;
+    const isSubmitControl = (targetType === 'submit' && (inForm || targetTag === 'input')) ||
+      (targetTag === 'button' && inForm && /^(submit|apply|pay|send|confirm|continue|proceed)$/i.test(targetLabel.trim()));
+    if (verb === ActionType.SUBMIT || isSubmitControl ||
+        (verb === ActionType.CLICK && /submit|apply|pay|proceed to pay|checkout|confirm booking|agree and continue/i.test(targetLabel))) {
       return {
         allowed: true,
         risk: RiskLevel.HIGH,

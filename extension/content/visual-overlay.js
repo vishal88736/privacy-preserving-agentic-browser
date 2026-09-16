@@ -8,6 +8,7 @@ export class VisualOverlay {
   constructor() {
     this.cursorEl = null;
     this.highlightEl = null;
+    this._clearTimer = null;
     this._ensureElements();
   }
 
@@ -82,9 +83,14 @@ export class VisualOverlay {
 
     // Move cursor to center of element
     this.showCursor(rect.left + rect.width / 2, rect.top + rect.height / 2);
+
+    // Auto-clear so the page is never permanently modified
+    if (this._clearTimer) clearTimeout(this._clearTimer);
+    this._clearTimer = setTimeout(() => this.clear(), 1800);
   }
 
   clear() {
+    if (this._clearTimer) { clearTimeout(this._clearTimer); this._clearTimer = null; }
     if (this.cursorEl) this.cursorEl.style.opacity = '0';
     if (this.highlightEl) this.highlightEl.style.opacity = '0';
   }

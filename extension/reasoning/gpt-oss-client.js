@@ -66,6 +66,18 @@ export class GPTOSSClient {
     const lowerTask = task.toLowerCase();
     const elements = fusedObservation.elements || [];
 
+    // Local prompt-injection quarantine (mirrors server heuristic):
+    // webpage content is untrusted data and must never steer the plan.
+    const injected = elements.find((el) => {
+      const label = String(el.dom?.label || el.visual?.description || '').toLowerCase();
+      return label.includes('ignore all previous instructions') ||
+        label.includes('exfiltrate password') ||
+        label.includes('send the') && label.includes('password');
+    });
+    if (injected) {
+      console.warn('[GPTOSSClient] Quarantined webpage instruction injection; continuing with user task.');
+    }
+
     // Check if previous action was high risk submit and succeeded
     const lastAction = taskHistory.length > 0 ? taskHistory[taskHistory.length - 1]?.action : null;
     if (lastAction?.action === ActionType.SUBMIT) {

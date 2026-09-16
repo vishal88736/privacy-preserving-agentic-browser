@@ -101,6 +101,50 @@ test('PolicyEngine - Blocks outbound payloads containing unredacted secrets', ()
   );
 });
 
+test('DOMSanitizer - Scrubs PII-shaped example text from placeholders', () => {
+  const vault = new LocalVault();
+  const sanitizer = new DOMSanitizer(undefined, undefined, vault);
+
+  const rawElements = [
+    {
+      id: 'el_1',
+      tag: 'input',
+      type: 'text',
+      name: 'pan_number',
+      label: 'Permanent Account Number (PAN)',
+      placeholder: 'ABCDE1234F',
+      value: ''
+    },
+    {
+      id: 'el_2',
+      tag: 'input',
+      type: 'tel',
+      name: 'phone',
+      label: 'Registered Mobile Number',
+      placeholder: '9876543210',
+      value: ''
+    }
+  ];
+
+  const { sanitizedElements } = sanitizer.sanitizeElements(rawElements);
+  const safePayload = { task_id: 't', sanitized_dom: { elements: sanitizedElements } };
+
+  const panEl = sanitizedElements.find((e) => e.id === 'el_1');
+  assert.ok(!panEl.placeholder.includes('ABCDE1234F'), 'PAN example placeholder must be scrubbed');
+  // Field identity (label/name) is preserved for the model
+  assert.ok(panEl.label.includes('PAN'), 'Field label must be preserved');
+
+  const phoneEl = sanitizedElements.find((e) => e.id === 'el_2');
+  assert.ok(!phoneEl.placeholder.includes('9876543210'), 'Phone example placeholder must be scrubbed');
+
+  // The scrubbed payload must pass the outbound policy gate (vault holds same defaults)
+  const policyEngine = new PolicyEngine(vault);
+  assert.doesNotThrow(
+    () => policyEngine.enforceOutboundSafety(safePayload),
+    'Scrubbed demo-page payload must pass the outbound policy gate'
+  );
+});
+
 test('DOMSanitizer - Handles elements with null attributes gracefully without toLowerCase errors', () => {
   const sanitizer = new DOMSanitizer();
 

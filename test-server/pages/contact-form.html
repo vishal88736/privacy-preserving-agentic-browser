@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Contact & Feedback Form</title>
+  <link rel="icon" href="data:,">
+  <style>
+    body { font-family: system-ui, sans-serif; background: #f4f6f9; color: #17202e; padding: 40px 16px; max-width: 560px; margin: 0 auto; }
+    h1 { font-size: 22px; }
+    p.sub { color: #4c5a72; }
+    form { background: #fff; border: 1px solid #dde3ec; border-radius: 12px; padding: 20px; display: flex; flex-direction: column; gap: 12px; }
+    label { font-size: 13px; font-weight: 600; }
+    input, select, textarea { font-size: 14px; padding: 8px 10px; border: 1px solid #c4cddb; border-radius: 8px; width: 100%; box-sizing: border-box; }
+    button { background: #2f5bd7; color: #fff; border: none; border-radius: 8px; padding: 10px; font-size: 14px; font-weight: 600; cursor: pointer; }
+    #done { display: none; background: #e3f4e9; border: 1px solid #157a3d; border-radius: 8px; padding: 12px; margin-top: 12px; }
+  </style>
+</head>
+<body>
+  <h1>Contact &amp; Feedback</h1>
+  <p class="sub">A plain non-sensitive form. No identity numbers are requested here.</p>
+  <form id="contact-form">
+    <div>
+      <label for="contact_name">Your name</label>
+      <input type="text" id="contact_name" name="contact_name" placeholder="Jane Doe" autocomplete="name">
+    </div>
+    <div>
+      <label for="contact_email">Email address</label>
+      <input type="email" id="contact_email" name="contact_email" placeholder="jane@example.com" autocomplete="email">
+    </div>
+    <div>
+      <label for="contact_topic">Topic</label>
+      <select id="contact_topic" name="topic">
+        <option value="">Choose a topic…</option>
+        <option value="feedback">General feedback</option>
+        <option value="support">Support request</option>
+        <option value="other">Other</option>
+      </select>
+    </div>
+    <div>
+      <label for="contact_msg">Message</label>
+      <textarea id="contact_msg" name="message" rows="3" placeholder="How can we help?"></textarea>
+    </div>
+    <button type="submit" id="contact_submit">Send message</button>
+  </form>
+  <div id="done">Message received. Thank you!</div>
+  <script>
+    document.getElementById('contact-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      document.getElementById('done').style.display = 'block';
+    });
+  </script>
+</body>
+</html>

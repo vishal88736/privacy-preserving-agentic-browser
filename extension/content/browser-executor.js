@@ -25,7 +25,9 @@ export class BrowserExecutor {
     }
 
     if (targetElement) {
-      targetElement.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+      const smoothOk = !(typeof window !== 'undefined' && window.matchMedia &&
+        window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+      targetElement.scrollIntoView({ behavior: smoothOk ? 'smooth' : 'auto', block: 'center', inline: 'nearest' });
       visualOverlay.highlightElement(targetElement);
       await this.sleep(150);
     }

@@ -48,6 +48,37 @@ test('RiskGate - BLOCKS secret exfiltration into search boxes', () => {
   assert.strictEqual(assessment.risk, RiskLevel.CRITICAL);
 });
 
+test('RiskGate - Requires confirmation for CLICK on native submit controls', () => {
+  const gate = new RiskGate();
+  // <button type="submit">Send message</button>: label alone looks harmless,
+  // but the DOM type proves it submits the form.
+  const clickSubmit = {
+    action: ActionType.CLICK,
+    target: { element_id: 'el_9', label: 'Send message' },
+    risk: RiskLevel.LOW
+  };
+
+  const assessment = gate.evaluate(clickSubmit, {
+    targetDom: { tag: 'button', type: 'submit', label: 'Send message', in_form: true }
+  });
+  assert.strictEqual(assessment.requiresConfirmation, true, 'Native submit control must require confirmation');
+  assert.strictEqual(assessment.risk, RiskLevel.HIGH);
+
+  // Same label on a plain button stays low-risk
+  const plain = gate.evaluate(clickSubmit, {
+    targetDom: { tag: 'button', type: 'button', label: 'Send message', in_form: true }
+  });
+  assert.strictEqual(plain.requiresConfirmation, false);
+
+  // Typeless button OUTSIDE any form cannot submit: stays low-risk
+  // (HTMLButtonElement.type reports 'submit' by default — must not over-trigger)
+  const outsideForm = gate.evaluate(
+    { action: ActionType.CLICK, target: { element_id: 'el_4', label: 'Search Flights' }, risk: RiskLevel.LOW },
+    { targetDom: { tag: 'button', type: 'submit', label: 'Search Flights', in_form: false } }
+  );
+  assert.strictEqual(outsideForm.requiresConfirmation, false, 'Non-form button must not require confirmation');
+});
+
 test('Schema Validator - Rejects arbitrary eval or code execution', () => {
   const maliciousAction = {
     action: ActionType.CLICK,

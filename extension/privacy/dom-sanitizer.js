@@ -6,12 +6,51 @@
 
 import { defaultPIIDetector } from './pii-detector.js';
 import { defaultSecretDetector } from './secret-detector.js';
+import { defaultLocalVault } from './local-vault.js';
 import { SymbolicSecretSource } from '../shared/constants.js';
 
 export class DOMSanitizer {
-  constructor(piiDetector = defaultPIIDetector, secretDetector = defaultSecretDetector) {
+  constructor(piiDetector = defaultPIIDetector, secretDetector = defaultSecretDetector, vault = null) {
     this.piiDetector = piiDetector;
     this.secretDetector = secretDetector;
+    // Vault is consulted ONLY to scrub page-authored example text (placeholders)
+    // that happens to match a secret. Real user values are handled via [REDACTED].
+    this.vault = vault;
+  }
+
+  _vaultSecrets() {
+    try {
+      const store = this.vault || defaultLocalVault;
+      return Object.values(store.getAllSecretsForUI()).filter((v) => typeof v === 'string');
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Scrubs page-authored decorative text (input placeholders) that contains
+   * PII-shaped example values (e.g. placeholder="ABCDE1234F").
+   * Placeholders are structural hints, not user data, but literal example
+   * secrets must still never reach remote models — and the server VLM
+   * rejects any payload containing unmasked PAN/Aadhaar patterns.
+   * Classification always runs on the RAW text first, so field identity is kept.
+   */
+  scrubPlaceholderText(text) {
+    if (!text || typeof text !== 'string') return text;
+    let out = text;
+    for (const secret of this._vaultSecrets()) {
+      if (secret.length >= 4 && out.includes(secret)) {
+        out = out.split(secret).join('[example]');
+      }
+      const clean = secret.replace(/[\s-]/g, '');
+      if (clean.length >= 6 && clean !== secret && out.includes(clean)) {
+        out = out.split(clean).join('[example]');
+      }
+    }
+    // PII-shaped examples independent of vault contents
+    out = out.replace(/\b[A-Z]{5}[0-9]{4}[A-Z]{1}\b/g, '[example]');
+    out = out.replace(/\b[2-9]\d{3}[\s-]?\d{4}[\s-]?\d{4}\b/g, '[example]');
+    return out;
   }
 
   /**
@@ -63,7 +102,11 @@ export class DOMSanitizer {
         }
       }
 
-      // 4. Clean up any internal raw references
+      // 4. Scrub PII-shaped example text from placeholders (page-authored hints,
+      // not user data) so literal examples never reach remote models.
+      sanitized.placeholder = this.scrubPlaceholderText(sanitized.placeholder);
+
+      // 5. Clean up any internal raw references
       delete sanitized.rawElement;
       return sanitized;
     });

@@ -76,7 +76,9 @@ export class ObservationFusion {
             semantic_type: domEl.semantic_type,
             value_source: domEl.value_source,
             bbox: domEl.bbox,
-            is_interactive: domEl.is_interactive
+            is_interactive: domEl.is_interactive,
+            disabled: Boolean(domEl.disabled),
+            in_form: Boolean(domEl.in_form)
           },
           visual: {
             visual_id: bestMatch.visual_id,
@@ -110,7 +112,9 @@ export class ObservationFusion {
             semantic_type: domEl.semantic_type,
             value_source: domEl.value_source,
             bbox: domEl.bbox,
-            is_interactive: domEl.is_interactive
+            is_interactive: domEl.is_interactive,
+            disabled: Boolean(domEl.disabled),
+            in_form: Boolean(domEl.in_form)
           },
           visual: {
             description: domEl.sensitive 

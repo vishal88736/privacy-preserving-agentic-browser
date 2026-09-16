@@ -96,7 +96,11 @@ export class DOMExtractor {
         ariaLabel: node.getAttribute('aria-label') || '',
         role: node.getAttribute('role') || '',
         href: node.getAttribute('href') || '',
-        disabled: Boolean(node.disabled),
+          disabled: Boolean(node.disabled),
+          // True when the control belongs to a <form> (matters because an
+          // unlabeled typeless <button> only submits when form-associated).
+          // node.form works for input/button/select/textarea.
+          in_form: Boolean(node.form),
         checked: Boolean(node.checked),
         bbox: [
           Math.round(rect.left),

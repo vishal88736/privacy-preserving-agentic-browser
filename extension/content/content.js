@@ -31,6 +31,10 @@
 
     clear() {
       this.idToElement.clear();
+      // WeakMap has no .clear(): allocate a fresh one, otherwise re-extracted
+      // identical nodes resolve to stale ids that are absent from idToElement
+      // and every lookup after the first extraction returns null.
+      this.elementToId = new WeakMap();
       this.counter = 1;
     }
 
@@ -123,7 +127,10 @@
           ariaLabel: node.getAttribute('aria-label') || '',
           role: node.getAttribute('role') || '',
           href: node.getAttribute('href') || '',
-          disabled: Boolean(node.disabled),
+           disabled: Boolean(node.disabled),
+           // True when the control belongs to a <form> (matters because an
+           // unlabeled typeless <button> only submits when form-associated).
+           in_form: Boolean(node.form),
           checked: Boolean(node.checked),
           bbox: [
             Math.round(rect.left),
@@ -155,6 +162,9 @@
     constructor() {
       this.cursorEl = null;
       this.highlightEl = null;
+      this._clearTimer = null;
+      this._reducedMotion = typeof window !== 'undefined' && window.matchMedia &&
+        window.matchMedia('(prefers-reduced-motion: reduce)').matches;
       this._ensureElements();
     }
 
@@ -226,9 +236,14 @@
       this.highlightEl.style.opacity = '1';
 
       this.showCursor(rect.left + rect.width / 2, rect.top + rect.height / 2);
+
+      // Auto-clear so the page is never permanently modified
+      if (this._clearTimer) clearTimeout(this._clearTimer);
+      this._clearTimer = setTimeout(() => this.clear(), 1800);
     }
 
     clear() {
+      if (this._clearTimer) { clearTimeout(this._clearTimer); this._clearTimer = null; }
       if (this.cursorEl) this.cursorEl.style.opacity = '0';
       if (this.highlightEl) this.highlightEl.style.opacity = '0';
     }
@@ -277,7 +292,9 @@
       }
 
       if (targetElement) {
-        targetElement.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+        const smoothOk = !(typeof window !== 'undefined' && window.matchMedia &&
+          window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+        targetElement.scrollIntoView({ behavior: smoothOk ? 'smooth' : 'auto', block: 'center', inline: 'nearest' });
         visualOverlay.highlightElement(targetElement);
         await this.sleep(150);
       }
