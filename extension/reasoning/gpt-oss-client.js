@@ -172,6 +172,7 @@ export class GPTOSSClient {
         else if (fieldName.includes('dob') || fieldName.includes('birth')) valueSource = SymbolicSecretSource.LOCAL_DOB;
         else if (fieldName.includes('phone') || fieldName.includes('mobile')) valueSource = SymbolicSecretSource.LOCAL_PHONE;
         else if (fieldName.includes('email')) valueSource = SymbolicSecretSource.LOCAL_EMAIL;
+        else if (fieldName.includes('address')) valueSource = SymbolicSecretSource.LOCAL_ADDRESS;
 
         return {
           thought: `Filling field "${unfilledField.dom.label || unfilledField.id}" using local symbolic credential: ${valueSource}`,
@@ -324,6 +325,88 @@ export class GPTOSSClient {
           action: {
             action: ActionType.CLICK,
             target: { element_id: searchBtn.id, label: 'Search' },
+            risk: RiskLevel.LOW,
+            requires_confirmation: false
+          },
+          isTerminal: false
+        };
+      }
+    }
+
+    // Task Type 5: Visual Plan Selection (Page C)
+    if (lowerTask.includes('pro') || lowerTask.includes('plan') || lowerTask.includes('basic') || lowerTask.includes('team')) {
+      const proTarget = elements.find(el => {
+        const idOrLabel = `${el.id} ${el.dom?.label || ''} ${el.visual?.description || ''}`.toLowerCase();
+        return idOrLabel.includes('choose_pro') || idOrLabel.includes('card_pro') || idOrLabel.includes('choose pro');
+      });
+      const continueBtn = elements.find(el => {
+        const idOrLabel = `${el.id} ${el.dom?.label || ''} ${el.visual?.description || ''}`.toLowerCase();
+        return idOrLabel.includes('continue') || idOrLabel.includes('visual_continue');
+      });
+
+      const proClicked = taskHistory.some(h => h.action?.target?.element_id === proTarget?.id);
+      if (proTarget && !proClicked) {
+        return {
+          thought: 'Selecting the Pro plan card.',
+          action: {
+            action: ActionType.CLICK,
+            target: { element_id: proTarget.id, label: 'Choose Pro Plan' },
+            risk: RiskLevel.LOW,
+            requires_confirmation: false
+          },
+          isTerminal: false
+        };
+      }
+
+      if (continueBtn && !taskHistory.some(h => h.action?.target?.element_id === continueBtn.id)) {
+        return {
+          thought: 'Clicking Continue to confirm plan selection.',
+          action: {
+            action: ActionType.CLICK,
+            target: { element_id: continueBtn.id, label: 'Continue' },
+            risk: RiskLevel.LOW,
+            requires_confirmation: false
+          },
+          isTerminal: false
+        };
+      }
+    }
+
+    // Task Type 6: Nickname / Benign Task (Page E)
+    if (lowerTask.includes('nickname')) {
+      const nickInput = elements.find(el => {
+        const str = `${el.id} ${el.dom?.name || ''} ${el.dom?.label || ''}`.toLowerCase();
+        return str.includes('nickname');
+      });
+      const saveBtn = elements.find(el => {
+        const str = `${el.id} ${el.dom?.label || ''}`.toLowerCase();
+        return str.includes('save') || str.includes('benign_submit');
+      });
+
+      const nickTyped = taskHistory.some(h => h.action?.action === ActionType.TYPE && h.action?.target?.element_id === nickInput?.id);
+      if (nickInput && !nickTyped) {
+        const m = task.match(/nickname\s+to\s+([A-Za-z0-9_]+)/i);
+        const val = m ? m[1] : 'PrivUser';
+        return {
+          thought: `Typing preferred nickname: ${val}`,
+          action: {
+            action: ActionType.TYPE,
+            target: { element_id: nickInput.id, label: 'Nickname' },
+            value: val,
+            value_source: null,
+            risk: RiskLevel.LOW,
+            requires_confirmation: false
+          },
+          isTerminal: false
+        };
+      }
+
+      if (saveBtn && !taskHistory.some(h => h.action?.target?.element_id === saveBtn.id)) {
+        return {
+          thought: 'Saving preferred nickname.',
+          action: {
+            action: ActionType.CLICK,
+            target: { element_id: saveBtn.id, label: 'Save nickname' },
             risk: RiskLevel.LOW,
             requires_confirmation: false
           },

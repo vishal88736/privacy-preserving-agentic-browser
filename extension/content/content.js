@@ -404,11 +404,11 @@
 
     async _executeSubmit(element) {
       if (element) {
-        if (element.form) {
-          element.form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+        if (typeof element.click === 'function') {
           element.click();
-        } else {
-          element.click();
+        } else if (element.tagName === 'FORM') {
+          if (element.requestSubmit) element.requestSubmit();
+          else element.submit();
         }
         return { success: true };
       }

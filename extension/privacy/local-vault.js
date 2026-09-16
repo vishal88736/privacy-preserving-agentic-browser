@@ -17,6 +17,7 @@ export class LocalVault {
       [SymbolicSecretSource.LOCAL_EMAIL]: 'vishal.agrawal@example.com',
       [SymbolicSecretSource.LOCAL_ADDRESS]: 'Flat 402, Green Meadows, Baner, Pune, Maharashtra - 411045',
       [SymbolicSecretSource.LOCAL_PASSWORD]: 'SecureDemoPass#2026',
+      [SymbolicSecretSource.LOCAL_PROFILE]: 'Vishal Agrawal',
       [SymbolicSecretSource.LOCAL_DOCUMENT]: {
         name: 'Aadhaar_Card_Verified.pdf',
         type: 'application/pdf',

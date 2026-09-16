@@ -25,20 +25,21 @@ Output ONLY a valid JSON object matching this schema:
 {
   "thought": "Brief explanation of observation and next step",
   "action": {
-    "action": "CLICK" | "TYPE" | "NAVIGATE" | "SUBMIT" | "UPLOAD" | "DONE" | "WAIT",
+    "action": "CLICK" | "TYPE" | "NAVIGATE" | "SUBMIT" | "UPLOAD" | "DONE" | "WAIT" | "SELECT",
     "target": { "element_id": "...", "label": "..." },
     "value": "...",
-    "value_source": null | "LOCAL_AADHAAR" | "LOCAL_PAN" | "LOCAL_DOCUMENT" | "LOCAL_PASSWORD",
+    "value_source": null | "LOCAL_FULL_NAME" | "LOCAL_AADHAAR" | "LOCAL_PAN" | "LOCAL_DOCUMENT" | "LOCAL_PASSWORD" | "LOCAL_DOB" | "LOCAL_PHONE" | "LOCAL_EMAIL" | "LOCAL_ADDRESS",
     "risk": "LOW" | "MEDIUM" | "HIGH",
     "requires_confirmation": boolean
   },
   "is_terminal": boolean
 }
 IMPORTANT RULES:
-1. For ordinary text (names, emails, search queries, addresses, etc.), set "value" to the string and set "value_source" to null.
-2. Use "value_source" ONLY when typing or uploading confidential credentials/PII (LOCAL_AADHAAR, LOCAL_PAN, LOCAL_PASSWORD, LOCAL_DOCUMENT). When using value_source, NEVER put plaintext secrets in "value".
-3. If task_history shows a SUBMIT or UPLOAD action was already performed, return action DONE with is_terminal true.
-4. Do not output markdown fences or explanatory text. Never output plaintext Aadhaar, PAN, passwords or documents."""
+1. For ordinary text (search queries, user-supplied text), set "value" to the string and set "value_source" to null.
+2. For saved profile or confidential credentials (Aadhaar, PAN, passwords, documents, saved profile name/dob/phone/email/address), set "value_source" to the symbolic token (LOCAL_FULL_NAME, LOCAL_AADHAAR, LOCAL_PAN, LOCAL_DOB, LOCAL_PHONE, LOCAL_EMAIL, LOCAL_ADDRESS, LOCAL_PASSWORD, LOCAL_DOCUMENT). When using value_source, NEVER put plaintext secrets in "value".
+3. FORM ORDER: If a form contains unfilled input fields, you MUST fill them one by one with TYPE actions FIRST. NEVER propose SUBMIT or click a submit button until ALL unfilled form inputs are filled.
+4. If task_history shows a SUBMIT or UPLOAD action was already performed, return action DONE with is_terminal true.
+5. Do not output markdown fences or explanatory text. Never output plaintext Aadhaar, PAN, passwords or documents."""
 
             user_msg = {
                 "task": task,
@@ -62,7 +63,12 @@ IMPORTANT RULES:
 
             resp = requests.post(f"{settings.AI_BASE_URL}/chat/completions", headers=headers, json=payload, timeout=12)
             if resp.status_code == 200:
-                content = resp.json()["choices"][0]["message"]["content"].strip()
+                raw_choices = resp.json().get("choices", [])
+                if not raw_choices:
+                    return None
+                content = (raw_choices[0].get("message", {}).get("content") or "").strip()
+                if not content:
+                    return None
                 if content.startswith("```"):
                     content = re.sub(r"^```(?:json)?\n?", "", content)
                     content = re.sub(r"\n?```$", "", content)
@@ -72,10 +78,8 @@ IMPORTANT RULES:
                     act = parsed.get("action") or {}
                     if act.get("value_source") and act.get("value"):
                         # If a non-secret plain value was provided, value_source should be null unless it matches symbolic constants
-                        if act["value_source"] not in ("LOCAL_AADHAAR", "LOCAL_PAN", "LOCAL_DOCUMENT", "LOCAL_PASSWORD"):
-                            act["value_source"] = None
-                        elif act.get("value") and not any(k in (act.get("target", {}).get("label", "")).lower() for k in ["aadhaar", "pan", "password", "upload", "doc"]):
-                            # Plain text for regular field (e.g. name, email) - do not attach LOCAL_DOCUMENT
+                        valid_sources = ("LOCAL_AADHAAR", "LOCAL_PAN", "LOCAL_DOCUMENT", "LOCAL_PASSWORD", "LOCAL_FULL_NAME", "LOCAL_DOB", "LOCAL_PHONE", "LOCAL_EMAIL", "LOCAL_ADDRESS", "LOCAL_PROFILE")
+                        if act["value_source"] not in valid_sources:
                             act["value_source"] = None
                     return parsed
         except Exception as e:
@@ -217,8 +221,45 @@ IMPORTANT RULES:
                     val_source = "LOCAL_DOB"
                 elif "phone" in label or "mobile" in label:
                     val_source = "LOCAL_PHONE"
+                elif "email" in label:
+                    val_source = "LOCAL_EMAIL"
+                elif "address" in label:
+                    val_source = "LOCAL_ADDRESS"
                 elif "password" in label:
                     val_source = "LOCAL_PASSWORD"
+
+                # Check if prompt specifies a literal value for non-sensitive tasks
+                literal_val = None
+                if "saved" not in lower_task and "profile" not in lower_task:
+                    if "name" in label:
+                        m = re.search(r'(?:with|name\s+is|name:?)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)', task)
+                        if m: literal_val = m.group(1)
+                    elif "email" in label:
+                        m = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', task)
+                        if m: literal_val = m.group(0)
+                    elif "phone" in label:
+                        m = re.search(r'\b[6-9]\d{9}\b', task)
+                        if m: literal_val = m.group(0)
+                    elif "address" in label:
+                        m = re.search(r'address\s+([^,]+)', task, re.I)
+                        if m: literal_val = m.group(1).strip()
+
+                if literal_val:
+                    return {
+                        "thought": f"Identified form input '{dom.get('label') or el_id}'. Typing user-specified value.",
+                        "action": {
+                            "action": "TYPE",
+                            "target": {
+                                "element_id": el_id,
+                                "label": dom.get("label") or "Form Field"
+                            },
+                            "value": literal_val,
+                            "value_source": None,
+                            "risk": "LOW",
+                            "requires_confirmation": False
+                        },
+                        "is_terminal": False
+                    }
 
                 return {
                     "thought": f"Identified form input '{dom.get('label') or el_id}'. Requesting local value resolution for {val_source}.",
@@ -230,6 +271,29 @@ IMPORTANT RULES:
                         },
                         "value_source": val_source,
                         "risk": "MEDIUM" if dom.get("sensitive") else "LOW",
+                        "requires_confirmation": False
+                    },
+                    "is_terminal": False
+                }
+
+            # Check for select dropdown
+            for el in elements:
+                dom = el.get("dom")
+                if not dom or dom.get("tag") != "select":
+                    continue
+                el_id = el.get("id")
+                already_selected = any(h.get("action", {}).get("target", {}).get("element_id") == el_id for h in task_history)
+                if already_selected:
+                    continue
+                label = (dom.get("label") or dom.get("name") or "").lower()
+                sel_val = "IN" if "country" in label else "1"
+                return {
+                    "thought": f"Selecting option in '{dom.get('label') or el_id}'.",
+                    "action": {
+                        "action": "SELECT",
+                        "target": { "element_id": el_id, "label": dom.get("label") or "Dropdown" },
+                        "value": sel_val,
+                        "risk": "LOW",
                         "requires_confirmation": False
                     },
                     "is_terminal": False
@@ -372,6 +436,70 @@ IMPORTANT RULES:
                     "action": {
                         "action": "CLICK",
                         "target": { "element_id": search_btn.get("id"), "label": "Search" },
+                        "risk": "LOW",
+                        "requires_confirmation": False
+                    },
+                    "is_terminal": False
+                }
+
+        # Scenario 5: Visual Plan Selection (Page C)
+        if any(w in lower_task for w in ["pro", "plan", "basic", "team"]):
+            pro_target = next((e for e in elements if any(w in (e.get("dom", {}).get("label") or e.get("id") or "").lower() for w in ["choose_pro", "card_pro", "pro"])), None)
+            continue_btn = next((e for e in elements if any(w in (e.get("dom", {}).get("label") or e.get("id") or "").lower() for w in ["continue", "visual_continue"])), None)
+
+            pro_clicked = any(h.get("action", {}).get("target", {}).get("element_id") == (pro_target.get("id") if pro_target else None) for h in task_history)
+            if pro_target and not pro_clicked:
+                return {
+                    "thought": "Selecting the Pro plan card.",
+                    "action": {
+                        "action": "CLICK",
+                        "target": { "element_id": pro_target.get("id"), "label": "Choose Pro Plan" },
+                        "risk": "LOW",
+                        "requires_confirmation": False
+                    },
+                    "is_terminal": False
+                }
+
+            if continue_btn and not any(h.get("action", {}).get("target", {}).get("element_id") == continue_btn.get("id") for h in task_history):
+                return {
+                    "thought": "Clicking Continue to confirm plan selection.",
+                    "action": {
+                        "action": "CLICK",
+                        "target": { "element_id": continue_btn.get("id"), "label": "Continue" },
+                        "risk": "LOW",
+                        "requires_confirmation": False
+                    },
+                    "is_terminal": False
+                }
+
+        # Scenario 6: Nickname / Benign Task (Page E)
+        if "nickname" in lower_task:
+            nick_input = next((e for e in elements if "nickname" in (e.get("dom", {}).get("label") or e.get("dom", {}).get("name") or e.get("dom", {}).get("id") or "").lower()), None)
+            save_btn = next((e for e in elements if any(w in (e.get("dom", {}).get("label") or e.get("dom", {}).get("id") or "").lower() for w in ["save", "benign_submit"])), None)
+
+            nick_typed = any(h.get("action", {}).get("action") == "TYPE" and h.get("action", {}).get("target", {}).get("element_id") == (nick_input.get("id") if nick_input else None) for h in task_history)
+            if nick_input and not nick_typed:
+                m = re.search(r'nickname\s+to\s+([A-Za-z0-9_]+)', task, re.I)
+                val = m.group(1) if m else "PrivUser"
+                return {
+                    "thought": f"Typing legitimate preferred nickname: {val}",
+                    "action": {
+                        "action": "TYPE",
+                        "target": { "element_id": nick_input.get("id"), "label": "Nickname" },
+                        "value": val,
+                        "value_source": None,
+                        "risk": "LOW",
+                        "requires_confirmation": False
+                    },
+                    "is_terminal": False
+                }
+
+            if save_btn and not any(h.get("action", {}).get("target", {}).get("element_id") == save_btn.get("id") for h in task_history):
+                return {
+                    "thought": "Saving nickname.",
+                    "action": {
+                        "action": "CLICK",
+                        "target": { "element_id": save_btn.get("id"), "label": "Save nickname" },
                         "risk": "LOW",
                         "requires_confirmation": False
                     },

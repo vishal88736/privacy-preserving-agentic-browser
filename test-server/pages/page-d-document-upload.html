@@ -24,12 +24,14 @@
     <div id="upload-confirm"></div>
   </div>
   <script>
-    document.getElementById('upload_btn').addEventListener('click', () => {
+    const handleUpload = () => {
       const f = document.getElementById('kyc_file').files[0];
       const box = document.getElementById('upload-confirm');
       if (f) { box.style.display = 'block'; box.textContent = '✓ Received file: ' + f.name; }
       else { box.style.display = 'block'; box.textContent = 'Please choose a file first.'; }
-    });
+    };
+    document.getElementById('upload_btn').addEventListener('click', handleUpload);
+    document.getElementById('kyc_file').addEventListener('change', handleUpload);
   </script>
 </body>
 </html>
