@@ -10,3 +10,7 @@ __pycache__/
 # Scratch & references
 references/
 scratch/
+
+# Test artifacts
+tests/qa_screenshots/
+

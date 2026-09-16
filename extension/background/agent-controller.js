@@ -20,6 +20,8 @@ import { defaultGPTOSSClient } from '../reasoning/gpt-oss-client.js';
 import { defaultRiskGate } from '../executor/risk-gate.js';
 import { defaultActionValidator } from '../executor/action-validator.js';
 import { defaultActionExecutor } from '../executor/action-executor.js';
+import { TaskState } from '../reasoning/task-understanding.js';
+import { defaultPageStateModeler } from '../perception/page-state-modeler.js';
 
 const MAX_CONSECUTIVE_FAILURES = 3;
 const MAX_IDENTICAL_ACTIONS = 3;
@@ -81,12 +83,36 @@ export class AgentController {
       defaultGPTOSSClient.baseUrl = base;
     }
 
-    const task = taskManager.createTask(userPrompt, tabId);
+    // Sanitize user prompt to prevent leakage of PII entered directly in the task bar
+    const sanitizedPrompt = defaultDOMSanitizer.sanitizeUserPrompt(userPrompt);
+
+    const task = taskManager.createTask(sanitizedPrompt, tabId);
+    task.taskState = new TaskState(sanitizedPrompt);
     if (settings.maxSteps) task.maxSteps = settings.maxSteps;
     this.notify('TASK_STARTED', task);
 
-    taskManager.updateState(AgentState.UNDERSTANDING_TASK, 'Breaking down your goal…');
+    taskManager.updateState(AgentState.UNDERSTANDING_TASK, 'Interpreting task goal...');
     this.notify('STATE_CHANGED', { state: AgentState.UNDERSTANDING_TASK });
+
+    try {
+      const parsedTask = await defaultGPTOSSClient.interpretTask(sanitizedPrompt);
+      task.taskState.updateFromModel(parsedTask);
+      
+      console.log("[TASK_INTERPRETED]", JSON.stringify(task.taskState.toPayload()));
+      
+      if (!task.taskState.intent || task.taskState.intent === 'unknown') {
+        throw new Error('Task interpretation failed. Could not determine a valid intent or goal.');
+      }
+    } catch (e) {
+      console.error('[AgentController] Pre-planning interpretation error:', e);
+      taskManager.failTask(e?.message || 'Failed to interpret task');
+      this.clearOverlays(task.tabId);
+      this.notify('TASK_FAILED', { error: taskManager.getTask()?.error, hint: taskManager.getTask()?.hint });
+      return;
+    }
+
+    taskManager.updateState(AgentState.UNDERSTANDING_TASK, `Goal: ${task.taskState.goal}`);
+    this.notify('STATE_CHANGED', { state: AgentState.UNDERSTANDING_TASK, goal: task.taskState.goal });
 
     this.runLoop(token).catch(err => {
       console.error('Agent loop encountered unhandled error:', err);
@@ -126,10 +152,8 @@ export class AgentController {
         break;
       }
 
-      // Circuit breaker: the planner is stuck if it emits the identical
-      // successful action repeatedly (e.g. SUBMIT after submission). Fail
-      // fast with guidance instead of burning the whole step budget.
       if (this._isRepeatingIdenticalAction(task)) {
+        console.log("[REPLAN] No progress detected. Agent repeated identical step.");
         taskManager.failTask('The agent repeated the same step without making progress.');
         this.clearOverlays(task.tabId);
         this.notify('TASK_FAILED', { error: task.error, hint: task.hint });
@@ -187,33 +211,10 @@ export class AgentController {
       currentTab.url.startsWith('view-source:')
     );
 
-    const navUrl = this._extractNavigationUrl(task.prompt, isRestrictedUrl);
     // Never navigate the extension's own pages away: that would destroy the
     // panel. The user must focus a real webpage first.
     if (currentTab?.url?.startsWith('chrome-extension://')) {
       throw new Error('The agent cannot run inside its own panel tab. Please click on the webpage first, then start the task.');
-    }
-    if (navUrl && (isRestrictedUrl || task.currentStep === 0)) {
-      taskManager.updateState(AgentState.EXECUTING, `Opening ${navUrl}…`);
-      this.notify('STATE_CHANGED', { state: AgentState.EXECUTING });
-      await defaultActionExecutor.execute(task.tabId, {
-        action: ActionType.NAVIGATE,
-        target: { url: navUrl }
-      });
-      taskManager.recordStep({
-        thought: `Opening ${navUrl}`,
-        action: { action: ActionType.NAVIGATE, target: { url: navUrl }, risk: RiskLevel.LOW },
-        success: true
-      });
-      this.notify('STEP_COMPLETED', {
-        stepNumber: task.currentStep,
-        thought: `Opening ${navUrl}`,
-        action: { action: ActionType.NAVIGATE, target: { url: navUrl } },
-        success: true,
-        timestamp: Date.now()
-      });
-      await this.sleep(1000);
-      return true;
     }
 
     if (isRestrictedUrl) {
@@ -266,7 +267,7 @@ export class AgentController {
       task.id,
       redactedScreenshot,
       sanitizedDOM,
-      { viewport: rawDOM.viewport }
+      { viewport: rawDOM.viewport, title: rawDOM.title, url: defaultDOMSanitizer.sanitizeUrl(rawDOM.url) }
     );
 
     taskManager.updatePrivacyMetrics({ serverCallsCount: 1 });
@@ -279,15 +280,31 @@ export class AgentController {
     );
     this.quarantineInjectedElements(fusedObservation);
 
+    if (!task.taskState) {
+      task.taskState = new TaskState(task.prompt);
+    }
+
+    // STEP 4.5: TASK-CONDITIONAL PAGE STATE MODELING
+    const pageState = defaultPageStateModeler.modelPageState(fusedObservation, task.taskState);
+    task.pageState = pageState;
+    console.log("[PAGE_OBSERVED]", JSON.stringify(pageState));
+
     // STEP 5: REASONING & PLANNING
-    taskManager.updateState(AgentState.PLANNING, 'Deciding the next safe action…');
-    this.notify('STATE_CHANGED', { state: AgentState.PLANNING });
+    taskManager.updateState(AgentState.PLANNING, `Planning next action for "${task.taskState.getActiveSubgoal()}"…`);
+    this.notify('STATE_CHANGED', { state: AgentState.PLANNING, active_subgoal: task.taskState.getActiveSubgoal() });
 
     const planResult = await defaultGPTOSSClient.planNextStep(
       task.prompt,
       fusedObservation,
-      task.steps
+      task.steps,
+      task.taskState,
+      pageState
     );
+
+    if (task.taskState && planResult.task_understanding) {
+      task.taskState.updateFromModel(planResult.task_understanding);
+      task.taskState.updateFromModel(planResult.current_state);
+    }
 
     taskManager.updatePrivacyMetrics({ serverCallsCount: 1 });
     const proposedAction = planResult.action;
@@ -303,18 +320,18 @@ export class AgentController {
     taskManager.updateState(AgentState.VALIDATING_ACTION, 'Validating action and privacy…');
     this.notify('STATE_CHANGED', { state: AgentState.VALIDATING_ACTION, action: proposedAction });
 
-    const preValidation = defaultActionValidator.validatePreExecution(proposedAction, fusedObservation.elements);
+    const preValidation = defaultActionValidator.validatePreExecution(proposedAction, fusedObservation, task.taskState);
     if (!preValidation.valid) {
       console.warn(`[AgentController] Action failed pre-validation: ${preValidation.reason}. Retrying observation.`);
       taskManager.recordStep({
-        thought: 'Target changed; re-analyzing the page.',
+        thought: preValidation.reason || 'Target changed; re-analyzing the page.',
         action: proposedAction,
         success: false,
         error: preValidation.reason
       });
       this.notify('STEP_FAILED', {
         stepNumber: task.currentStep,
-        thought: 'The target element changed. Re-analyzing the page.',
+        thought: preValidation.reason || 'The target element changed. Re-analyzing the page.',
         action: proposedAction,
         success: false,
         timestamp: Date.now()
@@ -416,7 +433,14 @@ export class AgentController {
       thought: planResult.thought,
       action: proposedAction,
       result: execResult,
-      success: true
+      success: true,
+      diagnostic: {
+        task_understanding: planResult.task_understanding,
+        page_understanding: planResult.page_understanding,
+        current_state: planResult.current_state,
+        task_state: task.taskState?.toPayload(),
+        page_state: task.pageState,
+      }
     });
 
     this.notify('STEP_COMPLETED', {
@@ -439,13 +463,23 @@ export class AgentController {
     const steps = task.steps || [];
     if (steps.length < MAX_IDENTICAL_ACTIONS) return false;
     const tail = steps.slice(-MAX_IDENTICAL_ACTIONS);
+    
+    // Check if state fingerprint is identical across these steps
+    const stateFingerprint = (s) => {
+      const p = s.diagnostic?.page_state || {};
+      return `${p.url}::${p.summary}::${p.detected_form}`;
+    };
+    
     const keyOf = (s) => {
       const a = s?.action || {};
       const t = a.target || {};
       return `${a.action}::${t.element_id || t.url || ''}::${a.value_source || a.value || ''}`;
     };
-    const first = keyOf(tail[0]);
-    return tail.every((s) => s.success === true && keyOf(s) === first);
+    
+    const firstAction = keyOf(tail[0]);
+    const firstState = stateFingerprint(tail[0]);
+    
+    return tail.every((s) => s.success === true && keyOf(s) === firstAction && stateFingerprint(s) === firstState);
   }
 
   /**
@@ -540,76 +574,6 @@ export class AgentController {
         }
       });
     });
-  }
-
-  _extractNavigationUrl(prompt, isRestrictedUrl = false) {
-    if (!prompt || typeof prompt !== 'string') return null;
-    const text = prompt.trim().toLowerCase();
-
-    if (text.startsWith('http://') || text.startsWith('https://')) {
-      return text;
-    }
-
-    if (/^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:\/.*)?$/.test(text)) {
-      return `https://${text}`;
-    }
-    if (/^localhost:[0-9]+(?:\/.*)?$/.test(text)) {
-      return `http://${text}`;
-    }
-
-    if (text.startsWith('play ') || text.startsWith('watch ') || text.startsWith('listen to ') || text.startsWith('listen ')) {
-      let query = text.replace(/^(?:play|watch|listen to|listen)\s+/i, '')
-                      .replace(/\s+on\s+youtube/i, '')
-                      .trim();
-      if (query) {
-        return `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
-      }
-      return 'https://www.youtube.com';
-    }
-
-    const navMatch = text.match(/(?:open|navigate to|go to|visit|launch|browse to)\s+([^\s]+)/i);
-    if (navMatch) {
-      let target = navMatch[1].toLowerCase().replace(/['"]/g, '');
-      if (target === 'youtube' || target === 'yt') return 'https://www.youtube.com';
-      if (target === 'google') return 'https://www.google.com';
-      if (target === 'github') return 'https://www.github.com';
-      if (target === 'wikipedia') return 'https://www.wikipedia.org';
-      if (target.startsWith('http://') || target.startsWith('https://')) return target;
-      if (target.startsWith('localhost:')) return `http://${target}`;
-      if (target.includes('.')) return `https://${target}`;
-
-      if (target.includes('aadhaar')) return 'http://localhost:5000/government-aadhaar.html';
-      if (target.includes('flight')) return 'http://localhost:5000/flight-search.html';
-      if (target.includes('upload') || target.includes('document')) return 'http://localhost:5000/document-upload.html';
-      if (target.includes('injection') || target.includes('prompt')) return 'http://localhost:5000/prompt-injection.html';
-
-      return `https://www.google.com/search?q=${encodeURIComponent(target)}`;
-    }
-
-    if (text === 'youtube' || text === 'yt') return 'https://www.youtube.com';
-    if (text === 'google') return 'https://www.google.com';
-    if (text === 'github') return 'https://www.github.com';
-
-    if (isRestrictedUrl) {
-      if (text.includes('aadhaar') || text.includes('pan') || text.includes('profile')) {
-        return 'http://localhost:5000/government-aadhaar.html';
-      }
-      if (text.includes('flight') || text.includes('delhi') || text.includes('pune') || text.includes('ticket')) {
-        return 'http://localhost:5000/flight-search.html';
-      }
-      if (text.includes('upload') || text.includes('pdf') || text.includes('document')) {
-        return 'http://localhost:5000/document-upload.html';
-      }
-      if (text.includes('injection') || text.includes('jailbreak') || text.includes('ignore')) {
-        return 'http://localhost:5000/prompt-injection.html';
-      }
-      if (text.includes('song') || text.includes('music') || text.includes('video') || text.includes('youtube')) {
-        return 'https://www.youtube.com';
-      }
-      if (text.includes('google')) return 'https://www.google.com';
-    }
-
-    return null;
   }
 
   sleep(ms) {

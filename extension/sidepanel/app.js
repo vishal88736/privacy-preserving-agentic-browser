@@ -139,6 +139,10 @@ class SidePanelApp {
     this.headerStatus = this.$('header-status-label');
     this.currentCard = this.$('current-task-card');
     this.currentPrompt = this.$('current-task-prompt');
+    this.semBox = this.$('semantic-understanding-box');
+    this.semIntent = this.$('sem-intent');
+    this.semTarget = this.$('sem-target');
+    this.semExpected = this.$('sem-expected');
     this.progressList = this.$('task-progress');
     this.elapsed = this.$('task-elapsed');
     this.emptyState = this.$('empty-state');
@@ -361,6 +365,21 @@ class SidePanelApp {
     if (!t?.prompt || t.state === AgentState.IDLE) { this.currentCard.hidden = true; return; }
     this.currentCard.hidden = false;
     this.currentPrompt.textContent = t.prompt;
+
+    if (t.taskState) {
+      this.semBox.style.display = 'block';
+      this.semIntent.textContent = t.taskState.intent || 'unknown';
+      
+      const targetStr = t.taskState.target 
+        ? `${t.taskState.target.type || ''} - ${t.taskState.target.entity || ''}`
+        : (t.taskState.target_entity || 'none');
+      this.semTarget.textContent = targetStr;
+      
+      this.semExpected.textContent = t.taskState.expected_state || t.taskState.expected_state_after_action || '...';
+    } else {
+      this.semBox.style.display = 'none';
+    }
+
     const activeIdx = stageForState(t.state);
     this.progressList.replaceChildren();
     PROGRESS_STAGES.forEach((s, i) => {
@@ -481,6 +500,22 @@ class SidePanelApp {
         if (r) lines.push(r);
       }
       if (data.error) lines.push(`note: ${String(data.error).slice(0, 180)}`);
+      
+      if (data.diagnostic?.task_understanding) {
+        lines.push(`intent: ${data.diagnostic.task_understanding.intent}`);
+        
+        const trg = data.diagnostic.task_understanding.target;
+        const tgtStr = trg ? `${trg.type || ''} ${trg.entity || ''}` : (data.diagnostic.task_understanding.target_entity || 'none');
+        lines.push(`target: ${tgtStr}`);
+        
+        if (data.diagnostic.task_understanding.constraints?.length) {
+           lines.push(`constraints: ${data.diagnostic.task_understanding.constraints.join(', ')}`);
+        }
+      }
+      if (data.diagnostic?.current_state) {
+        lines.push(`expected state: ${data.diagnostic.current_state.expected_state_after_action}`);
+      }
+
       det.appendChild(el('div', 'timeline-detail', lines.join('\n') || '—'));
       body.appendChild(det);
     }

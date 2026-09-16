@@ -38,9 +38,15 @@ class VisionRequest(BaseModel):
 
 class ReasonRequest(BaseModel):
     task: str
+    task_state: Optional[Dict[str, Any]] = None
+    page_state: Optional[Dict[str, Any]] = None
     fused_observation: Dict[str, Any]
     task_history: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
     timestamp: Optional[int] = None
+
+class InterpretRequest(BaseModel):
+    task: str
+
 
 @app.get("/health")
 def health_check():
@@ -76,12 +82,23 @@ def process_reason(req: ReasonRequest):
         plan = gpt_oss_service.plan_step(
             task=req.task,
             fused_observation=req.fused_observation,
-            task_history=req.task_history or []
+            task_history=req.task_history or [],
+            task_state=req.task_state,
+            page_state=req.page_state
         )
         return plan
     except Exception as e:
         import traceback; traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Reasoning error: {str(e)}")
+
+@app.post("/interpret")
+def process_interpret(req: InterpretRequest):
+    try:
+        interpretation = gpt_oss_service.interpret_task(req.task)
+        return interpretation
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Interpretation error: {str(e)}")
 
 if __name__ == "__main__":
     uvicorn.run(app, host=settings.HOST, port=settings.PORT)

@@ -163,14 +163,41 @@ export class ObservationFusion {
         .map(el => el.dom.semantic_type)
     ));
 
+    // Generate Form State
+    const inputs = unifiedElements.filter(el => el.interaction.typeable || el.interaction.uploadable || el.dom?.tag === 'select');
+    const formFields = inputs.map(el => ({
+      id: el.id,
+      role: el.role,
+      semantic_type: el.dom?.semantic_type || 'UNKNOWN',
+      state: el.dom?.value ? 'FILLED' : 'EMPTY',
+      sensitive: Boolean(el.dom?.sensitive)
+    }));
+
+    const filledCount = formFields.filter(f => f.state === 'FILLED').length;
+    const emptyCount = formFields.filter(f => f.state === 'EMPTY').length;
+
+    const formState = {
+      detected: inputs.length > 0,
+      purpose: vlmVisualObservation?.page_purpose || 'Unknown Form',
+      fields: formFields,
+      completion: {
+        filled: filledCount,
+        empty: emptyCount,
+        total: inputs.length
+      }
+    };
+
     return {
       observation_id: `obs_${Date.now()}`,
       timestamp: Date.now(),
       page: {
         domain: pageMetadata.domain || 'localhost',
         title: pageMetadata.title || 'Application',
-        viewport: pageMetadata.viewport || [1280, 800]
+        viewport: pageMetadata.viewport || [1280, 800],
+        page_type: vlmVisualObservation?.page_type || 'unknown',
+        page_purpose: vlmVisualObservation?.page_purpose || 'Unknown',
       },
+      form_state: formState,
       elements: unifiedElements,
       visual_layout_summary: vlmVisualObservation?.spatial_layout || 'Standard web layout',
       visual_state_summary: vlmVisualObservation?.visual_state || 'Interactive',

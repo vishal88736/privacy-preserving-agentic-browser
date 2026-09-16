@@ -54,6 +54,39 @@ export class DOMSanitizer {
   }
 
   /**
+   * Sanitizes a user prompt by replacing any raw secrets or PII with their
+   * symbolic source tokens (e.g. [LOCAL_PAN]) before it is sent to the reasoning model.
+   */
+  sanitizeUserPrompt(text) {
+    if (!text || typeof text !== 'string') return text;
+    let out = text;
+    
+    // 1. Vault secrets
+    try {
+      const store = this.vault || defaultLocalVault;
+      for (const [key, value] of Object.entries(store.getAllSecretsForUI())) {
+        if (typeof value === 'string' && value.length >= 4) {
+          if (out.includes(value)) {
+            out = out.split(value).join(`[${key}]`);
+          }
+          const clean = value.replace(/[\s-]/g, '');
+          if (clean.length >= 6 && clean !== value && out.includes(clean)) {
+            out = out.split(clean).join(`[${key}]`);
+          }
+        }
+      }
+    } catch {
+      // ignore vault errors
+    }
+
+    // 2. Generic PII Regex Fallbacks
+    out = out.replace(/\b[A-Z]{5}[0-9]{4}[A-Z]{1}\b/g, `[${SymbolicSecretSource.LOCAL_PAN}]`);
+    out = out.replace(/\b[2-9]\d{3}[\s-]?\d{4}[\s-]?\d{4}\b/g, `[${SymbolicSecretSource.LOCAL_AADHAAR}]`);
+    
+    return out;
+  }
+
+  /**
    * Sanitizes an array of raw DOM elements extracted from the content script.
    * @param {Array<Object>} rawElements
    * @returns {{ sanitizedElements: Array<Object>, sensitiveCount: number, detectedCategories: Set<string> }}
