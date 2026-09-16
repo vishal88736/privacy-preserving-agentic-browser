@@ -290,7 +290,7 @@ button:focus-visible, textarea:focus-visible, input:focus-visible, summary:focus
 .btn-danger-ghost { background: transparent; color: var(--danger); border-color: var(--border); }
 .btn-danger-ghost:hover { background: var(--danger-bg); }
 .btn:disabled { opacity: 0.55; cursor: default; }
-.btn[hidden] { display: none !important; }
+[hidden], .btn[hidden], .card[hidden], .backdrop[hidden] { display: none !important; }
 
 /* Progress checklist */
 .task-prompt-text { font-size: 13px; margin: 0 0 8px; color: var(--text); }

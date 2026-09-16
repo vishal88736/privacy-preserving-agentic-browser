@@ -499,20 +499,15 @@ export class AgentController {
   cancelTask() {
     this.runToken++;
     this.isCancelled = true;
+    taskManager.cancelTask();
     const task = taskManager.getTask();
     if (task) this.clearOverlays(task.tabId);
     if (this.pendingUserConfirmationResolver) {
       this.pendingUserConfirmationResolver(false);
       this.pendingUserConfirmationResolver = null;
     }
-    // Ensure cancellation is reflected even if the loop already exited
-    setTimeout(() => {
-      const t = taskManager.getTask();
-      if (t && t.state === AgentState.WAITING_FOR_USER) {
-        taskManager.cancelTask();
-        this.notify('TASK_CANCELLED', t);
-      }
-    }, 100);
+    this.notify('TASK_CANCELLED', task);
+    this.notify('STATE_CHANGED', { state: AgentState.CANCELLED });
   }
 
   async _extractDOM(tabId) {

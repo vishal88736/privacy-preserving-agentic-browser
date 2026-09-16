@@ -28,15 +28,17 @@ Output ONLY a valid JSON object matching this schema:
     "action": "CLICK" | "TYPE" | "NAVIGATE" | "SUBMIT" | "UPLOAD" | "DONE" | "WAIT",
     "target": { "element_id": "...", "label": "..." },
     "value": "...",
-    "value_source": "LOCAL_AADHAAR" | "LOCAL_PAN" | "LOCAL_DOCUMENT" | "LOCAL_PASSWORD",
+    "value_source": null | "LOCAL_AADHAAR" | "LOCAL_PAN" | "LOCAL_DOCUMENT" | "LOCAL_PASSWORD",
     "risk": "LOW" | "MEDIUM" | "HIGH",
     "requires_confirmation": boolean
   },
   "is_terminal": boolean
 }
-Do not output markdown fences or explanatory text. Never output plaintext Aadhaar, PAN, passwords or documents.
-If task_history shows a SUBMIT or UPLOAD action was already performed, the goal is reached: return DONE, never repeat the same SUBMIT/UPLOAD.
-If the goal is fulfilled, return action DONE with is_terminal true; otherwise is_terminal must be false."""
+IMPORTANT RULES:
+1. For ordinary text (names, emails, search queries, addresses, etc.), set "value" to the string and set "value_source" to null.
+2. Use "value_source" ONLY when typing or uploading confidential credentials/PII (LOCAL_AADHAAR, LOCAL_PAN, LOCAL_PASSWORD, LOCAL_DOCUMENT). When using value_source, NEVER put plaintext secrets in "value".
+3. If task_history shows a SUBMIT or UPLOAD action was already performed, return action DONE with is_terminal true.
+4. Do not output markdown fences or explanatory text. Never output plaintext Aadhaar, PAN, passwords or documents."""
 
             user_msg = {
                 "task": task,
@@ -66,6 +68,15 @@ If the goal is fulfilled, return action DONE with is_terminal true; otherwise is
                     content = re.sub(r"\n?```$", "", content)
                 parsed = json.loads(content)
                 if isinstance(parsed, dict) and "action" in parsed:
+                    # Clean up value_source if model incorrectly set it for non-sensitive values
+                    act = parsed.get("action") or {}
+                    if act.get("value_source") and act.get("value"):
+                        # If a non-secret plain value was provided, value_source should be null unless it matches symbolic constants
+                        if act["value_source"] not in ("LOCAL_AADHAAR", "LOCAL_PAN", "LOCAL_DOCUMENT", "LOCAL_PASSWORD"):
+                            act["value_source"] = None
+                        elif act.get("value") and not any(k in (act.get("target", {}).get("label", "")).lower() for k in ["aadhaar", "pan", "password", "upload", "doc"]):
+                            # Plain text for regular field (e.g. name, email) - do not attach LOCAL_DOCUMENT
+                            act["value_source"] = None
                     return parsed
         except Exception as e:
             print(f"[GPTOSS] Live model notice ({e}), falling back to deterministic planner")

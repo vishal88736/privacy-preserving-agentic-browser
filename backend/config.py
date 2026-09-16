@@ -31,10 +31,11 @@ class Settings:
     HOST: str = os.getenv("HOST", "0.0.0.0")
     PORT: int = int(os.getenv("PORT", 8000))
 
-    # Supports AI_API_KEY, OPENROUTER_API_KEY, GROK_API_KEY, XAI_API_KEY, GROQ_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY
+    # Supports AI_API_KEY, OPENROUTER_API_KEY, NVIDIA_API_KEY, GROK_API_KEY, XAI_API_KEY, GROQ_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY
     API_KEY: str = (
         os.getenv("AI_API_KEY") or
         os.getenv("OPENROUTER_API_KEY") or
+        os.getenv("NVIDIA_API_KEY") or
         os.getenv("GROK_API_KEY") or
         os.getenv("XAI_API_KEY") or
         os.getenv("GROQ_API_KEY") or
@@ -43,12 +44,14 @@ class Settings:
         ""
     )
 
-    # Base URL for API calls (OpenAI, OpenRouter, Grok/xAI, Groq, Ollama, vLLM, etc.)
+    # Base URL for API calls (OpenAI, OpenRouter, NVIDIA, Grok/xAI, Groq, Ollama, vLLM, etc.)
     AI_BASE_URL: str = os.getenv(
         "AI_BASE_URL",
         "https://openrouter.ai/api/v1" if os.getenv("OPENROUTER_API_KEY") else (
-            "https://api.x.ai/v1" if (os.getenv("GROK_API_KEY") or os.getenv("XAI_API_KEY")) else (
-                "https://api.groq.com/openai/v1" if os.getenv("GROQ_API_KEY") else "https://api.openai.com/v1"
+            "https://integrate.api.nvidia.com/v1" if os.getenv("NVIDIA_API_KEY") else (
+                "https://api.x.ai/v1" if (os.getenv("GROK_API_KEY") or os.getenv("XAI_API_KEY")) else (
+                    "https://api.groq.com/openai/v1" if os.getenv("GROQ_API_KEY") else "https://api.openai.com/v1"
+                )
             )
         )
     )

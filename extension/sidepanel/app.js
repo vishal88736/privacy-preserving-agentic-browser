@@ -236,6 +236,16 @@ class SidePanelApp {
   // ---- actions ----
   async activeTabId() {
     try {
+      // If there are multiple tabs, find an active webpage tab (not chrome-extension://)
+      const tabs = await chrome.tabs.query({ currentWindow: true });
+      const webTab = tabs.find(t => t.active && !String(t.url || '').startsWith('chrome-extension://'));
+      if (webTab) return webTab.id;
+      const nonExt = tabs.find(t => !String(t.url || '').startsWith('chrome-extension://'));
+      if (nonExt) return nonExt.id;
+      // Check all tabs across windows if needed
+      const allTabs = await chrome.tabs.query({});
+      const anyWebTab = allTabs.find(t => !String(t.url || '').startsWith('chrome-extension://'));
+      if (anyWebTab) return anyWebTab.id;
       let [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (!tab) [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
       return tab?.id ?? null;
@@ -618,4 +628,4 @@ function truncate(s, n) {
   return s.length > n ? s.slice(0, n - 1) + '…' : s;
 }
 
-document.addEventListener('DOMContentLoaded', () => { new SidePanelApp(); });
+document.addEventListener('DOMContentLoaded', () => { window.privAgentApp = new SidePanelApp(); });

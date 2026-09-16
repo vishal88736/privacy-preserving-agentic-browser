@@ -92,6 +92,10 @@ class BenchmarkHandler(http.server.SimpleHTTPRequestHandler):
         super().__init__(*args, directory=DIRECTORY, **kwargs)
 
     def do_GET(self):
+        if self.path == "/favicon.ico":
+            self.send_response(204)
+            self.end_headers()
+            return
         if self.path in ("/", "/index.html"):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -100,8 +104,11 @@ class BenchmarkHandler(http.server.SimpleHTTPRequestHandler):
             return
         return super().do_GET()
 
+class ReusableTCPServer(socketserver.TCPServer):
+    allow_reuse_address = True
+
 def run_server():
-    with socketserver.TCPServer(("", PORT), BenchmarkHandler) as httpd:
+    with ReusableTCPServer(("", PORT), BenchmarkHandler) as httpd:
         print(f"SIH Benchmark Web Server running at http://localhost:{PORT}")
         try:
             httpd.serve_forever()
