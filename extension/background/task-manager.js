@@ -36,6 +36,12 @@ export function friendlyError(rawMessage) {
       hint: 'Try a smaller first step (e.g. fill one section), then continue.'
     };
   }
+  if (low.includes('repeated the same step')) {
+    return {
+      error: 'The agent repeated the same step without making progress.',
+      hint: 'The page may already reflect the goal (e.g. already submitted). Check the page, then retry with a smaller step.'
+    };
+  }
   if (low.includes('safety gate') || low.includes('security block')) {
     return {
       error: 'A proposed action was blocked by the safety gate.',
@@ -120,6 +126,7 @@ export class TaskManager {
       steps: [],
       privacyMetrics: {
         sensitiveFieldsDetected: 0,
+        sensitiveFieldsCurrent: 0,
         secretsKeptLocal: 0,
         redactedRegionsCount: 0,
         serverCallsCount: 0,
@@ -169,6 +176,9 @@ export class TaskManager {
     if (this.currentTask) {
       const pm = this.currentTask.privacyMetrics;
       if (metricsUpdate.sensitiveFieldsDetected) pm.sensitiveFieldsDetected += metricsUpdate.sensitiveFieldsDetected;
+      // Per-observation (current page) counts overwrite; cumulative totals above accumulate.
+      if (typeof metricsUpdate.sensitiveFieldsDetected === 'number') pm.sensitiveFieldsCurrent = metricsUpdate.sensitiveFieldsDetected;
+      if (typeof metricsUpdate.redactedRegionsCount === 'number') pm.redactedRegionsCurrent = metricsUpdate.redactedRegionsCount;
       if (metricsUpdate.secretsKeptLocal) pm.secretsKeptLocal += metricsUpdate.secretsKeptLocal;
       if (metricsUpdate.redactedRegionsCount) pm.redactedRegionsCount += metricsUpdate.redactedRegionsCount;
       if (metricsUpdate.serverCallsCount) pm.serverCallsCount += metricsUpdate.serverCallsCount;

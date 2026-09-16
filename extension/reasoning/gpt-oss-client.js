@@ -46,10 +46,14 @@ export class GPTOSSClient {
 
       const data = await response.json();
       if (typeof data.action === 'object') {
+        // Only DONE is terminal: a live model may echo is_terminal=true on a
+        // non-terminal action (observed with UPLOAD), which would otherwise
+        // complete the task without executing the action.
+        const isDone = data.action?.action === 'DONE';
         return {
           thought: data.thought || 'Planning next action based on visual and DOM perception',
           action: data.action,
-          isTerminal: data.is_terminal || data.action.action === 'DONE'
+          isTerminal: isDone
         };
       }
       return this.actionParser.parse(data.raw_response || JSON.stringify(data));

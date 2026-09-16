@@ -57,6 +57,31 @@ INDEX_HTML = """<!DOCTYPE html>
       <div class="card-desc">Tests untrusted webpage content quarantining and ensures the agent ignores malicious exfiltration attempts.</div>
       <span class="tag tag-sec">Threat Defense</span>
     </a>
+    <a href="/page-a-normal-form.html" class="card">
+      <div class="card-title">A. Normal Form (non-sensitive)</div>
+      <div class="card-desc">Name, email, phone, address, country, submit. Baseline: no PII gates expected.</div>
+      <span class="tag tag-search">Validation</span>
+    </a>
+    <a href="/page-b-sensitive-form.html" class="card">
+      <div class="card-title">B. Sensitive Form (PII + password)</div>
+      <div class="card-desc">Name, Aadhaar, PAN, DOB, password, submit. Every value stays local via symbolic refs.</div>
+      <span class="tag tag-gov">Validation</span>
+    </a>
+    <a href="/page-c-visual-ui.html" class="card">
+      <div class="card-title">C. Visual UI (DOM-insufficient)</div>
+      <div class="card-desc">Custom cards, pills, canvas chart. Requires DOM + VLM fusion to interpret.</div>
+      <span class="tag tag-search">Validation</span>
+    </a>
+    <a href="/page-d-document-upload.html" class="card">
+      <div class="card-title">D. Document Upload + Confirm</div>
+      <div class="card-desc">File input, upload button, confirmation state. Bytes never reach the AI backend.</div>
+      <span class="tag tag-doc">Validation</span>
+    </a>
+    <a href="/page-e-prompt-injection.html" class="card">
+      <div class="card-title">E. Hostile Page Battery</div>
+      <div class="card-desc">Five injection shapes: ignore-orders, exfiltrate password, reveal Aadhaar, upload docs, dangerous click.</div>
+      <span class="tag tag-sec">Validation</span>
+    </a>
   </div>
 </body>
 </html>

@@ -22,6 +22,7 @@ import { defaultActionValidator } from '../executor/action-validator.js';
 import { defaultActionExecutor } from '../executor/action-executor.js';
 
 const MAX_CONSECUTIVE_FAILURES = 3;
+const MAX_IDENTICAL_ACTIONS = 3;
 const INJECTION_PATTERNS = [
   /ignore\s+(all\s+)?previous\s+instructions/i,
   /ignore\s+your\s+(system\s+)?prompt/i,
@@ -120,6 +121,16 @@ export class AgentController {
 
       if ((task.consecutiveFailures || 0) >= MAX_CONSECUTIVE_FAILURES) {
         taskManager.failTask('The agent could not find the target element — the page may have changed.');
+        this.clearOverlays(task.tabId);
+        this.notify('TASK_FAILED', { error: task.error, hint: task.hint });
+        break;
+      }
+
+      // Circuit breaker: the planner is stuck if it emits the identical
+      // successful action repeatedly (e.g. SUBMIT after submission). Fail
+      // fast with guidance instead of burning the whole step budget.
+      if (this._isRepeatingIdenticalAction(task)) {
+        taskManager.failTask('The agent repeated the same step without making progress.');
         this.clearOverlays(task.tabId);
         this.notify('TASK_FAILED', { error: task.error, hint: task.hint });
         break;
@@ -418,6 +429,23 @@ export class AgentController {
 
     await this.sleep(500);
     return true;
+  }
+
+  /**
+   * True when the tail of the step history is N identical successful actions
+   * against the same target — the planner is stuck in a loop.
+   */
+  _isRepeatingIdenticalAction(task) {
+    const steps = task.steps || [];
+    if (steps.length < MAX_IDENTICAL_ACTIONS) return false;
+    const tail = steps.slice(-MAX_IDENTICAL_ACTIONS);
+    const keyOf = (s) => {
+      const a = s?.action || {};
+      const t = a.target || {};
+      return `${a.action}::${t.element_id || t.url || ''}::${a.value_source || a.value || ''}`;
+    };
+    const first = keyOf(tail[0]);
+    return tail.every((s) => s.success === true && keyOf(s) === first);
   }
 
   /**

@@ -376,12 +376,14 @@ class SidePanelApp {
   }
 
   renderPrivacyMetrics(m) {
-    this.metricSensitive.textContent = String(m.sensitiveFieldsDetected ?? 0);
+    // "Current page" counts describe this observation; cumulative totals live in debug.
+    const current = m.sensitiveFieldsCurrent ?? m.sensitiveFieldsDetected ?? 0;
+    this.metricSensitive.textContent = String(current);
     this.metricCalls.textContent = String(m.serverCallsCount ?? 0);
     const cats = m.detectedCategories || [];
     this.privacyCats.textContent = cats.length ? `Detected this task: ${cats.join(', ')}` : '';
-    this.$('privacy-pill-text').textContent = (m.sensitiveFieldsDetected ?? 0) > 0
-      ? `${m.sensitiveFieldsDetected} field${m.sensitiveFieldsDetected === 1 ? '' : 's'} local`
+    this.$('privacy-pill-text').textContent = current > 0
+      ? `${current} field${current === 1 ? '' : 's'} local`
       : 'Protected';
     if (cats.length) this.renderPrivacySheet(cats);
   }
@@ -458,8 +460,9 @@ class SidePanelApp {
     this.errorState.hidden = true;
     this.doneSummary.textContent = data?.result || 'The agent finished the task.';
     const m = this.task?.privacyMetrics;
-    this.donePrivacy.textContent = m && m.sensitiveFieldsDetected
-      ? `${m.sensitiveFieldsDetected} sensitive field${m.sensitiveFieldsDetected === 1 ? '' : 's'} stayed on this device.`
+    const keptLocal = m ? (m.sensitiveFieldsCurrent ?? m.sensitiveFieldsDetected ?? 0) : 0;
+    this.donePrivacy.textContent = m && keptLocal
+      ? `${keptLocal} sensitive field${keptLocal === 1 ? '' : 's'} stayed on this device.`
       : 'No sensitive fields were needed.';
     this.stopElapsed();
   }

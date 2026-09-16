@@ -34,7 +34,9 @@ Output ONLY a valid JSON object matching this schema:
   },
   "is_terminal": boolean
 }
-Do not output markdown fences or explanatory text. Never output plaintext Aadhaar, PAN, passwords or documents."""
+Do not output markdown fences or explanatory text. Never output plaintext Aadhaar, PAN, passwords or documents.
+If task_history shows a SUBMIT or UPLOAD action was already performed, the goal is reached: return DONE, never repeat the same SUBMIT/UPLOAD.
+If the goal is fulfilled, return action DONE with is_terminal true; otherwise is_terminal must be false."""
 
             user_msg = {
                 "task": task,
@@ -77,6 +79,26 @@ Do not output markdown fences or explanatory text. Never output plaintext Aadhaa
         # Try live model first if API key is configured
         live_plan = self._call_live_model(task, fused_observation, task_history)
         if live_plan:
+            # Deterministic progress guard: a live model may repeat an already
+            # executed high-risk action (e.g. SUBMIT after the form submitted).
+            # Repeating it can never advance the task, so convert to DONE.
+            live_action = (live_plan.get("action") or {})
+            if live_action.get("action") in ("SUBMIT", "UPLOAD"):
+                live_target = (live_action.get("target") or {}).get("element_id")
+                for h in task_history:
+                    ha = (h.get("action") or {})
+                    if ha.get("action") == live_action.get("action"):
+                        ha_target = (ha.get("target") or {}).get("element_id")
+                        if live_target is None or ha_target is None or ha_target == live_target:
+                            return {
+                                "thought": "The requested submission/upload step was already performed. Task goal reached.",
+                                "action": {
+                                    "action": "DONE",
+                                    "risk": "LOW",
+                                    "requires_confirmation": False
+                                },
+                                "is_terminal": True
+                            }
             return live_plan
 
         # Check prompt injection heuristic in page content

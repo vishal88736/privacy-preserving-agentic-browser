@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Page C — Visual UI (DOM-insufficient controls)</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #0b1120; color: #f8fafc; padding: 32px 16px; max-width: 760px; margin: 0 auto; }
+    h1 { font-size: 22px; } p.sub { color: #94a3b8; }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin: 20px 0; }
+    .plan-card { background: linear-gradient(160deg, #1e293b, #0f172a); border: 2px solid #334155; border-radius: 14px; padding: 18px; text-align: center; cursor: pointer; }
+    .plan-card.selected { border-color: #22c55e; }
+    .plan-card h3 { margin: 0 0 6px; } .plan-card .price { font-size: 22px; font-weight: 800; color: #38bdf8; }
+    .plan-card div[role="button"] { margin-top: 10px; background: #0284c7; border-radius: 8px; padding: 8px; font-weight: 700; }
+    .canvas-wrap { background: #111c33; border: 1px solid #334155; border-radius: 12px; padding: 16px; margin: 18px 0; }
+    canvas { width: 100%; height: 140px; background: #0a0f1f; border-radius: 8px; }
+    .pill-row { display: flex; gap: 10px; margin: 16px 0; }
+    .pill { padding: 8px 16px; border-radius: 999px; background: #1e293b; border: 1px solid #475569; cursor: pointer; font-size: 13px; font-weight: 600; }
+    .pill.active { background: #4f46e5; border-color: #4f46e5; }
+    #done-c { display: none; background: rgba(16,185,129,.15); border: 1px solid #10b981; color: #34d399; border-radius: 8px; padding: 12px; margin-top: 12px; }
+  </style>
+</head>
+<body>
+  <h1>Choose Your Plan</h1>
+  <p class="sub">Page C — visually grouped custom controls. Meaning comes from layout, not just DOM tags.</p>
+
+  <div class="pill-row" role="group" aria-label="Billing period">
+    <div class="pill active" id="pill_monthly" tabindex="0">Monthly billing</div>
+    <div class="pill" id="pill_yearly" tabindex="0">Yearly billing (−20%)</div>
+  </div>
+
+  <div class="grid">
+    <div class="plan-card" id="card_basic" tabindex="0">
+      <h3>Basic</h3><div class="price">₹199/mo</div>
+      <div role="button" id="choose_basic">Choose Basic</div>
+    </div>
+    <div class="plan-card" id="card_pro" tabindex="0">
+      <h3>Pro ⭐ Recommended</h3><div class="price">₹499/mo</div>
+      <div role="button" id="choose_pro">Choose Pro</div>
+    </div>
+    <div class="plan-card" id="card_team" tabindex="0">
+      <h3>Team</h3><div class="price">₹999/mo</div>
+      <div role="button" id="choose_team">Choose Team</div>
+    </div>
+  </div>
+
+  <div class="canvas-wrap">
+    <p class="sub">Usage visualizer (canvas — no DOM semantics inside):</p>
+    <canvas id="usage_canvas" width="600" height="140"></canvas>
+  </div>
+
+  <button id="visual_continue" style="width:100%;background:#16a34a;color:#fff;border:none;border-radius:8px;padding:12px;font-size:15px;font-weight:700;cursor:pointer;">Continue with selected plan</button>
+  <div id="done-c">Plan selection confirmed.</div>
+  <script>
+    const canvas = document.getElementById('usage_canvas');
+    const g = canvas.getContext('2d');
+    g.fillStyle = '#38bdf8';
+    [40, 90, 65, 120, 80, 110, 55].forEach((h, i) => g.fillRect(20 + i * 80, 140 - h, 50, h));
+    g.fillStyle = '#f8fafc'; g.font = '12px sans-serif'; g.fillText('Weekly active users', 20, 16);
+    document.querySelectorAll('.plan-card').forEach(c => c.addEventListener('click', () => {
+      document.querySelectorAll('.plan-card').forEach(x => x.classList.remove('selected'));
+      c.classList.add('selected');
+    }));
+    document.getElementById('choose_pro').addEventListener('click', (e) => {
+      e.stopPropagation();
+      document.querySelectorAll('.plan-card').forEach(x => x.classList.remove('selected'));
+      document.getElementById('card_pro').classList.add('selected');
+    });
+    document.querySelectorAll('.pill').forEach(p => p.addEventListener('click', () => {
+      document.querySelectorAll('.pill').forEach(x => x.classList.remove('active')); p.classList.add('active');
+    }));
+    document.getElementById('visual_continue').addEventListener('click', () => {
+      document.getElementById('done-c').style.display = 'block';
+    });
+  </script>
+</body>
+</html>

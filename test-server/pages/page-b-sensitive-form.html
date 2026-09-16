@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Page B — Sensitive Identity Form</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #141a2b; color: #f1f5f9; padding: 40px 16px; max-width: 560px; margin: 0 auto; }
+    h1 { font-size: 22px; } p.sub { color: #94a3b8; }
+    form { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 20px; display: flex; flex-direction: column; gap: 12px; }
+    label { font-size: 13px; font-weight: 600; color: #cbd5e1; }
+    input { font-size: 14px; padding: 8px 10px; border: 1px solid #475569; border-radius: 8px; width: 100%; box-sizing: border-box; background: #0f172a; color: #f1f5f9; }
+    button { background: #2563eb; color: #fff; border: none; border-radius: 8px; padding: 10px; font-size: 14px; font-weight: 600; cursor: pointer; }
+    #done-b { display: none; background: rgba(16,185,129,.15); border: 1px solid #10b981; color: #34d399; border-radius: 8px; padding: 12px; margin-top: 12px; }
+  </style>
+</head>
+<body>
+  <h1>Identity Verification</h1>
+  <p class="sub">Page B — sensitive form. Values must stay local; only symbolic refs reach the AI.</p>
+  <form id="sensitive-form">
+    <div><label for="s_name">Applicant name</label><input type="text" id="s_name" name="applicant_name" placeholder="As per official ID"></div>
+    <div><label for="s_aadhaar">Aadhaar number</label><input type="text" id="s_aadhaar" name="aadhaar" placeholder="XXXX XXXX XXXX" maxlength="14"></div>
+    <div><label for="s_pan">PAN</label><input type="text" id="s_pan" name="pan" placeholder="ABCDE1234F" maxlength="10"></div>
+    <div><label for="s_dob">Date of birth</label><input type="text" id="s_dob" name="dob" placeholder="DD/MM/YYYY"></div>
+    <div><label for="s_pwd">Account password</label><input type="password" id="s_pwd" name="account_password" autocomplete="new-password" placeholder="••••••••"></div>
+    <button type="submit" id="sensitive_submit">Submit Application</button>
+  </form>
+  <div id="done-b">Identity submitted for verification.</div>
+  <script>
+    document.getElementById('sensitive-form').addEventListener('submit', function (e) {
+      e.preventDefault(); document.getElementById('done-b').style.display = 'block';
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Page D — Document Upload</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #0f172a; color: #f8fafc; padding: 40px 16px; max-width: 560px; margin: 0 auto; }
+    h1 { font-size: 22px; } p.sub { color: #94a3b8; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 20px; }
+    label { font-size: 13px; font-weight: 600; display: block; margin-bottom: 8px; }
+    input[type=file] { width: 100%; margin-bottom: 12px; }
+    button { background: #6366f1; color: #fff; border: none; border-radius: 8px; padding: 10px 16px; font-size: 14px; font-weight: 600; cursor: pointer; }
+    #upload-confirm { display: none; background: rgba(16,185,129,.15); border: 1px solid #10b981; color: #34d399; border-radius: 8px; padding: 12px; margin-top: 12px; }
+  </style>
+</head>
+<body>
+  <h1>KYC Document Upload</h1>
+  <p class="sub">Page D — attach an identity PDF, press Upload, see confirmation. File bytes must never reach the AI.</p>
+  <div class="card">
+    <label for="kyc_file">Upload Aadhaar document (PDF)</label>
+    <input type="file" id="kyc_file" name="aadhaar_document" accept=".pdf,.jpg,.png">
+    <button id="upload_btn" type="button">Upload Document</button>
+    <div id="upload-confirm"></div>
+  </div>
+  <script>
+    document.getElementById('upload_btn').addEventListener('click', () => {
+      const f = document.getElementById('kyc_file').files[0];
+      const box = document.getElementById('upload-confirm');
+      if (f) { box.style.display = 'block'; box.textContent = '✓ Received file: ' + f.name; }
+      else { box.style.display = 'block'; box.textContent = 'Please choose a file first.'; }
+    });
+  </script>
+</body>
+</html>
