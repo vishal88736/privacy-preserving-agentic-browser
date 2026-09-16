@@ -55,7 +55,7 @@
 
   const registry = new ElementRegistry();
 
-  // 2. DOM Extractor
+  // 2. DOM Extractor — interactive controls PLUS page evidence (cards, prices, headings, text)
   class DOMExtractor {
     getAccessibleLabel(element) {
       const labelledBy = element.getAttribute('aria-labelledby');
@@ -98,9 +98,93 @@
              rect.left < window.innerWidth && rect.right > 0;
     }
 
+    getContextText(node) {
+      const container = node.closest('article, li, tr, form, fieldset, [role="listitem"], [class*="card"], [class*="product"], [class*="result"], [class*="item"], [class*="flight"], [class*="listing"], [data-product], [data-asin]') || node.parentElement;
+      if (!container) return '';
+      return String(container.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 280);
+    }
+
+    parsePrice(text) {
+      if (!text) return null;
+      const m = String(text).match(/(?:₹|Rs\.?\s*|INR\s*|USD\s*|\$|€|£)\s*([\d,]+(?:\.\d{1,2})?)/i);
+      if (!m) return null;
+      const n = Number(m[1].replace(/,/g, ''));
+      return Number.isFinite(n) ? n : null;
+    }
+
+    bboxOf(rect) {
+      return [
+        Math.round(rect.left),
+        Math.round(rect.top),
+        Math.round(rect.width),
+        Math.round(rect.height)
+      ];
+    }
+
+    containsBBox(outer, inner) {
+      return inner[0] >= outer[0] - 6 &&
+        inner[1] >= outer[1] - 6 &&
+        inner[0] + inner[2] <= outer[0] + outer[2] + 6 &&
+        inner[1] + inner[3] <= outer[1] + outer[3] + 6;
+    }
+
+    extractHeadings() {
+      const out = [];
+      for (const h of document.querySelectorAll('h1, h2, h3, [role="heading"]')) {
+        const rect = h.getBoundingClientRect();
+        if (!this.isElementVisible(h, rect)) continue;
+        const text = (h.innerText || '').replace(/\s+/g, ' ').trim();
+        if (!text) continue;
+        out.push({ tag: h.tagName.toLowerCase(), text: text.slice(0, 160), bbox: this.bboxOf(rect) });
+        if (out.length >= 12) break;
+      }
+      return out;
+    }
+
+    extractResultItems(interactive) {
+      const selectors = '[data-asin], [data-product-id], [data-sku], [data-product], .s-result-item, .product-card, .product, .flight-card, .search-result, .result-item, .listing-card, .item-card, article, [role="listitem"]';
+      const cards = [];
+      const seen = new Set();
+      let nodes = [];
+      try { nodes = Array.from(document.querySelectorAll(selectors)); } catch { nodes = []; }
+
+      for (const node of nodes) {
+        if (seen.has(node) || node.closest('nav, header, footer, [role="navigation"]')) continue;
+        const rect = node.getBoundingClientRect();
+        if (!this.isElementVisible(node, rect) || rect.height < 40 || rect.width < 80) continue;
+        seen.add(node);
+        cards.push({ node, bbox: this.bboxOf(rect) });
+        if (cards.length >= 24) break;
+      }
+
+      const items = [];
+      for (let i = 0; i < cards.length; i++) {
+        const { node, bbox } = cards[i];
+        const text = String(node.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 360);
+        if (text.length < 8) continue;
+        const price_value = this.parsePrice(text);
+        const priceMatch = text.match(/(?:₹|Rs\.?\s*|INR\s*|\$|€|£)\s*[\d,]+(?:\.\d{1,2})?/i);
+        const heading = (node.querySelector('h1, h2, h3, h4, a, [class*="title"], [class*="name"]')?.innerText || '')
+          .replace(/\s+/g, ' ').trim().slice(0, 140);
+        const nested = interactive.filter((el) => el.bbox && this.containsBBox(bbox, el.bbox));
+        const primary = nested.find((el) => el.tag === 'a' || el.tag === 'button' || el.role === 'button') || nested[0] || null;
+        items.push({
+          id: `item_${i + 1}`,
+          title: heading || text.slice(0, 80),
+          text,
+          price_text: priceMatch ? priceMatch[0] : null,
+          price_value,
+          primary_action_id: primary?.id || null,
+          nested_element_ids: nested.map((el) => el.id).slice(0, 8),
+          bbox
+        });
+      }
+      return items;
+    }
+
     extractPageElements() {
       registry.clear();
-      const selector = 'input, button, a, select, textarea, [role="button"], [role="textbox"], [role="checkbox"], [tabindex]:not([tabindex="-1"])';
+      const selector = 'input, button, a, select, textarea, [role="button"], [role="textbox"], [role="checkbox"], [role="option"], [role="link"], [tabindex]:not([tabindex="-1"])';
       const rawNodes = Array.from(document.querySelectorAll(selector));
 
       const extracted = [];
@@ -110,10 +194,13 @@
         const isVisible = this.isElementVisible(node, rect);
 
         if (!isVisible && node.type !== 'file') continue;
+        if (extracted.length >= 80) break;
 
         const id = registry.register(node);
         const tag = node.tagName.toLowerCase();
         const label = this.getAccessibleLabel(node);
+        const context = this.getContextText(node);
+        const price_value = this.parsePrice(`${label} ${context}`);
 
         extracted.push({
           id,
@@ -127,21 +214,22 @@
           ariaLabel: node.getAttribute('aria-label') || '',
           role: node.getAttribute('role') || '',
           href: node.getAttribute('href') || '',
-           disabled: Boolean(node.disabled),
-           // True when the control belongs to a <form> (matters because an
-           // unlabeled typeless <button> only submits when form-associated).
-           in_form: Boolean(node.form),
+          disabled: Boolean(node.disabled),
+          in_form: Boolean(node.form),
           checked: Boolean(node.checked),
-          bbox: [
-            Math.round(rect.left),
-            Math.round(rect.top),
-            Math.round(rect.width),
-            Math.round(rect.height)
-          ],
+          context,
+          price_value,
+          options: tag === 'select'
+            ? Array.from(node.options || []).slice(0, 20).map((o) => String(o.text || o.value || '').trim()).filter(Boolean)
+            : undefined,
+          bbox: this.bboxOf(rect),
           is_interactive: true,
           is_visible: isVisible
         });
       }
+
+      const main = document.querySelector('main, [role="main"], #content, .content') || document.body;
+      const visible_text = String(main?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 4000);
 
       return {
         url: window.location.href,
@@ -150,6 +238,14 @@
           width: window.innerWidth,
           height: window.innerHeight
         },
+        scroll: {
+          x: Math.round(window.scrollX || 0),
+          y: Math.round(window.scrollY || 0),
+          maxY: Math.round(document.documentElement.scrollHeight || 0)
+        },
+        headings: this.extractHeadings(),
+        result_items: this.extractResultItems(extracted),
+        visible_text,
         elements: extracted
       };
     }

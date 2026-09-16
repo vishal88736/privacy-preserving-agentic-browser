@@ -1,14 +1,14 @@
 /**
  * GPT-OSS 120B Reasoning Client
- * Connects to the server-hosted reasoning endpoint (/reason), passes
- * the sanitized unified observation, and receives the structured semantic action plan.
+ * Sends a COMPACT grounded observation (not a raw DOM dump) to /reason.
  */
 
-import { ServerDefaults, ActionType, SymbolicSecretSource, RiskLevel } from '../shared/constants.js';
+import { ServerDefaults, ActionType, RiskLevel } from '../shared/constants.js';
 import { validateReasonPayload } from '../shared/schemas.js';
 import { defaultPolicyEngine } from '../privacy/policy-engine.js';
 import { defaultActionParser } from './action-parser.js';
-import { TaskState } from './task-understanding.js';
+import { localInterpretTask } from './task-understanding.js';
+import { defaultPromptBuilder } from './prompt-builder.js';
 
 export class GPTOSSClient {
   constructor(baseUrl = ServerDefaults.BACKEND_BASE_URL) {
@@ -17,13 +17,8 @@ export class GPTOSSClient {
     this.actionParser = defaultActionParser;
   }
 
-  /**
-   * Dispatches task interpretation request to backend before loop starts
-   */
   async interpretTask(taskPrompt) {
     const payload = { task: taskPrompt };
-    
-    // Safety scan
     this.policyEngine.enforceOutboundSafety(payload);
 
     try {
@@ -34,35 +29,36 @@ export class GPTOSSClient {
       });
       if (!response.ok) throw new Error(`Interpret returned ${response.status}`);
       const data = await response.json();
+      if (!data || data.intent === 'unknown') {
+        return localInterpretTask(taskPrompt);
+      }
       return data;
     } catch (err) {
       console.warn(`[GPTOSSClient] interpretTask failed: ${err.message}`);
-      return {
-        intent: 'unknown',
-        target: null,
-        expected_state: null,
-        confidence: 0.0
-      };
+      return localInterpretTask(taskPrompt);
     }
   }
 
-  /**
-   * Dispatches task reasoning request to backend
-   */
   async planNextStep(task, fusedObservation, taskHistory = [], taskState = null, pageState = null) {
+    const compactObs = defaultPromptBuilder.compactObservation(fusedObservation, pageState);
+    const history = (taskHistory || []).slice(-5).map((s) => ({
+      thought: s.thought,
+      action: s.action?.action,
+      target: s.action?.target?.element_id || s.action?.target?.label,
+      success: s.success,
+      error: s.error || undefined
+    }));
+
     const payload = {
       task,
       task_state: taskState ? (taskState.toPayload ? taskState.toPayload() : taskState) : null,
       page_state: pageState || null,
-      fused_observation: fusedObservation,
-      task_history: taskHistory,
+      fused_observation: compactObs,
+      task_history: history,
       timestamp: Date.now()
     };
 
-    // 1. Validate payload
     validateReasonPayload(payload);
-
-    // 2. Scan outbound data to ensure no plaintext secrets are leaking
     this.policyEngine.enforceOutboundSafety(payload);
 
     try {
@@ -83,6 +79,7 @@ export class GPTOSSClient {
           task_understanding: data.task_understanding,
           page_understanding: data.page_understanding,
           current_state: data.current_state,
+          grounding: data.grounding,
           thought: data.thought || 'Planning next action based on semantic reasoning',
           action: data.action,
           isTerminal: isDone

@@ -31,6 +31,20 @@ export class ActionValidator {
     }
 
     if (action.target?.element_id) {
+      let eid = action.target.element_id;
+      if (String(eid).startsWith('item_')) {
+        const item = (fusedObservation.result_items || []).find((i) => i.id === eid);
+        if (item?.primary_action_id) {
+          action.target.element_id = item.primary_action_id;
+          eid = item.primary_action_id;
+        }
+      }
+      if (eid === 'el_xxx' || !/^el_\d+$|^vis_target_\d+$/.test(String(eid))) {
+        return {
+          valid: false,
+          reason: `Target element "${eid}" is not a real page element id.`
+        };
+      }
       const match = availableElements.find(el => el.id === action.target.element_id);
       if (!match) {
         return {

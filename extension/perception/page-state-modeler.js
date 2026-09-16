@@ -1,23 +1,19 @@
 /**
  * Page State Modeler
- * Processes the fused observation to extract a compact, semantic representation 
- * of the current page for the reasoning model, without hardcoding site-specific rules.
+ * Builds a compact, task-conditioned view of the current page so the
+ * reasoner sees relevant evidence instead of an undifferentiated DOM dump.
  */
 
+import { defaultTaskGrounding } from './task-grounding.js';
+
 export class PageStateModeler {
-  /**
-   * Models the current page to reduce noise for the reasoning model
-   * @param {Object} fusedObservation - Unified observation from ObservationFusion
-   * @param {Object} taskState - Current TaskState
-   * @returns {Object} Structured Page State
-   */
   modelPageState(fusedObservation, taskState) {
     const page = fusedObservation?.page || {};
     const elements = fusedObservation?.elements || [];
     const domain = page.domain || 'unknown';
     const title = page.title || 'unknown';
-    const url = page.url || '';
-    
+    const url = page.url || domain || '';
+
     const candidateElements = [];
     let formInputs = 0;
     let links = 0;
@@ -27,16 +23,14 @@ export class PageStateModeler {
       const dom = el.dom || {};
       const interaction = el.interaction || {};
       const visual = el.visual || {};
-      
-      // Keep interactive elements
+
       if (interaction.clickable || interaction.typeable || interaction.uploadable || dom.tag === 'select') {
         if (interaction.typeable) formInputs++;
         if (dom.tag === 'a') links++;
         if (dom.tag === 'button') buttons++;
 
         const label = (dom.label || dom.name || dom.placeholder || visual.description || '').trim();
-        
-        // Build stable semantic identity
+
         candidateElements.push({
           element_id: el.id,
           role: dom.tag || el.role,
@@ -44,6 +38,8 @@ export class PageStateModeler {
           label: label || undefined,
           value: dom.value || undefined,
           href: dom.href || undefined,
+          context: (dom.context || '').slice(0, 160) || undefined,
+          price_value: dom.price_value ?? undefined,
           sensitive: dom.sensitive || undefined,
           semantic_type: dom.semantic_type || undefined,
           is_typeable: interaction.typeable || undefined,
@@ -52,22 +48,34 @@ export class PageStateModeler {
       }
     }
 
-    const page_type = this._inferPageType(url, title, formInputs, links);
+    const grounding = defaultTaskGrounding.ground(taskState, fusedObservation);
+    const page_type = this._inferPageType(url, title, formInputs, links, fusedObservation);
 
     return {
       url: domain,
       title: title,
       page_type: page_type,
-      summary: `Page contains ${formInputs} inputs, ${buttons} buttons, and ${links} links.`,
+      summary: `Page contains ${formInputs} inputs, ${buttons} buttons, ${links} links, ${(fusedObservation.result_items || []).length} result cards.`,
       elements: candidateElements,
-      detected_form: fusedObservation?.form_state?.detected || false
+      detected_form: fusedObservation?.form_state?.detected || false,
+      headings: (fusedObservation.headings || []).map((h) => h.text),
+      result_sets: grounding.result_sets,
+      ranked_candidates: grounding.ranked_candidates,
+      resolved_references: grounding.resolved_references,
+      budget: grounding.budget,
+      optimization: grounding.optimization,
+      suggested_search_element: grounding.suggested_search_element,
+      visible_text_excerpt: String(fusedObservation.visible_text || '').slice(0, 1200),
+      scroll: page.scroll || null
     };
   }
 
-  _inferPageType(url, title, formsCount, linksCount) {
-    const urlLower = url.toLowerCase();
-    const titleLower = title.toLowerCase();
+  _inferPageType(url, title, formsCount, linksCount, fused) {
+    const urlLower = String(url || '').toLowerCase();
+    const titleLower = String(title || '').toLowerCase();
+    const items = fused?.result_items || [];
 
+    if (items.length >= 2) return 'SEARCH_RESULTS';
     if (urlLower.includes('search') || urlLower.includes('query=') || urlLower.includes('q=') || titleLower.includes('search')) {
       return 'SEARCH_RESULTS';
     }

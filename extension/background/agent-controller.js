@@ -20,7 +20,7 @@ import { defaultGPTOSSClient } from '../reasoning/gpt-oss-client.js';
 import { defaultRiskGate } from '../executor/risk-gate.js';
 import { defaultActionValidator } from '../executor/action-validator.js';
 import { defaultActionExecutor } from '../executor/action-executor.js';
-import { TaskState } from '../reasoning/task-understanding.js';
+import { TaskState, localInterpretTask } from '../reasoning/task-understanding.js';
 import { defaultPageStateModeler } from '../perception/page-state-modeler.js';
 
 const MAX_CONSECUTIVE_FAILURES = 3;
@@ -96,13 +96,13 @@ export class AgentController {
 
     try {
       const parsedTask = await defaultGPTOSSClient.interpretTask(sanitizedPrompt);
-      task.taskState.updateFromModel(parsedTask);
-      
-      console.log("[TASK_INTERPRETED]", JSON.stringify(task.taskState.toPayload()));
-      
-      if (!task.taskState.intent || task.taskState.intent === 'unknown') {
-        throw new Error('Task interpretation failed. Could not determine a valid intent or goal.');
+      if (!parsedTask || parsedTask.intent === 'unknown') {
+        task.taskState.updateFromModel(localInterpretTask(sanitizedPrompt));
+      } else {
+        task.taskState.updateFromModel(parsedTask);
       }
+
+      console.log("[TASK_INTERPRETED]", JSON.stringify(task.taskState.toPayload()));
     } catch (e) {
       console.error('[AgentController] Pre-planning interpretation error:', e);
       taskManager.failTask(e?.message || 'Failed to interpret task');
@@ -243,7 +243,16 @@ export class AgentController {
     const { sanitizedElements, sensitiveCount, detectedCategories } =
       defaultDOMSanitizer.sanitizeElements(rawDOM.elements);
 
-    const sanitizedDOM = { ...rawDOM, elements: sanitizedElements };
+    const extras = defaultDOMSanitizer.sanitizePageExtras(rawDOM);
+
+    const sanitizedDOM = {
+      ...rawDOM,
+      elements: sanitizedElements,
+      headings: extras.headings,
+      result_items: extras.result_items,
+      visible_text: extras.visible_text,
+      scroll: extras.scroll
+    };
 
     const redactedScreenshot = await defaultScreenshotSanitizer.redactScreenshot(
       screenshotResponse.dataUrl,
@@ -276,7 +285,16 @@ export class AgentController {
     const fusedObservation = defaultObservationFusion.fuse(
       sanitizedElements,
       visualObservation,
-      { domain: defaultDOMSanitizer.sanitizeUrl(rawDOM.url), title: rawDOM.title, viewport: rawDOM.viewport }
+      {
+        domain: defaultDOMSanitizer.sanitizeUrl(rawDOM.url),
+        url: defaultDOMSanitizer.sanitizeUrl(rawDOM.url),
+        title: rawDOM.title,
+        viewport: rawDOM.viewport,
+        scroll: extras.scroll,
+        headings: extras.headings,
+        result_items: extras.result_items,
+        visible_text: extras.visible_text
+      }
     );
     this.quarantineInjectedElements(fusedObservation);
 

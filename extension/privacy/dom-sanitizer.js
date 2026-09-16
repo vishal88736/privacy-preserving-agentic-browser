@@ -138,6 +138,11 @@ export class DOMSanitizer {
       // 4. Scrub PII-shaped example text from placeholders (page-authored hints,
       // not user data) so literal examples never reach remote models.
       sanitized.placeholder = this.scrubPlaceholderText(sanitized.placeholder);
+      if (sanitized.label) sanitized.label = this.scrubPlaceholderText(sanitized.label);
+      if (sanitized.context) sanitized.context = this.sanitizeUserPrompt(sanitized.context);
+      if (Array.isArray(sanitized.options)) {
+        sanitized.options = sanitized.options.map((o) => this.sanitizeUserPrompt(o));
+      }
 
       // 5. Clean up any internal raw references
       delete sanitized.rawElement;
@@ -148,6 +153,28 @@ export class DOMSanitizer {
       sanitizedElements,
       sensitiveCount,
       detectedCategories: Array.from(detectedCategories)
+    };
+  }
+
+  sanitizeResultItems(items = []) {
+    return (items || []).map((it) => ({
+      ...it,
+      title: this.sanitizeUserPrompt(it.title || ''),
+      text: this.sanitizeUserPrompt(String(it.text || '').slice(0, 360)),
+      price_text: it.price_text || null,
+      price_value: it.price_value ?? null
+    }));
+  }
+
+  sanitizePageExtras(rawDOM = {}) {
+    return {
+      headings: (rawDOM.headings || []).map((h) => ({
+        ...h,
+        text: this.sanitizeUserPrompt(h.text || '')
+      })),
+      visible_text: this.sanitizeUserPrompt(String(rawDOM.visible_text || '')).slice(0, 4000),
+      result_items: this.sanitizeResultItems(rawDOM.result_items || []),
+      scroll: rawDOM.scroll || null
     };
   }
 

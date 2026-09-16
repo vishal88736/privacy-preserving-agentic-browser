@@ -78,7 +78,10 @@ export class ObservationFusion {
             bbox: domEl.bbox,
             is_interactive: domEl.is_interactive,
             disabled: Boolean(domEl.disabled),
-            in_form: Boolean(domEl.in_form)
+            in_form: Boolean(domEl.in_form),
+            context: domEl.context || '',
+            price_value: domEl.price_value ?? null,
+            options: domEl.options
           },
           visual: {
             visual_id: bestMatch.visual_id,
@@ -87,7 +90,7 @@ export class ObservationFusion {
             visual_bbox: bestMatch.bbox
           },
           interaction: {
-            clickable: domEl.tag === 'button' || domEl.tag === 'a' || domEl.role === 'button',
+            clickable: ['button', 'a'].includes(domEl.tag) || ['button', 'link'].includes(domEl.role) || Boolean(domEl.is_interactive && domEl.tag !== 'input' && domEl.tag !== 'textarea' && domEl.tag !== 'select'),
             typeable: domEl.tag === 'input' || domEl.tag === 'textarea',
             uploadable: domEl.type === 'file'
           },
@@ -114,7 +117,10 @@ export class ObservationFusion {
             bbox: domEl.bbox,
             is_interactive: domEl.is_interactive,
             disabled: Boolean(domEl.disabled),
-            in_form: Boolean(domEl.in_form)
+            in_form: Boolean(domEl.in_form),
+            context: domEl.context || '',
+            price_value: domEl.price_value ?? null,
+            options: domEl.options
           },
           visual: {
             description: domEl.sensitive 
@@ -123,7 +129,7 @@ export class ObservationFusion {
             confidence: 0.8
           },
           interaction: {
-            clickable: domEl.tag === 'button' || domEl.tag === 'a' || domEl.role === 'button',
+            clickable: ['button', 'a'].includes(domEl.tag) || ['button', 'link'].includes(domEl.role) || Boolean(domEl.is_interactive && domEl.tag !== 'input' && domEl.tag !== 'textarea' && domEl.tag !== 'select'),
             typeable: domEl.tag === 'input' || domEl.tag === 'textarea',
             uploadable: domEl.type === 'file'
           },
@@ -193,11 +199,16 @@ export class ObservationFusion {
       page: {
         domain: pageMetadata.domain || 'localhost',
         title: pageMetadata.title || 'Application',
+        url: pageMetadata.url || pageMetadata.domain || '',
         viewport: pageMetadata.viewport || [1280, 800],
+        scroll: pageMetadata.scroll || null,
         page_type: vlmVisualObservation?.page_type || 'unknown',
         page_purpose: vlmVisualObservation?.page_purpose || 'Unknown',
       },
       form_state: formState,
+      headings: pageMetadata.headings || [],
+      result_items: pageMetadata.result_items || [],
+      visible_text: pageMetadata.visible_text || '',
       elements: unifiedElements,
       visual_layout_summary: vlmVisualObservation?.spatial_layout || 'Standard web layout',
       visual_state_summary: vlmVisualObservation?.visual_state || 'Interactive',
