@@ -406,11 +406,17 @@
           return this._executeSelect(targetElement, resolvedValue);
 
         case 'CHECK':
-          if (targetElement) targetElement.checked = true;
+          if (targetElement) {
+            if (!targetElement.checked && typeof targetElement.click === 'function') targetElement.click();
+            else { targetElement.checked = true; targetElement.dispatchEvent(new Event('change', { bubbles: true })); }
+          }
           return { success: true };
 
         case 'UNCHECK':
-          if (targetElement) targetElement.checked = false;
+          if (targetElement) {
+            if (targetElement.checked && typeof targetElement.click === 'function') targetElement.click();
+            else { targetElement.checked = false; targetElement.dispatchEvent(new Event('change', { bubbles: true })); }
+          }
           return { success: true };
 
         case 'SCROLL':
@@ -428,8 +434,28 @@
           await this.sleep(actionPayload.duration || 1000);
           return { success: true };
 
-        default:
+        case 'PRESS_KEY':
+          return this._executePressKey(targetElement, actionPayload);
+        case 'HOVER':
+          if (targetElement) {
+            targetElement.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true }));
+            targetElement.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, cancelable: true }));
+            return { success: true };
+          }
+          throw new Error('Target hover element not found');
+        case 'GO_BACK':
+          window.history.back();
+          await this.sleep(600);
           return { success: true };
+        case 'GO_FORWARD':
+          window.history.forward();
+          await this.sleep(600);
+          return { success: true };
+
+        default:
+          // Never fake success: unsupported verbs must fail loudly so the
+          // planner re-grounds instead of assuming progress.
+          return { success: false, error: `Unsupported content action: ${action}` };
       }
     }
 
@@ -509,6 +535,14 @@
         return { success: true };
       }
       throw new Error('Target submit button not found');
+    }
+
+    async _executePressKey(element, actionPayload) {
+      const key = actionPayload.resolvedValue || actionPayload.value || 'Enter';
+      const target = element || document.activeElement || document.body;
+      target.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: String(key) }));
+      target.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, cancelable: true, key: String(key) }));
+      return { success: true };
     }
 
     sleep(ms) {

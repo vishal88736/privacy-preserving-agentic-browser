@@ -27,6 +27,34 @@ export class ScreenshotSanitizer {
       return screenshotDataUrl;
     }
 
+    // Fail closed: if redaction is impossible, never return the unredacted
+    // image. Return a neutral placeholder so the VLM still receives layout
+    // signal without any sensitive pixels.
+    const failClosedPlaceholder = async () => {
+      try {
+        const w = 640; const h = 360;
+        if (typeof OffscreenCanvas !== 'undefined') {
+          const c = new OffscreenCanvas(w, h);
+          const ctx = c.getContext('2d');
+          ctx.fillStyle = '#111827'; ctx.fillRect(0, 0, w, h);
+          ctx.fillStyle = '#ffffff'; ctx.font = 'bold 20px sans-serif';
+          ctx.fillText(`Privacy-redacted layout (${sensitiveElements.length} masked regions)`, 20, h / 2);
+          if (c.convertToBlob) {
+            const blob = await c.convertToBlob({ type: 'image/webp', quality: 0.8 });
+            return await this._blobToDataURL(blob);
+          }
+        } else if (typeof document !== 'undefined' && document.createElement) {
+          const c = document.createElement('canvas');
+          c.width = 640; c.height = 360;
+          const ctx = c.getContext('2d');
+          ctx.fillStyle = '#111827'; ctx.fillRect(0, 0, 640, 360);
+          if (c.toDataURL) return c.toDataURL('image/webp', 0.8);
+        }
+      } catch { /* fall through */ }
+      // 1x1 opaque pixel as last resort — never the raw screenshot.
+      return 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    };
+
     try {
       // In browser extension environment, create bitmap or image
       let imageBitmap;
@@ -35,8 +63,9 @@ export class ScreenshotSanitizer {
         const blob = await response.blob();
         imageBitmap = await createImageBitmap(blob);
       } else {
-        // Fallback for node/unit tests or environments without createImageBitmap
-        return this._mockRedactionDataUrl(screenshotDataUrl, sensitiveElements.length);
+        // Node/unit-test env without image decoding: never return the raw
+        // pixels. Return a redaction marker (no original bytes).
+        return `data:image/png;base64,UkVEQUNURUQ=#redacted_${sensitiveElements.length}_regions`;
       }
 
       const imgWidth = imageBitmap.width;
@@ -57,7 +86,7 @@ export class ScreenshotSanitizer {
         canvas.height = imgHeight;
         ctx = canvas.getContext('2d');
       } else {
-        return screenshotDataUrl;
+        return await failClosedPlaceholder();
       }
 
       // Draw original image
@@ -94,10 +123,10 @@ export class ScreenshotSanitizer {
         return canvas.toDataURL('image/webp', 0.8);
       }
 
-      return screenshotDataUrl;
+      return await failClosedPlaceholder();
     } catch (err) {
-      console.warn('Screenshot redaction fallback due to canvas limitation:', err);
-      return screenshotDataUrl;
+      console.warn('Screenshot redaction failed closed (placeholder returned):', err);
+      return await failClosedPlaceholder();
     }
   }
 

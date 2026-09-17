@@ -122,9 +122,17 @@ export class TaskGrounding {
       if (/footer|copyright|terms of use|contact us|about us/i.test(hay) && !/about|contact|terms/i.test(allText)) {
         score -= 3;
       }
+      // Player/media controls are noise during search/select flows. Push them
+      // negative so they surface in ignored_noise and never outrank results.
+      if (/previous|next|play|pause|volume|mute|replay|shuffle|\bmix\b|subscribe|like|dislike|share|clip|save|miniplayer/i.test(hay)
+        && /search|find|open|cheapest|popular|latest/i.test(allText)
+        && !/play|watch|video|song|music/i.test(allText)) {
+        score -= 6;
+      }
 
       return {
         element_id: el.id,
+        id: el.id,
         score,
         label: d.label || el.visual?.description || '',
         role: d.tag || el.role,
@@ -157,7 +165,7 @@ export class TaskGrounding {
       const pickIdx = ordinal ? Math.min(ordinal, suitable.length) - 1 : 0;
       const pick = suitable[pickIdx];
       if (cheapest) resolved.cheapest = pick.primary_action_id || pick.id;
-      if (ordinal === 1 || /first|suitable/i.test(allText)) {
+      if (ordinal === 1 || /\bfirst\b/i.test(allText)) {
         resolved.first_suitable = pick.primary_action_id || pick.id;
       }
       if (/this|that|on this page/i.test(query) && pick.primary_action_id) {

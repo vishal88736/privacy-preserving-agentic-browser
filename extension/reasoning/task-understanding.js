@@ -71,6 +71,9 @@ export function localInterpretTask(rawPrompt) {
   if (/cheap|lowest|least\s*expensive|min(?:imum)?\s*price/i.test(lower)) constraints.push('cheapest');
   if (/latest|newest|most\s*recent/i.test(lower)) constraints.push('latest');
   if (/best|top\s*rated|highest\s*rated/i.test(lower)) constraints.push('best_rated');
+  if (/most\s*popular|most\s*viewed|trending/i.test(lower)) constraints.push('most popular');
+  if (/ask\s*before\s*submitt|confirm\s*before|ask\s*me\s*before/i.test(lower)) constraints.push('must ask user before submitting');
+  if (/\bdon'?t\s+submit\b|do\s+not\s+submit|never\s+submit/i.test(lower)) constraints.push('must NOT submit the form');
   const budget = lower.match(/(?:under|below|less than|upto|up to|<=|≤)\s*(?:₹|rs\.?|inr)?\s*([\d,]+)\s*(k)?/i);
   if (budget) constraints.push(`price <= ${budget[1].replace(/,/g, '')}${budget[2] ? '000' : ''}`);
   if (/\bfirst\b/.test(lower)) constraints.push('first matching result');
@@ -81,20 +84,160 @@ export function localInterpretTask(rawPrompt) {
     .filter((w) => w.length > 2 && !STOP.has(w.toLowerCase()))
     .slice(0, 12);
 
+  // General-purpose structured interpretation (spec section 3).
+  const semantics = parseTaskSemantics(text);
+
   // L20: Proper multi-step subgoal decomposition
-  const subgoals = _buildSubgoals(intent, secondaryIntent, lower, constraints);
+  const subgoals = semantics.subgoals?.length
+    ? semantics.subgoals
+    : _buildSubgoals(intent, secondaryIntent, lower, constraints);
 
   return {
+    goal: text,
     intent,
     secondaryIntent,
     target: { type: 'page_task', entity: entities[0] || text.slice(0, 40), attributes: {} },
     constraints,
     entities,
+    preferences: semantics.preferences || [],
+    ordering: semantics.ordering || null,
+    references: semantics.references || [],
+    required_actions: semantics.required_actions || [],
+    success_criteria: semantics.success_criteria || [`The page reflects: ${text}`],
+    ambiguities: semantics.ambiguities || [],
+    site: semantics.site || null,
+    search_query: semantics.search_query || null,
+    ranking_constraint: semantics.ranking_constraint || null,
     expected_state: `The page reflects: ${text}`,
     subgoals,
     current_subgoal: subgoals[0],
     current_subgoal_index: 0,
     confidence: 0.55
+  };
+}
+
+// General site + query + reference extraction. Works for ANY site/query,
+// not just example prompts: detects a site token, strips verbs/site/ranking
+// words to isolate the clean search query, and records references.
+export function parseTaskSemantics(rawPrompt) {
+  const text = String(rawPrompt || '').trim();
+  const lower = text.toLowerCase();
+
+  const SITE_NAMES = {
+    youtube: 'YouTube', google: 'Google', amazon: 'Amazon', flipkart: 'Flipkart',
+    bing: 'Bing', duckduckgo: 'DuckDuckGo', github: 'GitHub', stackoverflow: 'StackOverflow',
+    gmail: 'Gmail', drive: 'Drive', maps: 'Maps', facebook: 'Facebook',
+    twitter: 'Twitter', instagram: 'Instagram', linkedin: 'LinkedIn', reddit: 'Reddit'
+  };
+  const siteMatch = lower.match(/\b(youtube|google|amazon|flipkart|bing|duckduckgo|github|stackoverflow|gmail|drive|maps|facebook|twitter|instagram|linkedin|reddit|x\.com)\b/i);
+  const siteKey = siteMatch ? siteMatch[1].toLowerCase() : null;
+  const site = siteKey === 'x.com' ? 'X' : (SITE_NAMES[siteKey] || null);
+
+  let ranking_constraint = null;
+  if (/most\s*popular|most\s*viewed|trending/i.test(text)) ranking_constraint = 'most popular';
+  else if (/latest|newest|most\s*recent/i.test(text)) ranking_constraint = 'latest';
+  else if (/cheap|lowest|least\s*expensive/i.test(text)) ranking_constraint = 'cheapest';
+  else if (/best|top\s*rated|highest\s*rated/i.test(text)) ranking_constraint = 'best_rated';
+
+  // Clean search query: remove leading verbs, site opens, ranking adjectives.
+  // Handles "search YouTube for X", "find the most popular videos of X",
+  // "open google and search for X", "play latest song from X".
+  let q = text
+    .replace(/^(please\s+)?(could\s+you\s+)?(open|go\s*to|navigate\s*to|visit|search(\s+for)?|find|look\s*for|play|watch|show\s*me)\b\s*/i, '')
+    .replace(/\b(open|go\s*to|navigate|visit)\s+(youtube|google|amazon|flipkart|bing|github|stackoverflow)\b\s*(and\s+)?/i, '')
+    .replace(/\b(youtube|google|amazon|flipkart|bing|github|stackoverflow|duckduckgo)\b\s*(and\s+)?/i, '')
+    .replace(/^search\s+(for\s+)?/i, '')
+    .replace(/\bsearch\s+(for\s+)?/gi, '')
+    .replace(/\b(most\s*popular|most\s*viewed|trending|latest|newest|most\s*recent|cheapest|lowest)\b\s*/gi, '')
+    .replace(/\b(songs?|videos?|results?|items?|products?)\s+(of|for|from)\b\s*/i, '')
+    .replace(/\b(of|for|from)\b\s*/i, (m, w, off) => (off === 0 ? '' : m))
+    .replace(/\b(play|watch|search\s*for|search)\b\s*/gi, '')
+    .trim();
+  // Strip leftover leading connectors ("for X", "and X", "the X" when X follows).
+  q = q.replace(/^(for|and|the)\s+/i, '').replace(/\s{2,}/g, ' ').trim();
+  q = q.replace(/\s{2,}/g, ' ').trim();
+  const search_query_init = q || null;
+
+  const references = [];
+  if (/\bthis\b/i.test(text)) references.push('this');
+  if (/\bthat\b/i.test(text)) references.push('that');
+  if (/\bfirst\b|\b1st\b/i.test(text)) references.push('first');
+  if (/\bsecond\b|\b2nd\b/i.test(text)) references.push('second');
+  if (/\bthird\b|\b3rd\b/i.test(text)) references.push('third');
+  if (/cheapest|lowest/i.test(text)) references.push('cheapest');
+  if (/on\s+this\s+page/i.test(text)) references.push('on this page');
+
+  let ordering = null;
+  if (/cheapest|lowest|price/i.test(text)) ordering = 'price_asc';
+  else if (/latest|newest|most\s*recent/i.test(text)) ordering = 'newest';
+  else if (/most\s*popular|most\s*viewed/i.test(text)) ordering = 'popularity';
+
+  const preferences = [];
+  if (/non-?stop/i.test(text)) preferences.push('non-stop');
+  if (/in\s*stock/i.test(text)) preferences.push('in stock');
+
+  const required_actions = [];
+  if (/search|find|look\s*for/i.test(lower)) required_actions.push('SEARCH');
+  if (/open|click|select|choose/i.test(lower)) required_actions.push('CLICK');
+  if (/fill|form|register|sign\s*up/i.test(lower)) required_actions.push('FILL_FORM');
+  if (/upload|attach/i.test(lower)) required_actions.push('UPLOAD');
+  if (/download/i.test(lower)) required_actions.push('DOWNLOAD');
+  if (/book|reserve/i.test(lower)) required_actions.push('BOOK');
+  if (/play|watch/i.test(lower)) required_actions.push('PLAY');
+  if (/tell\s*me|what\s*is|extract|price\s*of|read|show\s*me/i.test(lower)) required_actions.push('EXTRACT');
+
+  const ambiguities = [];
+  // Intent for semantic planners.
+  let intent = 'search_and_select';
+  if (/login|sign\s*in/i.test(lower)) intent = 'login';
+  else if (/fill|form|register|kyc|apply/i.test(lower)) intent = 'fill_form';
+  else if (/upload/i.test(lower)) intent = 'upload';
+  else if (/book|reserve/i.test(lower)) intent = 'book';
+  else if (/download/i.test(lower)) intent = 'download';
+  else if (/extract|what\s*is|tell\s*me|price\s*of/i.test(lower)) intent = 'extract';
+
+  // search_query is only meaningful for search/select flows. For form, auth,
+  // upload, and booking tasks the "query" would just echo the whole request.
+  let search_query = search_query_init;
+  if (intent !== 'search_and_select') {
+    search_query = null;
+  }
+  if (!search_query && /search|find|play|open/i.test(lower)) ambiguities.push('search query is unclear');
+
+  // Ordered subgoals for open-ended tasks. Search-style subgoals only for
+  // search/select intents; form/fill/upload/etc. use the structured builder
+  // so "Fill this form..." never becomes "search for Fill this form...".
+  const subgoals = [];
+  if (intent === 'search_and_select') {
+    if (site) subgoals.push(`open ${site}`);
+    if (search_query) subgoals.push(`search for ${search_query}`);
+    if (ranking_constraint) subgoals.push(`select ${ranking_constraint} result`);
+    else if (/open|click|select/i.test(lower) && search_query) subgoals.push('open the matching result');
+  } else {
+    const mapped = intent === 'fill_form' ? 'FILL_FORM' : intent === 'upload' ? 'UPLOAD'
+      : intent === 'login' ? 'LOGIN' : intent === 'book' ? 'BOOK'
+      : intent === 'download' ? 'DOWNLOAD' : intent === 'extract' ? 'EXTRACT' : 'ACT';
+    subgoals.push(..._buildSubgoals(mapped, null, lower, []));
+  }
+  if (!subgoals.length) {
+    const fallback = _buildSubgoals('ACT', null, lower, []);
+    subgoals.push(...fallback);
+  }
+  subgoals.push('verify selected result');
+
+  return {
+    site,
+    intent,
+    search_query,
+    ranking_constraint,
+    references,
+    ordering,
+    preferences,
+    required_actions,
+    success_criteria: [`The page reflects: ${text}`],
+    ambiguities,
+    subgoals,
+    confidence: 0.6
   };
 }
 
@@ -192,6 +335,12 @@ export class TaskState {
     this.target = null;
     this.constraints = [];
     this.entities = [];
+    this.preferences = [];
+    this.ordering = null;
+    this.references = [];
+    this.required_actions = [];
+    this.success_criteria = [];
+    this.ambiguities = [];
 
     this.expected_state = null;
     this.subgoals = [];
@@ -204,6 +353,22 @@ export class TaskState {
 
     this.site = null;
     this.search_query = null;
+    this.ranking_constraint = null;
+
+    // If constructed with a real prompt, seed a sensible default task so
+    // getActiveSubgoal() is meaningful before updateFromModel() runs.
+    if (rawPrompt) {
+      try {
+        const seed = parseTaskSemantics(rawPrompt);
+        this.subgoals = seed.subgoals || [];
+        this.current_subgoal = this.subgoals[0] || null;
+        this.site = seed.site || null;
+        this.search_query = seed.search_query || null;
+        this.ranking_constraint = seed.ranking_constraint || null;
+        this.references = seed.references || [];
+        this.required_actions = seed.required_actions || [];
+      } catch { /* keep unknown */ }
+    }
   }
 
   get goal() {
@@ -231,6 +396,19 @@ export class TaskState {
       return true; // Advanced successfully
     }
     return false; // No more subgoals
+  }
+
+  // Backward-compatible alias: advance(action, observation, result).
+  // Advances one subgoal on successful non-WAIT actions; syncs when the
+  // observation shows we reached a new stage (e.g. results page).
+  advance(action = null, observation = null, result = null) {
+    const ok = !result || result.success !== false;
+    const verb = action?.action || action;
+    if (!ok) return false;
+    if (verb && verb !== 'WAIT' && verb !== 'DONE') {
+      return this.advanceSubgoal();
+    }
+    return false;
   }
 
   // L7: Check if the current subgoal appears to be satisfied based on model feedback
@@ -261,7 +439,19 @@ export class TaskState {
     this.target = modelUnderstanding.target || this.target;
     this.constraints = modelUnderstanding.constraints || this.constraints;
     this.entities = modelUnderstanding.entities || this.entities;
-    this.subgoals = modelUnderstanding.subgoals || this.subgoals;
+    this.preferences = modelUnderstanding.preferences || this.preferences;
+    this.ordering = modelUnderstanding.ordering || this.ordering;
+    this.references = modelUnderstanding.references || this.references;
+    this.required_actions = modelUnderstanding.required_actions || this.required_actions;
+    this.success_criteria = modelUnderstanding.success_criteria || this.success_criteria;
+    this.ambiguities = modelUnderstanding.ambiguities || this.ambiguities;
+    // Seed subgoals on first update if we have none yet.
+    if ((!this.subgoals || !this.subgoals.length) && modelUnderstanding.subgoals) {
+      this.subgoals = modelUnderstanding.subgoals;
+      this.current_subgoal = this.current_subgoal || this.subgoals[this.current_subgoal_index] || null;
+    } else {
+      this.subgoals = modelUnderstanding.subgoals || this.subgoals;
+    }
 
     // L7: Handle subgoal progression from model feedback
     const newActiveSubgoal = modelUnderstanding.current_subgoal || modelUnderstanding.active_subgoal;
@@ -288,10 +478,11 @@ export class TaskState {
     this.confidence = modelUnderstanding.confidence ?? this.confidence;
 
     this.target_entity = modelUnderstanding.target_entity || this.target_entity;
-    this.expected_final_state = modelUnderstanding.expected_final_state || this.expected_final_state;
+    this.expected_final_state = modelUnderstanding.expected_final_state || this.expected_state_after_action || this.expected_state;
     this.expected_state_after_action = modelUnderstanding.expected_state_after_action || this.expected_state_after_action;
     this.site = modelUnderstanding.site || this.site;
     this.search_query = modelUnderstanding.search_query || this.search_query;
+    this.ranking_constraint = modelUnderstanding.ranking_constraint || this.ranking_constraint;
 
     // L7: Handle verification_result-based subgoal advancement
     const verResult = modelUnderstanding.verification_result;
@@ -302,17 +493,28 @@ export class TaskState {
 
   toPayload() {
     return {
+      goal: this.original_query,
       original_query: this.original_query,
       intent: this.intent,
       secondaryIntent: this.secondaryIntent,
       target: this.target,
       constraints: this.constraints,
       entities: this.entities,
+      preferences: this.preferences,
+      ordering: this.ordering,
+      references: this.references,
+      required_actions: this.required_actions,
+      success_criteria: this.success_criteria,
+      ambiguities: this.ambiguities,
+      site: this.site,
+      search_query: this.search_query,
+      ranking_constraint: this.ranking_constraint,
       subgoals: this.subgoals,
       active_subgoal: this.getActiveSubgoal(),
       current_subgoal_index: this.current_subgoal_index,
       completed_subgoals: this.completed_subgoals,
       expected_state: this.expected_state,
+      expected_final_state: this.expected_final_state,
       expected_state_after_action: this.expected_state_after_action,
       confidence: this.confidence
     };

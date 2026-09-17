@@ -171,11 +171,19 @@ export class ObservationFusion {
 
     // Generate Form State
     const inputs = unifiedElements.filter(el => el.interaction.typeable || el.interaction.uploadable || el.dom?.tag === 'select');
+    const isMeaningfulValue = (v) => {
+      if (v == null) return false;
+      const s = String(v).trim();
+      if (!s) return false;
+      // Sanitizer placeholders mean "needs filling", not "filled".
+      if (s === '[REDACTED]' || s === '[NON_SENSITIVE_TEXT]' || s === '[example]') return false;
+      return true;
+    };
     const formFields = inputs.map(el => ({
       id: el.id,
       role: el.role,
       semantic_type: el.dom?.semantic_type || 'UNKNOWN',
-      state: el.dom?.value ? 'FILLED' : 'EMPTY',
+      state: isMeaningfulValue(el.dom?.value) ? 'FILLED' : 'EMPTY',
       sensitive: Boolean(el.dom?.sensitive)
     }));
 

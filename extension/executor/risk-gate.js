@@ -24,7 +24,8 @@ export class RiskGate {
     // 1. Critical Security Rejections
     // Prevent exfiltration: Never allow a LOCAL_* secret to be entered into search or query fields
     if (value_source && Object.values(SymbolicSecretSource).includes(value_source)) {
-      if (/search|query|find|google|bing|duckduckgo/i.test(targetLabel)) {
+      const targetText = `${targetLabel} ${(target?.placeholder || '').toLowerCase()} ${(target?.name || '').toLowerCase()} ${String(context.targetDom?.placeholder || '').toLowerCase()} ${String(context.targetDom?.name || '').toLowerCase()} ${String(context.targetDom?.type || '').toLowerCase()}`;
+      if (/search|query|find|google|bing|duckduckgo/i.test(targetText)) {
         return {
           allowed: false,
           risk: RiskLevel.CRITICAL,
@@ -62,8 +63,22 @@ export class RiskGate {
       };
     }
 
-    // 4. Medium-Risk: Typing sensitive identity values into input fields
-    if (value_source === SymbolicSecretSource.LOCAL_AADHAAR || value_source === SymbolicSecretSource.LOCAL_PAN || value_source === SymbolicSecretSource.LOCAL_PASSWORD) {
+    // 4. Medium-Risk: Typing sensitive identity values into input fields.
+    // All identity-bound tokens get MEDIUM so privacy UI can highlight them;
+    // none require confirmation (values stay local by construction).
+    if (value_source && [
+      SymbolicSecretSource.LOCAL_AADHAAR,
+      SymbolicSecretSource.LOCAL_PAN,
+      SymbolicSecretSource.LOCAL_PASSWORD,
+      SymbolicSecretSource.LOCAL_PHONE,
+      SymbolicSecretSource.LOCAL_EMAIL,
+      SymbolicSecretSource.LOCAL_ADDRESS,
+      SymbolicSecretSource.LOCAL_DOB,
+      SymbolicSecretSource.LOCAL_FULL_NAME,
+      SymbolicSecretSource.LOCAL_CREDIT_CARD,
+      SymbolicSecretSource.LOCAL_CVV,
+      SymbolicSecretSource.LOCAL_PROFILE
+    ].includes(value_source)) {
       return {
         allowed: true,
         risk: RiskLevel.MEDIUM,

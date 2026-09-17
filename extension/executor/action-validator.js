@@ -35,7 +35,17 @@ export class ActionValidator {
 
     // L4: Skip all target validation for actions that don't need targets
     if (TARGET_OPTIONAL_ACTIONS.has(action.action)) {
-      return { valid: true };
+    // Target-requiring actions must name a real element (or coordinates).
+    // Previously a missing target fell through to valid:true and failed
+    // opaquely in the content script.
+    if (!action.target?.element_id && !action.target?.coordinates) {
+      return {
+        valid: false,
+        reason: `Action "${action.action}" requires a target element from the current page observation.`
+      };
+    }
+
+    return { valid: true };
     }
 
     if (action.action === ActionType.SUBMIT) {
@@ -56,7 +66,7 @@ export class ActionValidator {
           eid = item.primary_action_id;
         }
       }
-      if (eid === 'el_xxx' || !/^el_\d+$|^vis_target_\d+$/.test(String(eid))) {
+      if (eid === 'el_xxx' || !/^[A-Za-z0-9_\-:]+$/.test(String(eid))) {
         return {
           valid: false,
           reason: `Target element "${eid}" is not a real page element id.`

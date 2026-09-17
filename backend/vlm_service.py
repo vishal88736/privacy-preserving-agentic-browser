@@ -14,8 +14,8 @@ from config import settings
 
 class VLMService:
     def __init__(self):
-        self.aadhaar_regex = re.compile(r"\b[2-9]\d{3}\s?\d{4}\s?\d{4}\b")
-        self.pan_regex = re.compile(r"\b[A-Z]{5}[0-9]{4}[A-Z]{1}\b")
+        self.aadhaar_regex = re.compile(r"\b[2-9]\d{3}[\s-]?\d{4}[\s-]?\d{4}\b")
+        self.pan_regex = re.compile(r"\b[A-Z]{5}[0-9]{4}[A-Z]{1}\b", re.IGNORECASE)
 
     def process_visuals(self, task_id: str, sanitized_screenshot: str, sanitized_dom: Dict[str, Any], metadata: Dict[str, Any]) -> Dict[str, Any]:
         dom_str = str(sanitized_dom)
@@ -33,9 +33,14 @@ class VLMService:
     def _try_real_vlm(self, screenshot: str, heuristic: Dict[str, Any], metadata: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if not settings.API_KEY or not screenshot or not str(screenshot).startswith("data:image"):
             return None
-        # Only call a vision-capable endpoint when the configured model looks like a VLM.
+        # Attempt a vision call for any configured model. Non-vision models
+        # will fail fast (400/404) and we fall back to the DOM heuristic.
+        # A narrow name gate previously blocked valid vision models such as
+        # google/gemma-3 (which contains neither "vl" nor "vision"), so the
+        # real VLM was never used. Only skip obvious text-only families.
         model = (settings.VLM_MODEL or "").lower()
-        if not any(k in model for k in ("vl", "vision", "gpt-4o", "gemini", "grok")):
+        text_only_markers = ("gpt-oss", "deepseek-chat", "llama-3.3-70b-versatile", "whisper", "tts-", "embed")
+        if any(k in model for k in text_only_markers):
             return None
         try:
             headers = {
@@ -63,6 +68,7 @@ class VLMService:
             }
             resp = requests.post(f"{settings.AI_BASE_URL}/chat/completions", headers=headers, json=payload, timeout=12)
             if resp.status_code != 200:
+                print(f"[VLM] vision model {settings.VLM_MODEL} returned {resp.status_code}; using DOM heuristic")
                 return None
             content = (resp.json().get("choices") or [{}])[0].get("message", {}).get("content") or ""
             match = re.search(r"\{.*\}", content, re.DOTALL)

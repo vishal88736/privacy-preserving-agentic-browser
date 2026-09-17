@@ -49,7 +49,7 @@ def _repair_action(parsed: dict, allowed: set, page_state: Optional[Dict[str, An
         return parsed
     target = act.get("target") or {}
     eid = target.get("element_id") if isinstance(target, dict) else None
-    if act.get("action") in ("DONE", "WAIT", "NAVIGATE", "SCROLL", "GO_BACK"):
+    if act.get("action") in ("DONE", "WAIT", "NAVIGATE", "SCROLL", "GO_BACK", "GO_FORWARD", "EXTRACT", "PRESS_KEY", "OPEN_TAB", "SWITCH_TAB", "ASK_USER"):
         return parsed
     if eid and allowed and eid not in allowed:
         refs = (page_state or {}).get("resolved_references") or {}
@@ -152,7 +152,7 @@ Output ONLY a valid JSON object. Do NOT include markdown blocks:
                     "risk": "LOW",
                     "requires_confirmation": False
                 },
-                "is_terminal": True
+                "is_terminal": False
             }
 
         allowed = _allowed_ids(fused_observation, page_state)
@@ -263,7 +263,7 @@ CRITICAL RULES:
                 if isinstance(parsed, dict) and "action" in parsed:
                     act = parsed.get("action") or {}
                     if act.get("value_source") and act.get("value"):
-                        valid_sources = ("LOCAL_AADHAAR", "LOCAL_PAN", "LOCAL_DOCUMENT", "LOCAL_PASSWORD", "LOCAL_FULL_NAME", "LOCAL_DOB", "LOCAL_PHONE", "LOCAL_EMAIL", "LOCAL_ADDRESS", "LOCAL_PROFILE")
+                        valid_sources = ("LOCAL_AADHAAR", "LOCAL_PAN", "LOCAL_DOCUMENT", "LOCAL_PASSWORD", "LOCAL_FULL_NAME", "LOCAL_DOB", "LOCAL_PHONE", "LOCAL_EMAIL", "LOCAL_ADDRESS", "LOCAL_PROFILE", "LOCAL_CREDIT_CARD", "LOCAL_CVV")
                         if act["value_source"] not in valid_sources:
                             act["value_source"] = None
                     parsed = _repair_action(parsed, allowed, page_state)

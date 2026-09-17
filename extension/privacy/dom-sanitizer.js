@@ -8,7 +8,7 @@
  * L13: PAN regex is now case-insensitive
  */
 
-import { defaultPIIDetector } from './pii-detector.js';
+import { defaultPIIDetector, validateLuhn } from './pii-detector.js';
 import { defaultSecretDetector } from './secret-detector.js';
 import { defaultLocalVault } from './local-vault.js';
 import { SymbolicSecretSource } from '../shared/constants.js';
@@ -87,18 +87,28 @@ export class DOMSanitizer {
     // 2. Generic PII Regex Fallbacks
     // L13: PAN regex is now case-insensitive
     out = out.replace(/\b[A-Z]{5}[0-9]{4}[A-Z]{1}\b/gi, `[${SymbolicSecretSource.LOCAL_PAN}]`);
-    out = out.replace(/\b[2-9]\d{3}[\s-]?\d{4}[\s-]?\d{4}\b/g, `[${SymbolicSecretSource.LOCAL_AADHAAR}]`);
+    out = out.replace(/\b[2-9]\d{3}[\s-_]?\d{4}[\s-_]?\d{4}\b/g, `[${SymbolicSecretSource.LOCAL_AADHAAR}]`);
 
     // L10: Scrub email addresses from text sent to models
     out = out.replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, `[${SymbolicSecretSource.LOCAL_EMAIL}]`);
 
-    // L10: Scrub Indian phone numbers (10 digits starting 6-9, optionally +91)
-    out = out.replace(/(?:(?:\+|0{0,2})91[\s-]?)?[6-9]\d{9}\b/g, `[${SymbolicSecretSource.LOCAL_PHONE}]`);
+    // Scrub IFSC codes (bank branch identifiers) so the outbound policy
+    // engine never blocks benign banking pages.
+    out = out.replace(/\b[A-Z]{4}0[A-Z0-9]{6}\b/g, `[${SymbolicSecretSource.LOCAL_PROFILE}]`);
 
-    // L10: Scrub credit/debit card patterns (13-19 digit sequences)
-    out = out.replace(/\b(?:\d[\s-]?){13,19}\b/g, (match) => {
+    // Scrub Indian phone numbers only when they look like standalone phone
+    // numbers (not timestamps/order IDs). Require a word boundary on both
+    // sides via lookarounds so substrings of longer digit runs are kept.
+    out = out.replace(/(?<!\d)(?:(?:\+|0{0,2})91[\s-]?)?[6-9]\d{9}(?!\d)/g, `[${SymbolicSecretSource.LOCAL_PHONE}]`);
+
+    // Scrub credit/debit card patterns only when Luhn-valid, otherwise
+    // order IDs and timestamps would be destroyed.
+    out = out.replace(/(?<!\d)(?:\d[\s-]?){13,19}(?!\d)/g, (match) => {
       const clean = match.replace(/[\s-]/g, '');
       if (/^\d{13,19}$/.test(clean)) {
+        try {
+          if (typeof validateLuhn === 'function' && !validateLuhn(clean)) return match;
+        } catch { return match; }
         return `[${SymbolicSecretSource.LOCAL_CREDIT_CARD}]`;
       }
       return match;
@@ -147,13 +157,10 @@ export class DOMSanitizer {
         detectedCategories.add(sanitized.semantic_type);
       } else {
         sanitized.sensitive = false;
-        // Also scrub any unexpected values from generic inputs to avoid accidental leakage
-        if (el.tag === 'input' && ['text', 'search', 'email', 'tel', 'number'].includes(el.type || '')) {
-          // If value is present but wasn't flagged as strict PII, check if it looks like a long string or potential leak
-          if (el.value && el.value.length > 20) {
-            sanitized.value = '[NON_SENSITIVE_TEXT]';
-          }
-        }
+        // Preserve legitimate long non-PII values (search queries, product
+        // names). Blanket redaction of inputs longer than 20 chars destroyed
+        // the task context the reasoner needs. PII in values is still caught
+        // by detectPIIInText above and by the outbound policy engine.
       }
 
       // 4. Scrub PII-shaped example text from placeholders (page-authored hints,

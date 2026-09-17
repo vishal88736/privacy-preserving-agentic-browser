@@ -61,8 +61,30 @@ export class BrowserExecutor {
         await this.sleep(actionPayload.duration || 1000);
         return { success: true };
 
+      case 'PRESS_KEY': {
+        const key = resolvedValue || actionPayload.value || 'Enter';
+        const target = targetElement || document.activeElement || document.body;
+        target.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: String(key) }));
+        target.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, cancelable: true, key: String(key) }));
+        return { success: true };
+      }
+      case 'HOVER':
+        if (targetElement) {
+          targetElement.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true }));
+          return { success: true };
+        }
+        throw new Error('Hover target element not found');
+      case 'GO_BACK':
+        window.history.back();
+        await this.sleep(600);
+        return { success: true };
+      case 'GO_FORWARD':
+        window.history.forward();
+        await this.sleep(600);
+        return { success: true };
+
       default:
-        return { success: true, note: `Action ${action} handled as no-op` };
+        return { success: false, error: `Unsupported content action: ${action}` };
     }
   }
 

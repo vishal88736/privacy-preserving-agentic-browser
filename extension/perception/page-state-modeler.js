@@ -14,7 +14,11 @@ export class PageStateModeler {
     const elements = fusedObservation?.elements || [];
     const domain = page.domain || 'unknown';
     const title = page.title || 'unknown';
-    const url = page.url || domain || '';
+    // Preserve the full URL for reasoning (path/query matter for page-type
+    // inference); keep domain separately. Previously this returned only the
+    // domain under the `url` key, losing /search, /login, ?q= signals.
+    const fullUrl = page.url || domain || '';
+    const url = fullUrl;
 
     const candidateElements = [];
     let formInputs = 0;
@@ -51,10 +55,11 @@ export class PageStateModeler {
     }
 
     const grounding = defaultTaskGrounding.ground(taskState, fusedObservation);
-    const page_type = this._inferPageType(url, title, formInputs, links, buttons, fusedObservation);
+    const page_type = this._inferPageType(fullUrl, title, formInputs, links, buttons, fusedObservation);
 
     return {
-      url: domain,
+      url: fullUrl,
+      domain,
       title: title,
       page_type: page_type,
       summary: `Page contains ${formInputs} inputs, ${buttons} buttons, ${links} links, ${(fusedObservation.result_items || []).length} result cards.`,
@@ -68,7 +73,11 @@ export class PageStateModeler {
       optimization: grounding.optimization,
       suggested_search_element: grounding.suggested_search_element,
       visible_text_excerpt: String(fusedObservation.visible_text || '').slice(0, 1200),
-      scroll: page.scroll || null
+      scroll: page.scroll || null,
+      // Backward-compatible aliases expected by older tests/consumers.
+      active_subgoal: taskState?.getActiveSubgoal ? taskState.getActiveSubgoal() : (taskState?.active_subgoal || taskState?.current_subgoal || null),
+      relevant_elements: grounding.ranked_candidates,
+      irrelevant_elements_count: (grounding.ignored_noise || []).length
     };
   }
 

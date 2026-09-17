@@ -34,15 +34,5 @@
       "js": ["content/content.js"],
       "run_at": "document_idle"
     }
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": [
-        "shared/*",
-        "content/*",
-        "privacy/*"
-      ],
-      "matches": ["<all_urls>"]
-    }
   ]
 }

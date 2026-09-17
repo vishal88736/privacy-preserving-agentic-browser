@@ -46,10 +46,16 @@ export class VLMClient {
       }
 
       const data = await response.json();
-      return data.visual_observation || data;
+      const obs = data.visual_observation || data;
+      // Mark provenance so fusion/logs never mistake remote vs local.
+      obs._source = 'remote-vlm';
+      return obs;
     } catch (err) {
       console.warn(`[VLMClient] Remote VLM request failed (${err.message}). Using local visual inference.`);
-      return this._localVisualInferenceFallback(sanitizedDom);
+      const fallback = this._localVisualInferenceFallback(sanitizedDom);
+      fallback._source = 'local-fallback';
+      fallback._error = String(err?.message || err).slice(0, 200);
+      return fallback;
     }
   }
 
@@ -72,9 +78,23 @@ export class VLMClient {
 
     const formElements = elements.filter(e => e.tag === 'input' || e.tag === 'select');
     const buttons = elements.filter(e => e.tag === 'button' || e.type === 'submit');
+    const cards = sanitizedDom?.result_items?.length || 0;
+
+    // Mirror the backend's page_type inference so fusion's page.page_type
+    // stays meaningful offline (search_results/login/form/dashboard/...).
+    const titleLower = String(sanitizedDom?.title || '').toLowerCase();
+    let page_type = 'unknown';
+    if (cards >= 2) page_type = 'search_results';
+    else if (/login|sign in/.test(titleLower)) page_type = 'login';
+    else if (/register|sign up|create account/.test(titleLower)) page_type = 'registration';
+    else if (/checkout|cart|payment/.test(titleLower)) page_type = 'checkout';
+    else if (formElements.length > 3) page_type = 'application_form';
+    else if (formElements.length === 0 && buttons.length > 0) page_type = 'dashboard';
 
     return {
       detected_elements: visualElements,
+      page_type,
+      page_purpose: `Likely a ${page_type.replace(/_/g, ' ')} page (local layout fallback).`,
       spatial_layout: `Structured layout containing ${formElements.length} form inputs and ${buttons.length} action buttons.`,
       visual_state: `Page loaded. ${elements.filter(e => e.sensitive).length} sensitive fields visually masked.`
     };

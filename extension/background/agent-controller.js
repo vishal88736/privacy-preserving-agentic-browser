@@ -163,7 +163,8 @@ export class AgentController {
       }
 
       if ((task.consecutiveFailures || 0) >= MAX_CONSECUTIVE_FAILURES) {
-        taskManager.failTask('The agent could not find the target element — the page may have changed.');
+        const lastError = task.steps?.length ? task.steps[task.steps.length - 1].error : 'The agent could not find the target element — the page may have changed.';
+        taskManager.failTask(lastError || 'The task encountered too many consecutive errors.');
         this.clearOverlays(task.tabId);
         this.notify('TASK_FAILED', { error: task.error, hint: task.hint });
         break;
@@ -191,16 +192,23 @@ export class AgentController {
           this.notify('TASK_FAILED', { error: task.error, hint: task.hint });
           break;
         }
+        // Fail fast on restricted URLs
+        if (stepErr?.message?.includes('Chrome does not permit extensions on internal')) {
+          taskManager.failTask(stepErr.message);
+          this.clearOverlays(task.tabId);
+          this.notify('TASK_FAILED', { error: task.error, hint: task.hint });
+          break;
+        }
         console.warn('[AgentController] Step failed, recovering:', stepErr?.message);
         taskManager.recordStep({
-          thought: 'Step encountered a problem; re-analyzing the page.',
+          thought: `Step encountered a problem (${stepErr?.message || 'Unknown error'}); re-analyzing the page.`,
           action: { action: ActionType.WAIT, risk: RiskLevel.LOW, requires_confirmation: false },
           success: false,
           error: String(stepErr?.message || stepErr).slice(0, 200)
         });
         this.notify('STEP_FAILED', {
           stepNumber: task.currentStep,
-          thought: 'Step encountered a problem; re-analyzing the page.',
+          thought: `Step encountered a problem (${stepErr?.message || 'Unknown error'}); re-analyzing the page.`,
           action: { action: ActionType.WAIT },
           success: false
         });
@@ -248,7 +256,14 @@ export class AgentController {
 
     const [domResponse, screenshotResponse] = await Promise.all([
       this._extractDOM(task.tabId),
-      defaultScreenshotService.captureTab()
+      (async () => {
+        try {
+          const tab = await chrome.tabs.get(task.tabId);
+          return defaultScreenshotService.captureTab(tab?.windowId ?? null);
+        } catch {
+          return defaultScreenshotService.captureTab();
+        }
+      })()
     ]);
 
     if (!domResponse?.success) {
@@ -430,6 +445,14 @@ export class AgentController {
 
       const userApproved = await new Promise((resolve) => {
         this.pendingUserConfirmationResolver = resolve;
+        // Fail safe: never hang forever if the service worker is suspended
+        // or the user never responds. Auto-decline after 5 minutes.
+        setTimeout(() => {
+          if (this.pendingUserConfirmationResolver === resolve) {
+            this.pendingUserConfirmationResolver = null;
+            resolve(false);
+          }
+        }, 5 * 60 * 1000);
       });
 
       taskManager.clearPendingConfirmation();
@@ -527,7 +550,11 @@ export class AgentController {
     // Check 1: Exact same action repeated N times
     const stateFingerprint = (s) => {
       const p = s.diagnostic?.page_state || {};
-      return `${p.url}::${p.summary}::${p.detected_form}`;
+      // Include result-set size and text excerpt so genuinely different pages
+      // never collide on "undefined::undefined::undefined".
+      const resultCount = Array.isArray(p.result_sets) ? p.result_sets.length : (p.result_sets ? 1 : 0);
+      const textHead = String(p.visible_text_excerpt || '').slice(0, 80);
+      return `${p.url || ''}::${p.page_type || ''}::${p.summary || ''}::${resultCount}::${textHead}`;
     };
 
     const firstAction = keyOf(tail[0]);
@@ -549,12 +576,14 @@ export class AgentController {
       }
     }
 
-    // L2: Check 3: All recent steps are failures with the same error
+    // L2: Check 3: All recent steps are failures with the same NON-EMPTY error.
+    // Empty errors (no diagnostic) are not a loop signal — the original
+    // circuit-breaker ignored failing sequences entirely.
     if (steps.length >= MAX_IDENTICAL_ACTIONS) {
       const recentFails = steps.slice(-MAX_IDENTICAL_ACTIONS);
       if (recentFails.every(s => s.success === false)) {
         const errors = recentFails.map(s => (s.error || '').slice(0, 50));
-        if (new Set(errors).size === 1) {
+        if (errors[0] && new Set(errors).size === 1) {
           console.warn('[AgentController] Repeated identical failures detected');
           return true;
         }
@@ -562,6 +591,11 @@ export class AgentController {
     }
 
     return false;
+  }
+
+  // Backward-compatible alias for older tests: exact-repeat circuit breaker.
+  _isRepeatingIdenticalAction(task) {
+    return this._isStuckInLoop(task);
   }
 
   /**
@@ -600,7 +634,8 @@ export class AgentController {
       quarantined++;
       // Don't blank visible_text entirely — strip the injected portions
       for (const re of INJECTION_PATTERNS) {
-        fusedObservation.visible_text = fusedObservation.visible_text.replace(re, '[INJECTION_QUARANTINED]');
+        const globalRe = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+        fusedObservation.visible_text = fusedObservation.visible_text.replace(globalRe, '[INJECTION_QUARANTINED]');
       }
     }
 
@@ -640,20 +675,22 @@ export class AgentController {
   async _waitForPageStability(tabId) {
     try {
       await new Promise((resolve) => {
+        let settled = false;
+        const done = () => { if (!settled) { settled = true; clearTimeout(timer); resolve(); } };
+        const timer = setTimeout(done, 2000);
         chrome.tabs.sendMessage(
           tabId,
           { type: MessageType.CHECK_PAGE_STABILITY, payload: { quietMs: 250 } },
           (response) => {
             if (chrome.runtime.lastError) {
               // Content script not ready — just wait a flat amount
-              resolve();
+              done();
             } else {
-              resolve();
+              done();
             }
           }
         );
         // Timeout in case the message never gets a response
-        setTimeout(resolve, 2000);
       });
     } catch {
       await this.sleep(400);
