@@ -18,7 +18,7 @@ export function friendlyError(rawMessage) {
   const raw = String(rawMessage || 'Unknown error');
   const low = raw.toLowerCase();
 
-  if (low.includes('chrome does not permit') || low.includes('chrome://')) {
+  if (low.includes('chrome does not permit') || low.includes('chrome://') || low.includes('browser internal page')) {
     return {
       error: 'This page cannot be automated (browser internal page).',
       hint: 'Open a website or a test portal such as http://localhost:5000, then start the task again.'

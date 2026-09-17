@@ -35,6 +35,9 @@ export class ActionValidator {
 
     // L4: Skip all target validation for actions that don't need targets
     if (TARGET_OPTIONAL_ACTIONS.has(action.action)) {
+      return { valid: true };
+    }
+
     // Target-requiring actions must name a real element (or coordinates).
     // Previously a missing target fell through to valid:true and failed
     // opaquely in the content script.
@@ -43,9 +46,6 @@ export class ActionValidator {
         valid: false,
         reason: `Action "${action.action}" requires a target element from the current page observation.`
       };
-    }
-
-    return { valid: true };
     }
 
     if (action.action === ActionType.SUBMIT) {

@@ -6,6 +6,7 @@
 
 import { ActionType } from '../shared/constants.js';
 import { MessageType } from '../shared/messages.js';
+import { validateNavigationUrl } from '../navigation/navigation.js';
 import { defaultLocalValueResolver } from './local-value-resolver.js';
 
 export class ActionExecutor {
@@ -29,13 +30,17 @@ export class ActionExecutor {
     }
 
     if (action.action === ActionType.NAVIGATE) {
-      let targetUrl = action.target?.url || action.value;
-      if (!targetUrl) {
+      const rawTarget = action.target?.url || action.value;
+      if (!rawTarget) {
         throw new Error('NAVIGATE action requires a target URL');
       }
-      if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
-        targetUrl = 'https://' + targetUrl;
+      // Deterministic scheme/host validation — never navigate to
+      // javascript:/data:/file:/chrome: etc., even if a model invented them.
+      const validation = validateNavigationUrl(rawTarget);
+      if (!validation.valid) {
+        throw new Error(`Navigation blocked: ${validation.reason}`);
       }
+      const targetUrl = validation.normalizedUrl;
       await chrome.tabs.update(tabId, { url: targetUrl });
 
       // Wait for navigation and document load

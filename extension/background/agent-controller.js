@@ -28,9 +28,19 @@ import { defaultActionValidator } from '../executor/action-validator.js';
 import { defaultActionExecutor } from '../executor/action-executor.js';
 import { TaskState, localInterpretTask } from '../reasoning/task-understanding.js';
 import { defaultPageStateModeler } from '../perception/page-state-modeler.js';
+import {
+  PageCapability,
+  classifyPageCapability,
+  getNavigationGoal,
+  getSiteHomepage,
+  validateNavigationUrl,
+  urlsMatchForVerification
+} from '../navigation/navigation.js';
 
 const MAX_CONSECUTIVE_FAILURES = 3;
 const MAX_IDENTICAL_ACTIONS = 3;
+const NAV_VERIFY_TIMEOUT_MS = 12000;
+const NAV_VERIFY_POLL_MS = 500;
 
 // L12: Expanded injection patterns — covers more social engineering attacks
 const INJECTION_PATTERNS = [
@@ -193,7 +203,8 @@ export class AgentController {
           break;
         }
         // Fail fast on restricted URLs
-        if (stepErr?.message?.includes('Chrome does not permit extensions on internal')) {
+        if (stepErr?.message?.includes('Chrome does not permit extensions on internal') ||
+            stepErr?.message?.includes('browser internal page')) {
           taskManager.failTask(stepErr.message);
           this.clearOverlays(task.tabId);
           this.notify('TASK_FAILED', { error: task.error, hint: task.hint });
@@ -221,7 +232,7 @@ export class AgentController {
    * Runs one OBSERVE→VERIFY cycle. Returns false when the loop should stop.
    */
   async runSingleStep(task) {
-    // Check current tab URL and handle restricted pages / navigation
+    // Check current tab URL and classify what this page allows.
     let currentTab = null;
     try {
       currentTab = await chrome.tabs.get(task.tabId);
@@ -229,22 +240,32 @@ export class AgentController {
       console.warn('[AgentController] Could not get tab info:', e);
     }
 
-    const isRestrictedUrl = !currentTab?.url || (
-      currentTab.url.startsWith('chrome://') ||
-      currentTab.url.startsWith('chrome-extension://') ||
-      currentTab.url.startsWith('edge://') ||
-      currentTab.url === 'about:blank' ||
-      currentTab.url.startsWith('view-source:')
-    );
-
-    // Never navigate the extension's own pages away: that would destroy the
-    // panel. The user must focus a real webpage first.
-    if (currentTab?.url?.startsWith('chrome-extension://')) {
-      throw new Error('The agent cannot run inside its own panel tab. Please click on the webpage first, then start the task.');
+    const currentUrl = currentTab?.url || '';
+    const capability = classifyPageCapability(currentUrl);
+    let taskIntent = task.taskState?.intent;
+    if (!taskIntent) {
+      try { taskIntent = localInterpretTask(task.prompt).intent; } catch { taskIntent = 'unknown'; }
+    }
+    console.log(`[TASK] intent=${taskIntent}`);
+    try {
+      console.log(`[PAGE] capability=${capability} url=${defaultDOMSanitizer.sanitizeUrl(currentUrl) || capability}`);
+    } catch {
+      console.log(`[PAGE] capability=${capability}`);
     }
 
-    if (isRestrictedUrl) {
-      throw new Error('Chrome does not permit extensions on internal chrome:// pages. Please open a website or test portal (e.g. http://localhost:5000).');
+    // Capability-aware bootstrap BEFORE any DOM observation: pure NAVIGATE
+    // tasks never need content-script extraction (internal pages have none),
+    // and compound tasks from internal pages navigate to the site first.
+    // Never navigates the extension's own panel tab away.
+    const bootstrap = await this._maybeHandleNavigationBootstrap(task, currentTab, capability);
+    if (bootstrap?.handled) return bootstrap.shouldContinue;
+
+    if (capability !== PageCapability.AUTOMATABLE_WEB) {
+      // Never inject content scripts into browser/extension internals.
+      if (capability === PageCapability.EXTENSION_INTERNAL) {
+        throw new Error('The agent cannot run inside its own panel tab. Please click on the webpage first, then start the task.');
+      }
+      throw new Error(`This page cannot be automated (browser internal page: ${capability}). Open a website or test portal (e.g. http://localhost:5000), then start the task again.`);
     }
 
     // L1/L5: Wait for page to stabilize before observing (handles SPA transitions, AJAX)
@@ -529,6 +550,180 @@ export class AgentController {
     await this.sleep(postActionWait);
 
     return true;
+  }
+
+  /**
+   * Capability-aware navigation bootstrap (runs before OBSERVE).
+   *
+   * - Pure NAVIGATE tasks ("open youtube"): validated deterministic
+   *   navigation in task.tabId, verified by URL — from ANY page except the
+   *   extension panel. No DOM extraction, no VLM, no grounding needed.
+   * - Compound tasks starting on a non-automatable page with a known site
+   *   ("search youtube for cats" from chrome://newtab): navigate to the
+   *   site homepage first, then let the normal loop re-observe and continue.
+   * - Otherwise: { handled:false } and the caller applies the normal
+   *   pipeline (or a controlled unsupported-page error).
+   *
+   * Returns { handled:boolean, shouldContinue:boolean }.
+   */
+  async _maybeHandleNavigationBootstrap(task, currentTab, capability) {
+    const notHandled = { handled: false, shouldContinue: true };
+    let goal = null;
+    try {
+      goal = getNavigationGoal(task.prompt);
+    } catch {
+      goal = null;
+    }
+
+    // Never navigate the extension panel tab away.
+    if (capability === PageCapability.EXTENSION_INTERNAL) return notHandled;
+
+    if (goal?.url) {
+      const validation = validateNavigationUrl(goal.url);
+      console.log(`[NAVIGATION] target=${validation.normalizedUrl || goal.url} validated=${validation.valid}`);
+      if (!validation.valid) {
+        taskManager.failTask(`Navigation blocked: ${validation.reason}`);
+        this.clearOverlays(task.tabId);
+        this.notify('TASK_FAILED', { error: taskManager.getTask()?.error, hint: taskManager.getTask()?.hint });
+        return { handled: true, shouldContinue: false };
+      }
+      return await this._executeBootstrapNavigation(task, currentTab, validation.normalizedUrl, {
+        pure: goal.isPure,
+        thought: goal.isPure
+          ? `Navigate to ${validation.host} (pure navigation request; no page interaction needed).`
+          : `Navigate to ${validation.host} first, then continue the task on the new page.`
+      });
+    }
+
+    // Compound task stranded on a non-automatable page: hop to the task's
+    // site homepage (if deterministically known), then re-observe.
+    if (capability !== PageCapability.AUTOMATABLE_WEB) {
+      const site = task.taskState?.site;
+      const home = site ? getSiteHomepage(site) : null;
+      if (home) {
+        const validation = validateNavigationUrl(home);
+        if (!validation.valid) return notHandled;
+        console.log(`[NAVIGATION] target=${validation.normalizedUrl} validated=true`);
+        return await this._executeBootstrapNavigation(task, currentTab, validation.normalizedUrl, {
+          pure: false,
+          thought: `Current page is not automatable (${capability}); navigate to ${site} first, then continue.`
+        });
+      }
+    }
+    return notHandled;
+  }
+
+  /**
+   * Validated tab navigation + verification for the bootstrap path.
+   * Always uses task.tabId (never the focused window/tab). Uses the same
+   * defaultActionExecutor NAVIGATE implementation as the normal pipeline —
+   * no competing navigation path. Records honest steps: success only after
+   * URL verification, failure otherwise (never fake success).
+   */
+  async _executeBootstrapNavigation(task, currentTab, normalizedUrl, { pure, thought }) {
+    const navAction = {
+      action: ActionType.NAVIGATE,
+      target: { url: normalizedUrl },
+      risk: RiskLevel.LOW,
+      requires_confirmation: false
+    };
+
+    // Existing safety gate still applies (defense in depth).
+    let riskAssessment = { allowed: true, risk: RiskLevel.LOW, reason: 'Standard interactive action.' };
+    try {
+      riskAssessment = defaultRiskGate.evaluate(navAction, {
+        targetElement: navAction.target,
+        targetDom: null,
+        currentUrl: currentTab?.url || '',
+        pageTitle: currentTab?.title || ''
+      });
+    } catch (e) {
+      console.warn('[AgentController] Risk evaluation failed, continuing with LOW:', e?.message);
+    }
+    if (!riskAssessment.allowed) {
+      taskManager.failTask(`Safety Gate Blocked Action: ${riskAssessment.reason}`);
+      this.clearOverlays(task.tabId);
+      this.notify('TASK_FAILED', { error: taskManager.getTask()?.error, hint: taskManager.getTask()?.hint });
+      return { handled: true, shouldContinue: false };
+    }
+
+    // Persist pre-navigation state so a service-worker restart mid-flight
+    // leaves an honest EXECUTING task (with history), never a fake DONE.
+    taskManager.updateState(AgentState.EXECUTING, `Navigating to ${normalizedUrl}…`);
+    this.notify('STATE_CHANGED', { state: AgentState.EXECUTING, action: navAction });
+    console.log(`[NAVIGATION] tabId=${task.tabId} status=started`);
+
+    let execResult;
+    try {
+      execResult = await defaultActionExecutor.execute(task.tabId, navAction);
+    } catch (execErr) {
+      execResult = { success: false, error: execErr?.message || 'Navigation failed' };
+    }
+    if (!execResult || execResult.success === false) {
+      const errMsg = String(execResult?.error || 'Navigation did not complete').slice(0, 200);
+      console.log('[NAVIGATION] status=failed');
+      taskManager.recordStep({ thought, action: navAction, result: execResult, success: false, error: errMsg });
+      this.notify('STEP_FAILED', { stepNumber: task.currentStep, thought, action: navAction, success: false, timestamp: Date.now() });
+      return { handled: true, shouldContinue: true };
+    }
+
+    const verification = await this._verifyNavigation(task.tabId, normalizedUrl);
+    console.log(`[NAVIGATION] status=${verification.ok ? 'completed' : 'failed'}`);
+    console.log(`[VERIFY] url=${verification.actualUrl || '(unknown)'} success=${verification.ok}`);
+    if (!verification.ok) {
+      const errMsg = verification.actualUrl
+        ? `Navigation reached ${verification.actualUrl} instead of the requested destination.`
+        : 'Navigation timed out before the new page could be verified.';
+      taskManager.recordStep({ thought, action: navAction, result: execResult, success: false, error: errMsg.slice(0, 200) });
+      this.notify('STEP_FAILED', { stepNumber: task.currentStep, thought: errMsg, action: navAction, success: false, timestamp: Date.now() });
+      return { handled: true, shouldContinue: true };
+    }
+
+    taskManager.recordStep({
+      thought: `${thought} Verified at ${verification.actualUrl}.`,
+      action: navAction,
+      result: execResult,
+      success: true,
+      diagnostic: { bootstrap_navigation: true, verified_url: verification.actualUrl }
+    });
+    this.notify('STEP_COMPLETED', { stepNumber: task.currentStep, thought, action: navAction, success: true, timestamp: Date.now() });
+
+    if (pure) {
+      try {
+        if (task.taskState?.advanceSubgoal) task.taskState.advanceSubgoal();
+        else if (task.taskState?.advance) task.taskState.advance(navAction, null, { success: true });
+      } catch { /* non-fatal */ }
+      taskManager.completeTask(`Navigated to ${verification.actualUrl}.`);
+      this.clearOverlays(task.tabId);
+      this.notify('TASK_COMPLETED', { result: `Navigated to ${verification.actualUrl}.` });
+      return { handled: true, shouldContinue: false };
+    }
+
+    await this.sleep(this._getPostActionWait(ActionType.NAVIGATE));
+    return { handled: true, shouldContinue: true };
+  }
+
+  /** Poll task.tabId until its URL matches the destination (redirect-tolerant). */
+  async _verifyNavigation(tabId, expectedUrl) {
+    const deadline = Date.now() + NAV_VERIFY_TIMEOUT_MS;
+    let actualUrl = '';
+    while (Date.now() < deadline) {
+      try {
+        const tab = await chrome.tabs.get(tabId);
+        actualUrl = tab?.url || '';
+        if (actualUrl && urlsMatchForVerification(expectedUrl, actualUrl)) {
+          return { ok: true, actualUrl };
+        }
+      } catch {
+        // Tab may be mid-navigation; keep polling until the timeout.
+      }
+      await this.sleep(NAV_VERIFY_POLL_MS);
+    }
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      actualUrl = tab?.url || actualUrl;
+    } catch { /* keep last value */ }
+    return { ok: false, actualUrl };
   }
 
   /**

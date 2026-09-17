@@ -33,7 +33,15 @@ export class PolicyEngine {
     // Strip machine-generated numeric metadata that is never PII so the
     // phone/card patterns cannot false-positive on it (e.g. Date.now()
     // timestamps are 13 digits and contain 10-digit substrings starting 6-9).
-    const scannable = serialized.replace(/"timestamp":\d+/g, '"timestamp":0');
+    // Also strip embedded base64 image bytes (screenshots): pattern-matching
+    // PAN/phone/card shapes inside base64 is meaningless — the bytes are an
+    // encoding, not text — and randomly matches (e.g. "QaYvq1115D" tripping
+    // the PAN pattern), killing benign tasks. Screenshot secrecy is enforced
+    // by the fail-closed canvas redaction before this point, and every DOM /
+    // text / metadata field below remains fully scanned.
+    const scannable = serialized
+      .replace(/"timestamp":\d+/g, '"timestamp":0')
+      .replace(/data:[a-z]+\/[^"\\]*;base64,[A-Za-z0-9+/=]+/gi, 'data:image/omitted');
 
     // 1. Scan against all plaintext secrets currently held in the local vault
     // L11: getAllSecretsForUI now returns only string values, so no blob bloat
