@@ -3,6 +3,8 @@
  * Binds the user's natural-language request to real page evidence
  * BEFORE the remote model plans an action. This is the missing
  * "what is the user asking + what on this page is relevant" stage.
+ *
+ * L15: Added bigram/phrase matching bonus for better multi-word relevance
  */
 
 const STOP = new Set([
@@ -17,6 +19,15 @@ function tokens(text) {
     .replace(/[^\p{L}\p{N}₹$]+/gu, ' ')
     .split(/\s+/)
     .filter((t) => t && t.length > 1 && !STOP.has(t));
+}
+
+// L15: Generate bigrams from token list for phrase matching
+function bigrams(tokenList) {
+  const bg = [];
+  for (let i = 0; i < tokenList.length - 1; i++) {
+    bg.push(`${tokenList[i]} ${tokenList[i + 1]}`);
+  }
+  return bg;
 }
 
 function parseBudget(text) {
@@ -61,6 +72,7 @@ export class TaskGrounding {
   ground(taskState, fusedObservation) {
     const query = taskState?.original_query || taskState?.active_subgoal || '';
     const qTokens = tokens(query);
+    const qBigrams = bigrams(qTokens); // L15
     const constraints = Array.isArray(taskState?.constraints) ? taskState.constraints : [];
     const allText = [query, ...constraints].join(' ');
     const budget = parseBudget(allText);
@@ -74,9 +86,28 @@ export class TaskGrounding {
     const scored = elements.map((el) => {
       const hay = haystack(el);
       let score = 0;
+
+      // Unigram matching
+      let matchedTokens = 0;
       for (const t of qTokens) {
-        if (hay.includes(t)) score += 3;
+        if (hay.includes(t)) {
+          score += 3;
+          matchedTokens++;
+        }
       }
+
+      // L15: Bigram matching — bonus for consecutive word matches (phrase relevance)
+      for (const bg of qBigrams) {
+        if (hay.includes(bg)) {
+          score += 5; // Bigram bonus is higher than two individual unigrams (3+3=6 vs 5 extra = 11 total)
+        }
+      }
+
+      // L15: Coverage bonus — if most query tokens matched, element is highly relevant
+      if (qTokens.length >= 2 && matchedTokens >= qTokens.length * 0.7) {
+        score += 4;
+      }
+
       const d = el.dom || {};
       if (el.interaction?.typeable && /search|find|type|fill|query/i.test(allText)) score += 4;
       if (el.interaction?.typeable && /search|query|find/i.test(hay)) score += 5;
@@ -87,6 +118,11 @@ export class TaskGrounding {
       if (/nav|cookie|privacy policy|subscribe|sign in|login/i.test(hay) && !/login|sign in|nav/i.test(allText)) {
         score -= 4;
       }
+      // L15: Penalize footer/header noise more aggressively
+      if (/footer|copyright|terms of use|contact us|about us/i.test(hay) && !/about|contact|terms/i.test(allText)) {
+        score -= 3;
+      }
+
       return {
         element_id: el.id,
         score,

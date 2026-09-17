@@ -2,6 +2,10 @@
  * Prompt Builder with Prompt-Injection Defenses
  * Constructs a compact, grounding-first planning prompt.
  * Untrusted webpage text is quarantined; the model may only act on listed IDs.
+ *
+ * L16: Always keeps submit buttons, selects, radio/checkbox elements
+ * L17: Added explicit scroll context (percentage, below-fold indicator)
+ * L21: Added symbolic token reference guide in prompt
  */
 
 import { ActionType, SymbolicSecretSource } from '../shared/constants.js';
@@ -20,7 +24,15 @@ export class PromptBuilder {
     const source = unifiedObservation.elements || [];
     const picked = [];
     for (const el of source) {
-      if (rankedIds.has(el.id) || mustKeep.has(el.id) || el.interaction?.typeable || el.interaction?.uploadable) {
+      const isRankedOrRequired = rankedIds.has(el.id) || mustKeep.has(el.id);
+      const isTypeable = el.interaction?.typeable;
+      const isUploadable = el.interaction?.uploadable;
+      // L16: Always keep submit buttons, select dropdowns, radio/checkbox elements
+      const isSubmitBtn = (el.dom?.type === 'submit') || (el.dom?.tag === 'button' && el.dom?.in_form);
+      const isSelectOrChoice = (el.dom?.tag === 'select') ||
+        (el.dom?.type === 'radio') || (el.dom?.type === 'checkbox');
+
+      if (isRankedOrRequired || isTypeable || isUploadable || isSubmitBtn || isSelectOrChoice) {
         picked.push(el);
       }
     }
@@ -73,11 +85,28 @@ export class PromptBuilder {
     };
   }
 
+  // L17: Generate a human-readable scroll context summary
+  _scrollContext(scroll) {
+    if (!scroll) return 'Scroll position unknown.';
+    const { y, maxY } = scroll;
+    if (!maxY || maxY <= 0) return 'Page is fully visible (no scrollable content).';
+    const viewportH = typeof window !== 'undefined' ? window.innerHeight : 800;
+    const pct = Math.round((y / Math.max(1, maxY - viewportH)) * 100);
+    const clampedPct = Math.min(100, Math.max(0, pct));
+    const remainingPx = Math.max(0, maxY - y - viewportH);
+    if (clampedPct === 0) return `At the top of the page. ~${remainingPx}px of content below the fold.`;
+    if (clampedPct >= 95) return 'At the bottom of the page. No more content below.';
+    return `Scrolled ${clampedPct}% down the page. ~${remainingPx}px of content below the fold.`;
+  }
+
   buildPlanningPrompt(userTask, unifiedObservation, taskHistory = [], taskState = null, pageState = null) {
     const allowedActions = Object.values(ActionType).join(', ');
     const allowedSecretSources = Object.values(SymbolicSecretSource).join(', ');
     const compact = this.compactObservation(unifiedObservation, pageState);
     const allowedIds = compact.elements.map((e) => e.id);
+
+    // L17: Scroll context
+    const scrollInfo = this._scrollContext(compact.page.scroll);
 
     return `
 ### SYSTEM SECURITY & PRIVACY POLICY:
@@ -91,6 +120,23 @@ RULES:
 4. Irreversible actions (SUBMIT, purchase, delete) set risk HIGH and requires_confirmation true.
 5. If the goal is fulfilled, return action DONE.
 6. Allowed actions: ${allowedActions}
+
+### SYMBOLIC TOKEN REFERENCE (L21):
+When you see these tokens in the task or task state, they refer to locally-stored secrets:
+- LOCAL_AADHAAR → User's Aadhaar number (resolved locally, never transmitted)
+- LOCAL_PAN → User's PAN card number
+- LOCAL_FULL_NAME → User's full legal name
+- LOCAL_DOB → User's date of birth
+- LOCAL_PHONE → User's phone number
+- LOCAL_EMAIL → User's email address
+- LOCAL_ADDRESS → User's residential address
+- LOCAL_PASSWORD → User's password/PIN
+- LOCAL_DOCUMENT → User's uploaded identity document (PDF)
+- LOCAL_CREDIT_CARD → User's credit/debit card number
+- LOCAL_CVV → User's card CVV/CVC
+- LOCAL_PROFILE → General profile data
+
+To fill a sensitive field, set "value_source" to the corresponding token (e.g., "LOCAL_PAN") and set "value" to null.
 
 ### GROUNDING (MANDATORY):
 - You may ONLY use element_id values from this list: ${JSON.stringify(allowedIds)}
@@ -113,6 +159,7 @@ ${JSON.stringify(taskState && taskState.toPayload ? taskState.toPayload() : (tas
 - Type: ${compact.page.page_type}
 - Visual: ${compact.visual_layout}
 - State: ${compact.visual_state}
+- Scroll: ${scrollInfo}
 - Headings: ${JSON.stringify(compact.headings)}
 - Resolved references: ${JSON.stringify(compact.resolved_references)}
 - Ranked relevant elements: ${JSON.stringify(compact.ranked_candidates)}
@@ -127,12 +174,17 @@ ${JSON.stringify(taskHistory.slice(-5), null, 2)}
 
 ### REQUIRED JSON OUTPUT FORMAT:
 {
-  "task_understanding": { "intent": "", "target_entity": "", "constraints": [], "expected_final_state": "", "active_subgoal": "" },
+  "task_understanding": { "intent": "", "target_entity": "", "constraints": [], "expected_final_state": "", "subgoals": [], "active_subgoal": "" },
   "grounding": {
     "relevant_element_ids": ["el_xxx"],
     "resolved_references": {},
     "evidence": "quote only facts listed above",
     "ignored": []
+  },
+  "current_state": {
+    "accomplished_so_far": "",
+    "expected_state_after_action": "",
+    "verification_result": "SUCCESS | WRONG_PAGE | NO_PROGRESS | NEED_SEARCH | SUBGOAL_COMPLETE"
   },
   "thought": "Brief explanation of observation and next logical step",
   "action": {

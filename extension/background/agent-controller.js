@@ -6,6 +6,12 @@
  * Reliability: bounded retries, per-step error isolation, verification,
  * overlay cleanup, settings-aware execution. Privacy boundary preserved:
  * only sanitized DOM + redacted screenshots leave the device.
+ *
+ * L1: Post-navigation DOM re-stabilization
+ * L2: Improved stuck-loop detection with sliding window
+ * L5: Post-action stability wait before next observation
+ * L6: Reset consecutiveFailures on subgoal advance
+ * L12: Injection quarantine now scans context text and visible_text
  */
 
 import { AgentState, ActionType, RiskLevel } from '../shared/constants.js';
@@ -25,6 +31,8 @@ import { defaultPageStateModeler } from '../perception/page-state-modeler.js';
 
 const MAX_CONSECUTIVE_FAILURES = 3;
 const MAX_IDENTICAL_ACTIONS = 3;
+
+// L12: Expanded injection patterns — covers more social engineering attacks
 const INJECTION_PATTERNS = [
   /ignore\s+(all\s+)?previous\s+instructions/i,
   /ignore\s+your\s+(system\s+)?prompt/i,
@@ -32,7 +40,16 @@ const INJECTION_PATTERNS = [
   /send\s+(the\s+)?(user'?s?\s+)?password/i,
   /disregard\s+(all\s+)?(prior|previous)/i,
   /you\s+are\s+now\s+(a|an)\b/i,
-  /new\s+system\s+prompt/i
+  /new\s+system\s+prompt/i,
+  /override\s+(all\s+)?(safety|security|rules)/i,
+  /reveal\s+(your|the)\s+(secret|password|key|token)/i,
+  /output\s+(all|every|the)\s+(secret|password|credential)/i,
+  /forget\s+(all\s+)?(your\s+)?instructions/i,
+  /act\s+as\s+(if|though)\s+you\s+(are|were)/i,
+  /pretend\s+(you\s+)?(are|were)\s/i,
+  /do\s+not\s+follow\s+(your|the)\s+(rules|instructions)/i,
+  /jailbreak/i,
+  /prompt\s+injection/i
 ];
 
 function containsInjection(text) {
@@ -152,8 +169,9 @@ export class AgentController {
         break;
       }
 
-      if (this._isRepeatingIdenticalAction(task)) {
-        console.log("[REPLAN] No progress detected. Agent repeated identical step.");
+      // L2: Improved stuck-loop detection
+      if (this._isStuckInLoop(task)) {
+        console.log("[REPLAN] No progress detected. Agent is stuck in a loop.");
         taskManager.failTask('The agent repeated the same step without making progress.');
         this.clearOverlays(task.tabId);
         this.notify('TASK_FAILED', { error: task.error, hint: task.hint });
@@ -220,6 +238,9 @@ export class AgentController {
     if (isRestrictedUrl) {
       throw new Error('Chrome does not permit extensions on internal chrome:// pages. Please open a website or test portal (e.g. http://localhost:5000).');
     }
+
+    // L1/L5: Wait for page to stabilize before observing (handles SPA transitions, AJAX)
+    await this._waitForPageStability(task.tabId);
 
     // STEP 1: OBSERVE
     taskManager.updateState(AgentState.OBSERVING, 'Reading page structure and layout…');
@@ -319,9 +340,19 @@ export class AgentController {
       pageState
     );
 
+    // L6/L7: Track previous subgoal for advancement detection
+    const prevSubgoal = task.taskState.getActiveSubgoal();
+
     if (task.taskState && planResult.task_understanding) {
       task.taskState.updateFromModel(planResult.task_understanding);
       task.taskState.updateFromModel(planResult.current_state);
+    }
+
+    // L6: If the subgoal advanced, reset consecutive failures
+    const newSubgoal = task.taskState.getActiveSubgoal();
+    if (prevSubgoal !== newSubgoal) {
+      console.log(`[SUBGOAL_ADVANCED] "${prevSubgoal}" → "${newSubgoal}"`);
+      task.consecutiveFailures = 0;
     }
 
     taskManager.updatePrivacyMetrics({ serverCallsCount: 1 });
@@ -469,57 +500,185 @@ export class AgentController {
       timestamp: Date.now()
     });
 
-    await this.sleep(500);
+    // L5: Post-action stability wait — let the page settle after the action
+    // Actions like CLICK and TYPE often trigger re-renders, AJAX calls, navigation
+    const postActionWait = this._getPostActionWait(proposedAction.action);
+    await this.sleep(postActionWait);
+
     return true;
   }
 
   /**
-   * True when the tail of the step history is N identical successful actions
-   * against the same target — the planner is stuck in a loop.
+   * L2: Improved stuck-loop detection.
+   * Catches both exact repetition AND alternating patterns (A→B→A→B).
+   * Also checks if state fingerprint hasn't changed across recent steps.
    */
-  _isRepeatingIdenticalAction(task) {
+  _isStuckInLoop(task) {
     const steps = task.steps || [];
     if (steps.length < MAX_IDENTICAL_ACTIONS) return false;
     const tail = steps.slice(-MAX_IDENTICAL_ACTIONS);
-    
-    // Check if state fingerprint is identical across these steps
-    const stateFingerprint = (s) => {
-      const p = s.diagnostic?.page_state || {};
-      return `${p.url}::${p.summary}::${p.detected_form}`;
-    };
-    
+
     const keyOf = (s) => {
       const a = s?.action || {};
       const t = a.target || {};
       return `${a.action}::${t.element_id || t.url || ''}::${a.value_source || a.value || ''}`;
     };
-    
+
+    // Check 1: Exact same action repeated N times
+    const stateFingerprint = (s) => {
+      const p = s.diagnostic?.page_state || {};
+      return `${p.url}::${p.summary}::${p.detected_form}`;
+    };
+
     const firstAction = keyOf(tail[0]);
     const firstState = stateFingerprint(tail[0]);
-    
-    return tail.every((s) => s.success === true && keyOf(s) === firstAction && stateFingerprint(s) === firstState);
+    const allIdentical = tail.every((s) => s.success === true && keyOf(s) === firstAction && stateFingerprint(s) === firstState);
+    if (allIdentical) return true;
+
+    // L2: Check 2: Alternating pattern detection (A→B→A→B)
+    if (steps.length >= 4) {
+      const last4 = steps.slice(-4);
+      const keys = last4.map(keyOf);
+      if (keys[0] === keys[2] && keys[1] === keys[3] && keys[0] !== keys[1]) {
+        // Check that no actual progress is being made (page state unchanged)
+        const states = last4.map(stateFingerprint);
+        if (states[0] === states[2] && states[1] === states[3]) {
+          console.warn('[AgentController] Alternating stuck loop detected:', keys);
+          return true;
+        }
+      }
+    }
+
+    // L2: Check 3: All recent steps are failures with the same error
+    if (steps.length >= MAX_IDENTICAL_ACTIONS) {
+      const recentFails = steps.slice(-MAX_IDENTICAL_ACTIONS);
+      if (recentFails.every(s => s.success === false)) {
+        const errors = recentFails.map(s => (s.error || '').slice(0, 50));
+        if (new Set(errors).size === 1) {
+          console.warn('[AgentController] Repeated identical failures detected');
+          return true;
+        }
+      }
+    }
+
+    return false;
   }
 
   /**
-   * Strips webpage-embedded instruction attacks from the observation copy
+   * L12: Strips webpage-embedded instruction attacks from the observation copy
    * passed to the planner. Webpage text is untrusted data, never instructions.
+   * Now also scans context text and visible_text.
    */
   quarantineInjectedElements(fusedObservation) {
-    if (!fusedObservation || !Array.isArray(fusedObservation.elements)) return;
+    if (!fusedObservation) return;
+    
     let quarantined = 0;
-    for (const elmt of fusedObservation.elements) {
-      const label = elmt?.dom?.label || elmt?.visual?.description || '';
-      if (containsInjection(label)) {
-        quarantined++;
-        if (elmt.dom) {
-          elmt.dom.label = '[Untrusted page text — ignored]';
-          elmt.dom.value = elmt.dom.sensitive ? '[REDACTED]' : '';
+
+    // L12: Scan element labels, descriptions, AND context text
+    if (Array.isArray(fusedObservation.elements)) {
+      for (const elmt of fusedObservation.elements) {
+        const label = elmt?.dom?.label || elmt?.visual?.description || '';
+        const context = elmt?.dom?.context || '';
+
+        if (containsInjection(label) || containsInjection(context)) {
+          quarantined++;
+          if (elmt.dom) {
+            elmt.dom.label = '[Untrusted page text — ignored]';
+            elmt.dom.value = elmt.dom.sensitive ? '[REDACTED]' : '';
+            // L12: Also sanitize the context if it contains injection
+            if (containsInjection(context)) {
+              elmt.dom.context = '[Untrusted page content — quarantined]';
+            }
+          }
+          if (elmt.visual) elmt.visual.description = 'Untrusted page content (quarantined)';
         }
-        if (elmt.visual) elmt.visual.description = 'Untrusted page content (quarantined)';
       }
     }
+
+    // L12: Scan visible_text for injection attempts
+    if (fusedObservation.visible_text && containsInjection(fusedObservation.visible_text)) {
+      quarantined++;
+      // Don't blank visible_text entirely — strip the injected portions
+      for (const re of INJECTION_PATTERNS) {
+        fusedObservation.visible_text = fusedObservation.visible_text.replace(re, '[INJECTION_QUARANTINED]');
+      }
+    }
+
+    // L12: Scan headings for injection
+    if (Array.isArray(fusedObservation.headings)) {
+      for (const heading of fusedObservation.headings) {
+        const headingText = heading?.text || (typeof heading === 'string' ? heading : '');
+        if (containsInjection(headingText)) {
+          quarantined++;
+          if (typeof heading === 'object' && heading.text) {
+            heading.text = '[Untrusted heading — quarantined]';
+          }
+        }
+      }
+    }
+
+    // L12: Scan result_items text content
+    if (Array.isArray(fusedObservation.result_items)) {
+      for (const item of fusedObservation.result_items) {
+        if (containsInjection(item?.title) || containsInjection(item?.text)) {
+          quarantined++;
+          if (containsInjection(item.title)) item.title = '[Untrusted item — quarantined]';
+          if (containsInjection(item.text)) item.text = '[Untrusted content — quarantined]';
+        }
+      }
+    }
+
     if (quarantined > 0) {
-      console.warn(`[AgentController] Quarantined ${quarantined} injected element(s) from webpage content.`);
+      console.warn(`[AgentController] Quarantined ${quarantined} injected element(s)/text from webpage content.`);
+    }
+  }
+
+  /**
+   * L1/L5: Wait for the page to stabilize by sending a CHECK_PAGE_STABILITY
+   * message to the content script.
+   */
+  async _waitForPageStability(tabId) {
+    try {
+      await new Promise((resolve) => {
+        chrome.tabs.sendMessage(
+          tabId,
+          { type: MessageType.CHECK_PAGE_STABILITY, payload: { quietMs: 250 } },
+          (response) => {
+            if (chrome.runtime.lastError) {
+              // Content script not ready — just wait a flat amount
+              resolve();
+            } else {
+              resolve();
+            }
+          }
+        );
+        // Timeout in case the message never gets a response
+        setTimeout(resolve, 2000);
+      });
+    } catch {
+      await this.sleep(400);
+    }
+  }
+
+  /**
+   * L5: Determine how long to wait after an action for the page to settle.
+   * Navigation/click actions need longer waits for SPA transitions.
+   */
+  _getPostActionWait(actionType) {
+    switch (actionType) {
+      case ActionType.NAVIGATE:
+        return 1200; // Full page navigation needs more time
+      case ActionType.CLICK:
+      case ActionType.SUBMIT:
+        return 800;  // Clicks often trigger AJAX/re-renders
+      case ActionType.TYPE:
+        return 400;  // Typing may trigger autocomplete/validation
+      case ActionType.SELECT:
+        return 400;
+      case ActionType.SCROLL:
+        return 500;  // Infinite scroll / lazy loading
+      default:
+        return 300;
     }
   }
 
@@ -573,6 +732,8 @@ export class AgentController {
                 target: { tabId },
                 files: ['content/content.js']
               });
+              // L1: Wait for content script to initialize after injection
+              await this.sleep(400);
               chrome.tabs.sendMessage(tabId, { type: MessageType.EXTRACT_DOM }, (retryRes) => {
                 if (chrome.runtime.lastError) {
                   resolve({ success: false, error: chrome.runtime.lastError.message });

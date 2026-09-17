@@ -2,6 +2,10 @@
  * Local DOM Sanitizer
  * Strips sensitive values, masks PII, and assigns symbolic source tokens
  * before the DOM representation can be sent to remote models.
+ *
+ * L9: Expanded sensitive URL parameters
+ * L10: Visible text is now scanned for email, phone, and credit card patterns
+ * L13: PAN regex is now case-insensitive
  */
 
 import { defaultPIIDetector } from './pii-detector.js';
@@ -48,7 +52,8 @@ export class DOMSanitizer {
       }
     }
     // PII-shaped examples independent of vault contents
-    out = out.replace(/\b[A-Z]{5}[0-9]{4}[A-Z]{1}\b/g, '[example]');
+    // L13: PAN regex is case-insensitive
+    out = out.replace(/\b[A-Z]{5}[0-9]{4}[A-Z]{1}\b/gi, '[example]');
     out = out.replace(/\b[2-9]\d{3}[\s-]?\d{4}[\s-]?\d{4}\b/g, '[example]');
     return out;
   }
@@ -80,9 +85,25 @@ export class DOMSanitizer {
     }
 
     // 2. Generic PII Regex Fallbacks
-    out = out.replace(/\b[A-Z]{5}[0-9]{4}[A-Z]{1}\b/g, `[${SymbolicSecretSource.LOCAL_PAN}]`);
+    // L13: PAN regex is now case-insensitive
+    out = out.replace(/\b[A-Z]{5}[0-9]{4}[A-Z]{1}\b/gi, `[${SymbolicSecretSource.LOCAL_PAN}]`);
     out = out.replace(/\b[2-9]\d{3}[\s-]?\d{4}[\s-]?\d{4}\b/g, `[${SymbolicSecretSource.LOCAL_AADHAAR}]`);
-    
+
+    // L10: Scrub email addresses from text sent to models
+    out = out.replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, `[${SymbolicSecretSource.LOCAL_EMAIL}]`);
+
+    // L10: Scrub Indian phone numbers (10 digits starting 6-9, optionally +91)
+    out = out.replace(/(?:(?:\+|0{0,2})91[\s-]?)?[6-9]\d{9}\b/g, `[${SymbolicSecretSource.LOCAL_PHONE}]`);
+
+    // L10: Scrub credit/debit card patterns (13-19 digit sequences)
+    out = out.replace(/\b(?:\d[\s-]?){13,19}\b/g, (match) => {
+      const clean = match.replace(/[\s-]/g, '');
+      if (/^\d{13,19}$/.test(clean)) {
+        return `[${SymbolicSecretSource.LOCAL_CREDIT_CARD}]`;
+      }
+      return match;
+    });
+
     return out;
   }
 
@@ -180,15 +201,38 @@ export class DOMSanitizer {
 
   /**
    * Cleans a URL to keep only domain/origin and non-sensitive path
+   * L9: Expanded sensitive URL parameter list
    */
   sanitizeUrl(url) {
     try {
       const parsed = new URL(url);
-      // Remove sensitive query parameters (token, auth, code, key, pass, session)
-      const sensitiveParams = ['token', 'auth', 'code', 'key', 'password', 'pass', 'session', 'id_token', 'access_token'];
+      // L9: Comprehensive sensitive query parameter list
+      const sensitiveParams = [
+        'token', 'auth', 'code', 'key', 'password', 'pass', 'session',
+        'id_token', 'access_token', 'refresh_token',
+        // L9: Additional sensitive parameters
+        'api_key', 'apikey', 'api-key',
+        'secret', 'client_secret',
+        'jwt', 'bearer',
+        'state', 'nonce',
+        'sid', 'session_id', 'sessionid',
+        'csrf', 'csrf_token', '_csrf',
+        'otp', 'verification_code',
+        'private_key', 'privatekey',
+        'ssn', 'aadhaar', 'pan',
+        'credit_card', 'card_number',
+        'user_token', 'auth_token', 'authorization'
+      ];
       for (const param of sensitiveParams) {
         if (parsed.searchParams.has(param)) {
           parsed.searchParams.set(param, '[REDACTED]');
+        }
+      }
+      // Also redact any param whose name contains sensitive keywords
+      for (const [pKey] of parsed.searchParams.entries()) {
+        const pLower = pKey.toLowerCase();
+        if (/token|secret|key|pass|auth|session|jwt|cred|private/i.test(pLower)) {
+          parsed.searchParams.set(pKey, '[REDACTED]');
         }
       }
       return parsed.toString();

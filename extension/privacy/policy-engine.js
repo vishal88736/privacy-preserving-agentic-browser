@@ -2,10 +2,13 @@
  * Outbound Privacy Policy Engine
  * Scans all outgoing network payloads before dispatch to ensure
  * no plaintext secrets, PII, or vault credentials bypass sanitization.
+ *
+ * L8: Now scans for credit card, email, phone, and IFSC patterns
+ *     in addition to Aadhaar and PAN.
  */
 
 import { defaultLocalVault } from './local-vault.js';
-import { defaultPIIDetector } from './pii-detector.js';
+import { defaultPIIDetector, validateLuhn } from './pii-detector.js';
 
 export class OutboundPolicyViolationError extends Error {
   constructor(message, violationDetails = null) {
@@ -29,6 +32,7 @@ export class PolicyEngine {
     const serialized = typeof payload === 'string' ? payload : JSON.stringify(payload);
 
     // 1. Scan against all plaintext secrets currently held in the local vault
+    // L11: getAllSecretsForUI now returns only string values, so no blob bloat
     const secrets = this.vault.getAllSecretsForUI();
     for (const [key, value] of Object.entries(secrets)) {
       if (typeof value === 'string' && value.length >= 4) {
@@ -50,7 +54,7 @@ export class PolicyEngine {
       }
     }
 
-    // 2. Scan for unmasked Aadhaar numbers
+    // 2. Scan for unmasked Aadhaar numbers (12-digit pattern starting with 2-9)
     const rawAadhaarMatch = serialized.match(/\b[2-9]\d{3}\s?\d{4}\s?\d{4}\b/);
     if (rawAadhaarMatch && !rawAadhaarMatch[0].includes('REDACTED')) {
       throw new OutboundPolicyViolationError(
@@ -59,12 +63,60 @@ export class PolicyEngine {
       );
     }
 
-    // 3. Scan for unmasked PAN numbers
-    const rawPANMatch = serialized.match(/\b[A-Z]{5}[0-9]{4}[A-Z]{1}\b/);
+    // 3. Scan for unmasked PAN numbers (L13: case-insensitive)
+    const rawPANMatch = serialized.match(/\b[A-Z]{5}[0-9]{4}[A-Z]{1}\b/i);
     if (rawPANMatch) {
       throw new OutboundPolicyViolationError(
         'Outbound policy blocked payload: Unmasked PAN pattern found in request body',
         { match: rawPANMatch[0] }
+      );
+    }
+
+    // L8: 4. Scan for credit card numbers (13-19 digits passing Luhn check)
+    const cardMatches = serialized.matchAll(/\b(?:\d[\s-]?){13,19}\b/g);
+    for (const m of cardMatches) {
+      const cleanDigits = m[0].replace(/[\s-]/g, '');
+      if (/^\d{13,19}$/.test(cleanDigits) && validateLuhn(cleanDigits)) {
+        throw new OutboundPolicyViolationError(
+          'Outbound policy blocked payload: Unmasked credit/debit card number (Luhn-valid) found in request body',
+          { match: cleanDigits.slice(0, 4) + '****' }
+        );
+      }
+    }
+
+    // L8: 5. Scan for unmasked email addresses
+    const emailMatch = serialized.match(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/);
+    if (emailMatch) {
+      // Only flag if it's not in a known-safe context (like a domain reference)
+      const emailStr = emailMatch[0];
+      const isSafe = /example\.com|test\.com|localhost|placeholder/i.test(emailStr);
+      if (!isSafe) {
+        throw new OutboundPolicyViolationError(
+          'Outbound policy blocked payload: Unmasked email address found in request body',
+          { match: emailStr.replace(/(.{3}).*(@.*)/, '$1***$2') }
+        );
+      }
+    }
+
+    // L8: 6. Scan for unmasked Indian phone numbers (10 digits starting 6-9, optionally with +91)
+    const phoneMatch = serialized.match(/(?:(?:\+|0{0,2})91[\s-]?)?[6-9]\d{9}\b/);
+    if (phoneMatch) {
+      const phoneStr = phoneMatch[0].replace(/[\s-]/g, '');
+      // Avoid false positives on short numeric sequences that are element IDs or timestamps
+      if (phoneStr.length >= 10 && !/el_\d|vis_\d|task_\d|obs_\d/.test(serialized.substring(Math.max(0, serialized.indexOf(phoneMatch[0]) - 20), serialized.indexOf(phoneMatch[0]) + phoneMatch[0].length + 5))) {
+        throw new OutboundPolicyViolationError(
+          'Outbound policy blocked payload: Unmasked Indian phone number pattern found in request body',
+          { match: phoneStr.slice(0, 4) + '******' }
+        );
+      }
+    }
+
+    // L8: 7. Scan for IFSC codes
+    const ifscMatch = serialized.match(/\b[A-Z]{4}0[A-Z0-9]{6}\b/);
+    if (ifscMatch) {
+      throw new OutboundPolicyViolationError(
+        'Outbound policy blocked payload: Unmasked IFSC code found in request body',
+        { match: ifscMatch[0] }
       );
     }
 

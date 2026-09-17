@@ -1,9 +1,25 @@
 /**
  * Action Validator
  * Performs pre-execution consistency checks against the latest page DOM and fused observation.
+ * L4: Now correctly skips validation for actions that don't require a target element.
  */
 
 import { ActionType } from '../shared/constants.js';
+
+// L4: Actions that do NOT require a target element_id and should bypass target validation
+const TARGET_OPTIONAL_ACTIONS = new Set([
+  ActionType.DONE,
+  ActionType.WAIT,
+  ActionType.NAVIGATE,
+  ActionType.SCROLL,
+  ActionType.GO_BACK,
+  ActionType.GO_FORWARD,
+  ActionType.EXTRACT,
+  ActionType.PRESS_KEY,
+  ActionType.OPEN_TAB,
+  ActionType.SWITCH_TAB,
+  ActionType.ASK_USER
+]);
 
 export class ActionValidator {
   /**
@@ -17,7 +33,8 @@ export class ActionValidator {
     const availableElements = fusedObservation.elements || [];
     const formState = fusedObservation.form_state || { completion: { empty: 0 } };
 
-    if (action.action === ActionType.DONE || action.action === ActionType.WAIT || action.action === ActionType.NAVIGATE) {
+    // L4: Skip all target validation for actions that don't need targets
+    if (TARGET_OPTIONAL_ACTIONS.has(action.action)) {
       return { valid: true };
     }
 
@@ -105,7 +122,7 @@ export class ActionValidator {
         }
 
         // Subgoal: Inspect / Select Result
-        if ((activeSubgoal.startsWith('inspect') || activeSubgoal.startsWith('select')) && action.action === ActionType.CLICK) {
+        if ((activeSubgoal.startsWith('inspect') || activeSubgoal.startsWith('select') || activeSubgoal.includes('identify')) && action.action === ActionType.CLICK) {
           if (isPlayerControl) {
             return {
               valid: false,
@@ -132,4 +149,3 @@ export class ActionValidator {
 }
 
 export const defaultActionValidator = new ActionValidator();
-

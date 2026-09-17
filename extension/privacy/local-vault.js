@@ -2,6 +2,9 @@
  * Local Secret Vault
  * Secure, local-only storage for user credentials, personal identity numbers,
  * and test documents. Plaintext values are never transmitted across the network.
+ *
+ * L11: getAllSecretsForUI now filters out non-string entries (like document blobs)
+ *      to prevent policy engine false positives and memory bloat.
  */
 
 import { SymbolicSecretSource } from '../shared/constants.js';
@@ -83,8 +86,22 @@ export class LocalVault {
     }));
   }
 
+  /**
+   * L11: Returns only string-type secrets for outbound policy scanning.
+   * Document blobs (objects) are excluded to prevent:
+   * - False positive matches on base64 content
+   * - Memory bloat from serializing large document content
+   * - Accidental inclusion of document data in string-comparison scans
+   */
   getAllSecretsForUI() {
-    return { ...this.memoryStore };
+    const filtered = {};
+    for (const [key, value] of Object.entries(this.memoryStore)) {
+      if (typeof value === 'string') {
+        filtered[key] = value;
+      }
+      // Objects (like LOCAL_DOCUMENT) are intentionally excluded
+    }
+    return filtered;
   }
 }
 

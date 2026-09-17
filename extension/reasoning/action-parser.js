@@ -1,6 +1,8 @@
 /**
  * Structured Action Parser
  * Extracts, parses, and validates the structured JSON action from LLM response.
+ * L3: Now extracts full model response fields (task_understanding, grounding,
+ * page_understanding, current_state) so the agent controller can update state.
  */
 
 import { validateAction } from '../shared/schemas.js';
@@ -8,6 +10,7 @@ import { validateAction } from '../shared/schemas.js';
 export class ActionParser {
   /**
    * Parses raw string response from LLM into a validated Action object
+   * L3: Returns the complete structured response, not just action/thought
    */
   parse(rawText) {
     if (!rawText || typeof rawText !== 'string') {
@@ -39,10 +42,16 @@ export class ActionParser {
     // Validate against strict action schema
     validateAction(action);
 
+    // L3: Extract and return all structured model response fields
     return {
       thought,
       action,
-      isTerminal
+      isTerminal,
+      // Full response fields for progressive state updates
+      task_understanding: parsed.task_understanding || null,
+      grounding: parsed.grounding || null,
+      page_understanding: parsed.page_understanding || null,
+      current_state: parsed.current_state || null
     };
   }
 }
