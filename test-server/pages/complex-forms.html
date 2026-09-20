@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Complex Framework Forms Test</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; }
+        form { border: 1px solid #ccc; padding: 15px; max-width: 500px; margin-bottom: 20px; }
+        .field { margin-bottom: 10px; }
+        label { display: block; font-weight: bold; margin-bottom: 5px; }
+    </style>
+</head>
+<body>
+    <h1>Complex Forms Test</h1>
+
+    <!-- 1. Form with various input types -->
+    <form id="complex-registration" onsubmit="event.preventDefault(); window.submitted = true;">
+        <fieldset>
+            <legend>Registration</legend>
+            <div class="field">
+                <label for="first_name">First Name (React-like)</label>
+                <!-- we simulate react by clearing value if input event not fired properly -->
+                <input type="text" id="first_name" name="first_name" oninput="this.setAttribute('data-dirty', 'true')" />
+            </div>
+
+            <div class="field">
+                <label for="last_name">Last Name</label>
+                <input type="text" id="last_name" name="last_name" />
+            </div>
+
+            <div class="field">
+                <label for="country">Country</label>
+                <select id="country" name="country">
+                    <option value="">Select country...</option>
+                    <option value="us">United States</option>
+                    <option value="uk">United Kingdom</option>
+                    <option value="in">India</option>
+                </select>
+            </div>
+
+            <div class="field">
+                <label>Gender</label>
+                <label style="font-weight: normal;"><input type="radio" name="gender" value="male"> Male</label>
+                <label style="font-weight: normal;"><input type="radio" name="gender" value="female"> Female</label>
+            </div>
+
+            <div class="field">
+                <label>Terms</label>
+                <label style="font-weight: normal;">
+                    <input type="checkbox" id="terms" name="terms" value="yes"> I agree to the terms and conditions
+                </label>
+            </div>
+
+            <button type="submit">Submit Registration</button>
+        </fieldset>
+    </form>
+
+    <script>
+        // Simulate React controlled component behavior where direct assignment without event dispatch gets reverted
+        const reactInput = document.getElementById('first_name');
+        setInterval(() => {
+            if (reactInput.value && reactInput.getAttribute('data-dirty') !== 'true') {
+                reactInput.value = ''; // Revert because React state didn't update!
+            }
+        }, 100);
+    </script>
+</body>
+</html>

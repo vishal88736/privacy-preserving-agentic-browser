@@ -323,6 +323,31 @@ export class AgentController {
       redactedRegionsCount: sensitiveCount,
       detectedCategories
     });
+    // Transparency: record exactly what leaves the device for the "What is
+    // sent to the AI" panel. Never includes vault plaintext — only counts,
+    // symbolic tokens, redacted samples and the sanitized task text.
+    try {
+      const tokens = Array.from(new Set(
+        (sanitizedElements || []).map((e) => e.value_source).filter(Boolean)
+      )).slice(0, 12);
+      const sampleElements = (sanitizedElements || []).slice(0, 3).map((e) => ({
+        id: e.id,
+        tag: e.tag,
+        label: String(e.label || e.placeholder || e.name || '').slice(0, 40),
+        value: e.value,
+        value_source: e.value_source || null
+      }));
+      task.lastLLMPayload = {
+        taskSent: String(task.prompt || '').slice(0, 140),
+        elementsSent: (sanitizedElements || []).length,
+        redactedCount: sensitiveCount,
+        detectedCategories: detectedCategories || [],
+        tokens,
+        screenshot: sensitiveCount > 0 ? 'masked (black boxes)' : 'clean (no PII regions)',
+        sampleElements,
+        timestamp: Date.now()
+      };
+    } catch { /* transparency is best-effort */ }
     this.notify('PRIVACY_UPDATED', task.privacyMetrics);
 
     // STEP 3: SERVER VLM PERCEPTION (sanitized data only)

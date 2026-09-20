@@ -18,7 +18,8 @@ const TARGET_OPTIONAL_ACTIONS = new Set([
   ActionType.PRESS_KEY,
   ActionType.OPEN_TAB,
   ActionType.SWITCH_TAB,
-  ActionType.ASK_USER
+  ActionType.ASK_USER,
+  ActionType.FILL_FORM_PLAN
 ]);
 
 export class ActionValidator {

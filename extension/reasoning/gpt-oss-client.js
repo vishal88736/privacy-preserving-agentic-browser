@@ -129,10 +129,6 @@ export class GPTOSSClient {
       isTerminal: true
     });
 
-    // Explicit user constraint: never submit.
-    if (interpreted.constraints.includes('must NOT submit the form')) {
-      return doneAction('User asked not to submit; marking complete without submitting.');
-    }
 
     const elById = new Map(elements.map((e) => [e.id, e]));
     const domOf = (e) => e?.dom || {};
@@ -142,13 +138,19 @@ export class GPTOSSClient {
     const tagOf = (e) => String(domOf(e).tag || '').toLowerCase();
 
     const doneTargets = new Set(
-      history.filter((h) => h.success !== false && h.action).map((h) => `${h.action.action}::${h.action.target?.element_id || ''}::${h.action.value_source || h.action.value || ''}`)
+      taskHistory.filter((h) => h.success !== false && h.action).map((h) => `${h.action.action}::${h.action.target?.element_id || ''}::${h.action.value_source || h.action.value || ''}`)
     );
     const typedIds = new Set(
-      history.filter((h) => h.action?.action === 'TYPE' && h.action.target?.element_id).map((h) => h.action.target.element_id)
+      taskHistory.filter((h) => h.action?.action === 'TYPE' && h.action.target?.element_id).map((h) => h.action.target.element_id)
     );
+    // Also consider fields filled by FILL_FORM_PLAN as "typed"
+    taskHistory.forEach(h => {
+      if (h.success !== false && h.action?.action === 'FILL_FORM_PLAN' && h.action.value?.fields) {
+        h.action.value.fields.forEach(f => typedIds.add(f.field_id));
+      }
+    });
     const clickedIds = new Set(
-      history.filter((h) => h.action?.action === 'CLICK' && h.action.target?.element_id).map((h) => h.action.target.element_id)
+      taskHistory.filter((h) => h.action?.action === 'CLICK' && h.action.target?.element_id).map((h) => h.action.target.element_id)
     );
 
     const isSearchBox = (e) => {
@@ -157,7 +159,7 @@ export class GPTOSSClient {
     };
     const isSubmitBtn = (e) => {
       const l = labelOf(e);
-      return typeOf(e) === 'submit' || (tagOf(e) === 'button' && /submit|apply|pay|send|confirm|continue|proceed/.test(l));
+      return typeOf(e) === 'submit' || (tagOf(e) === 'button' && /submit|apply|pay|send|confirm|continue|proceed|upload/i.test(l));
     };
     const isUploadable = (e) => Boolean(interOf(e).uploadable) || typeOf(e) === 'file';
     const isTypeable = (e) => Boolean(interOf(e).typeable) || tagOf(e) === 'input' || tagOf(e) === 'textarea';
@@ -210,19 +212,23 @@ export class GPTOSSClient {
     // 2. Fill empty typeable fields (form-filling) using FormAnalyzer
     const wantsFormFill = /fill|form|application|register|sign\s*up|aadhaar|kyc|profile/i.test(lowerTask) || interpreted.intent === 'FILL_FORM';
     
-    if (wantsFormFill && elements.length > 0 && !doneTargets.has('FILL_FORM_PLAN::::')) {
+    const hasExecutedFormPlan = taskHistory.some(h => h.action?.action === 'FILL_FORM_PLAN' && h.success !== false);
+    console.log(`PrivacyAgent: wantsFormFill=${wantsFormFill}, hasExecutedFormPlan=${hasExecutedFormPlan}, elements.length=${elements.length}`);
+    if (wantsFormFill && elements.length > 0 && !hasExecutedFormPlan) {
       const plans = defaultFormAnalyzer.analyzeForms(elements, task);
-      if (plans.length > 0) {
-        // Return a FILL_FORM_PLAN action
+      console.log("PrivacyAgent: analyzeForms returned", JSON.stringify(plans));
+      if (plans && plans.length > 0) {
+        const askFirst = interpreted.constraints.includes('must ask user before submitting');
+        const plan = plans[0];
+        
         return {
           task_understanding: { intent: interpreted.intent, constraints: interpreted.constraints, target_entity: interpreted.target?.entity },
           page_understanding: { page_type: obs.page?.page_type || 'unknown' },
-          thought: `[local-fallback] Analyzed form and generated fill plan with ${plans[0].fields.length} fields.`,
+          thought: `[local-fallback] Detected forms, attempting bulk form fill...`,
           action: {
             action: 'FILL_FORM_PLAN',
             risk: RiskLevel.MEDIUM,
-            requires_confirmation: false,
-            value: plans[0] // send the plan
+            value: plan // send the plan
           },
           isTerminal: false
         };
@@ -278,7 +284,7 @@ export class GPTOSSClient {
 
     // 3. After typing a search, click the search button (not player controls).
     const typedSearch = [...typedIds].some((id) => isSearchBox(elById.get(id)));
-    if (typedSearch || (semantics.search_query && history.some((h) => h.action?.action === 'TYPE'))) {
+    if (typedSearch || (semantics.search_query && taskHistory.some((h) => h.action?.action === 'TYPE'))) {
       const btn = elements.find((e) => {
         if (!isClickable(e) || clickedIds.has(e.id)) return false;
         const l = labelOf(e);
@@ -291,7 +297,11 @@ export class GPTOSSClient {
     // 4. Results: click cheapest/first/video result, skipping player controls.
     const results = obs.result_items || [];
     if (results.length) {
-      const pick = results[0];
+      let pick = results[0];
+      if (/\bpro\b/i.test(lowerTask)) pick = results.find(r => /\bpro\b/i.test(r.title || r.text)) || pick;
+      else if (/\bteam\b/i.test(lowerTask)) pick = results.find(r => /\bteam\b/i.test(r.title || r.text)) || pick;
+      else if (/\bbasic\b/i.test(lowerTask)) pick = results.find(r => /\bbasic\b/i.test(r.title || r.text)) || pick;
+
       if (pick.primary_action_id && elById.has(pick.primary_action_id) && !clickedIds.has(pick.primary_action_id)) {
         return mk(ActionType.CLICK, pick.primary_action_id, { thought: `Open result "${pick.title || pick.id}"` });
       }
@@ -303,17 +313,23 @@ export class GPTOSSClient {
       if (/previous|next|play|pause|volume|mute|mix|subscribe|like|share/i.test(l)) return false;
       return /views|official|video|song/i.test(l) || /watch\?v=/.test(domOf(e).href || '');
     });
-    if (videoLink && history.some((h) => h.action?.action === 'CLICK' || h.action?.action === 'TYPE')) {
+    if (videoLink && taskHistory.some((h) => h.action?.action === 'CLICK' || h.action?.action === 'TYPE')) {
       return mk(ActionType.CLICK, videoLink.id, { thought: `Open video result ${videoLink.id}` });
     }
 
     // 5. Submit when the form looks complete.
+    // SUBMIT is always HIGH risk + requires confirmation (safety gate
+    // contract). The "must NOT submit" constraint returns a terminal DONE
+    // with no target so the agent stops instead of submitting.
     const submitBtn = elements.find((e) => isSubmitBtn(e) && !clickedIds.has(e.id));
     if (submitBtn) {
       const remainingTypeables = elements.filter((e) => isTypeable(e) && !isSearchBox(e) && !typedIds.has(e.id));
       if (remainingTypeables.length === 0 || !wantsFormFill) {
+        if (interpreted.constraints.includes('must NOT submit the form')) {
+          return doneAction(`User asked not to submit; stopping before ${submitBtn.id}.`);
+        }
         const askFirst = interpreted.constraints.includes('must ask user before submitting');
-        return mk(interpreted.constraints.includes('must NOT submit the form') ? ActionType.DONE : ActionType.SUBMIT, submitBtn.id, {
+        return mk(ActionType.SUBMIT, submitBtn.id, {
           risk: RiskLevel.HIGH, requires_confirmation: true, thought: `Submit via ${submitBtn.id}${askFirst ? ' (user asked to confirm)' : ''}`
         });
       }
@@ -321,7 +337,7 @@ export class GPTOSSClient {
 
     // 6. If a video/result was just opened, the task is done. Check BEFORE
     // generic clicks so we never click "Previous" after succeeding.
-    if (history.some((h) => h.action?.action === 'CLICK' && /video|watch/i.test(h.action.target?.element_id || h.action.target?.label || ''))) {
+    if (taskHistory.some((h) => h.action?.action === 'CLICK' && /video|watch/i.test(h.action.target?.element_id || h.action.target?.label || ''))) {
       return doneAction('Target content opened.');
     }
 

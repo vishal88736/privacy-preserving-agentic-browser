@@ -20,18 +20,55 @@ const SEMANTIC_PATTERNS = [
   { type: 'zip_code', regex: /\b(zip|postal.?code|pincode|postcode)\b/i, weight: 1.0 },
   { type: 'country', regex: /\b(country|nation)\b/i, weight: 1.0 },
   { type: 'gender', regex: /\b(gender|sex)\b/i, weight: 1.0 },
-  { type: 'pan', regex: /\b(pan.?number|pan.?card|permanent.?account.?number)\b/i, weight: 1.0 },
-  { type: 'aadhaar', regex: /\b(aadhaar|aadhar|uidai)\b/i, weight: 1.0 }
+  { type: 'pan', regex: /\b(pan|pan.?number|pan.?card|permanent.?account.?number)\b/i, weight: 1.0 },
+  { type: 'aadhaar', regex: /\b(aadhaar|aadhar|uidai)\b/i, weight: 1.0 },
+  { type: 'terms', regex: /\b(terms|conditions|agree|accept)\b/i, weight: 1.0 }
 ];
 
 export class FormAnalyzer {
+  /**
+   * Normalize flat extractor elements AND fused {id, dom, interaction}
+   * elements into a common flat shape so bulk planning works on real
+   * observations. Fused elements nest tag/type/label/etc. under .dom.
+   */
+  _norm(el) {
+    if (!el || typeof el !== 'object') return {};
+    const dom = el.dom && typeof el.dom === 'object' ? el.dom : {};
+    const get = (key, fb = '') => {
+      const top = el[key];
+      if (top !== undefined && top !== null && top !== '') return top;
+      const nested = dom[key];
+      if (nested !== undefined && nested !== null && nested !== '') return nested;
+      return fb;
+    };
+    return {
+      id: el.id || dom.id || '',
+      tag: get('tag'),
+      type: get('type'),
+      name: get('name'),
+      label: get('label'),
+      placeholder: get('placeholder'),
+      ariaLabel: el.ariaLabel || dom.ariaLabel || dom.aria_label || '',
+      ariaDescribedBy: el.ariaDescribedBy || dom.ariaDescribedBy || '',
+      fieldset_legend: el.fieldset_legend || dom.fieldset_legend || dom.legend || '',
+      context: get('context'),
+      disabled: Boolean(el.disabled || dom.disabled),
+      in_form: Boolean(el.in_form || dom.in_form || el.form || dom.inForm),
+      form_id: el.form_id || dom.form_id || el.formId || dom.formId || null,
+      options: el.options || dom.options,
+      semantic_type: el.semantic_type || dom.semantic_type || '',
+      value: el.value !== undefined ? el.value : dom.value,
+      _raw: el
+    };
+  }
   
   analyzeForms(elements, userGoal) {
     const forms = new Map();
     const floatingFields = [];
 
-    // Group fields by form
-    elements.forEach(el => {
+    // Group fields by form (works for flat + fused shapes)
+    elements.forEach(raw => {
+      const el = this._norm(raw);
       if (!el.in_form && !el.form_id) {
         floatingFields.push(el);
       } else {
@@ -81,21 +118,27 @@ export class FormAnalyzer {
   }
 
   isFillable(field) {
-    if (field.disabled) return false;
-    if (field.tag === 'button' || field.type === 'submit' || field.type === 'hidden') return false;
+    const f = field && field._raw ? field : this._norm(field);
+    if (f.disabled) return false;
+    const tag = String(f.tag || '').toLowerCase();
+    const type = String(f.type || '').toLowerCase();
+    if (tag === 'button' || tag === 'a') return false;
+    if (['submit', 'hidden', 'file', 'button', 'image', 'reset'].includes(type)) return false;
     return true;
   }
 
   classifyField(field) {
+    const f = field && field._raw ? field : this._norm(field);
     const evidence = [
-      field.label,
-      field.name,
-      field.id,
-      field.placeholder,
-      field.ariaLabel,
-      field.ariaDescribedBy,
-      field.fieldset_legend,
-      field.context
+      f.label,
+      f.name,
+      f.id,
+      f.placeholder,
+      f.ariaLabel,
+      f.ariaDescribedBy,
+      f.fieldset_legend,
+      f.context,
+      f.semantic_type
     ].filter(Boolean).join(' ');
 
     let bestMatch = null;
@@ -106,9 +149,9 @@ export class FormAnalyzer {
       if (match) {
         // Boost score if matched in more critical attributes (like name or label vs just nearby text)
         let score = pattern.weight;
-        if (field.name && field.name.match(pattern.regex)) score += 0.5;
-        if (field.label && field.label.match(pattern.regex)) score += 0.5;
-        if (field.id && field.id.match(pattern.regex)) score += 0.4;
+        if (f.name && f.name.match(pattern.regex)) score += 0.5;
+        if (f.label && f.label.match(pattern.regex)) score += 0.5;
+        if (f.id && f.id.match(pattern.regex)) score += 0.4;
         
         if (score > highestScore) {
           highestScore = score;
@@ -138,7 +181,10 @@ export class FormAnalyzer {
       'password': SymbolicSecretSource.LOCAL_PASSWORD,
       'address_line1': SymbolicSecretSource.LOCAL_ADDRESS,
       'pan': SymbolicSecretSource.LOCAL_PAN,
-      'aadhaar': SymbolicSecretSource.LOCAL_AADHAAR
+      'aadhaar': SymbolicSecretSource.LOCAL_AADHAAR,
+      'country': SymbolicSecretSource.LOCAL_COUNTRY,
+      'gender': SymbolicSecretSource.LOCAL_GENDER,
+      'terms': SymbolicSecretSource.LOCAL_TERMS
     };
     return map[semanticType] || SymbolicSecretSource.LOCAL_PROFILE;
   }

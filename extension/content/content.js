@@ -430,6 +430,32 @@
         case 'SUBMIT':
           return this._executeSubmit(targetElement);
 
+        case 'FILL_FORM_PLAN': {
+          const plan = resolvedValue?.fields ? resolvedValue : resolvedValue?.value?.fields ? resolvedValue.value : actionPayload.value?.fields ? actionPayload.value : null;
+          return this._executeFormPlan(plan);
+        }
+
+        case 'EXTRACT': {
+          const main = document.querySelector('main, [role="main"], #content, .content') || document.body;
+          const text = String(main?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 4000);
+          return { success: true, extractedText: text, url: window.location.href, title: document.title };
+        }
+
+        case 'ASK_USER': {
+          const prompt = resolvedValue || actionPayload.value || target?.prompt || 'User input required';
+          return { success: true, needs_user_input: true, prompt: String(prompt).slice(0, 500) };
+        }
+
+        case 'OPEN_TAB':
+        case 'SWITCH_TAB': {
+          const url = target?.url || resolvedValue || actionPayload.value;
+          if (url && typeof url === 'string' && /^https?:\/\//i.test(url)) {
+            window.open(url, '_blank');
+            return { success: true, openedUrl: url };
+          }
+          return { success: false, error: `${action} needs a valid http(s) URL; use NAVIGATE for same-tab navigation.` };
+        }
+
         case 'WAIT':
           await this.sleep(actionPayload.duration || 1000);
           return { success: true };
@@ -535,6 +561,105 @@
         return { success: true };
       }
       throw new Error('Target submit button not found');
+    }
+
+    async _executeFormPlan(plan) {
+      const fields = plan?.fields || [];
+      if (!fields.length) throw new Error('Form plan has no fields to fill');
+      const details = [];
+      for (const field of fields) {
+        if (field.value === undefined || field.value === null || field.value === '') {
+          details.push({ field: field.field_id, success: false, reason: `Missing value for "${field.field_id}" (${field.value_source || 'no source'})` });
+          continue;
+        }
+        let el = field.field_id ? registry.getElement(field.field_id) : null;
+        if (!el && field.field_id) {
+          el = document.getElementById(field.field_id)
+            || (() => { try { return document.querySelector(`[name="${field.field_id}"]`); } catch { return null; } })();
+        }
+        if (!el) {
+          details.push({ field: field.field_id, success: false, reason: 'Element not found' });
+          continue;
+        }
+        try {
+          await this._fillPlanElement(el, field.value);
+          const ok = this._verifyPlanElement(el, field.value);
+          details.push({ field: field.field_id, success: ok, ...(ok ? {} : { reason: 'Verification failed: value mismatch' }) });
+        } catch (e) {
+          details.push({ field: field.field_id, success: false, reason: e.message });
+        }
+      }
+      return { success: details.length > 0 && details.every(r => r.success), details };
+    }
+
+    async _fillPlanElement(el, value) {
+      const str = String(value ?? '');
+      el.scrollIntoView({ behavior: 'auto', block: 'center' });
+      await this.sleep(80);
+      el.focus();
+      const tag = String(el.tagName || '').toUpperCase();
+      const type = String(el.type || '').toLowerCase();
+      if (tag === 'SELECT') {
+        const want = str.toLowerCase();
+        const opt = Array.from(el.options).find(o =>
+          String(o.value ?? '').toLowerCase() === want ||
+          String(o.text ?? '').toLowerCase().includes(want));
+        if (opt) { el.value = opt.value; el.dispatchEvent(new Event('change', { bubbles: true })); }
+      } else if (type === 'checkbox') {
+        const should = value === true || value === 'true' || value === 'yes';
+        if (el.checked !== should && typeof el.click === 'function') el.click();
+        else { el.checked = should; el.dispatchEvent(new Event('change', { bubbles: true })); }
+      } else if (type === 'radio') {
+        const want = str.toLowerCase();
+        const group = el.name ? document.querySelectorAll(`input[type="radio"][name="${el.name}"]`) : [el];
+        for (const r of group) {
+          let lab = '';
+          if (r.id) lab = document.querySelector(`label[for="${r.id}"]`)?.innerText || '';
+          if (!lab) lab = r.closest('label')?.innerText || '';
+          if (String(r.value ?? '').toLowerCase() === want || String(lab ?? '').toLowerCase().includes(want)) {
+            if (!r.checked && typeof r.click === 'function') r.click();
+            break;
+          }
+        }
+      } else {
+        try {
+          const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
+            || Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+          if (setter && (tag === 'INPUT' || tag === 'TEXTAREA')) setter.call(el, str);
+          else el.value = str;
+        } catch { el.value = str; }
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+      el.dispatchEvent(new Event('blur', { bubbles: true }));
+      await this.sleep(40);
+    }
+
+    _verifyPlanElement(el, value) {
+      const want = String(value ?? '').toLowerCase();
+      const tag = String(el.tagName || '').toUpperCase();
+      const type = String(el.type || '').toLowerCase();
+      if (tag === 'SELECT') {
+        const sel = el.options[el.selectedIndex]?.text || '';
+        return String(el.value ?? '').toLowerCase() === want || String(sel ?? '').toLowerCase().includes(want);
+      }
+      if (type === 'checkbox') {
+        const should = value === true || value === 'true' || value === 'yes';
+        return el.checked === should;
+      }
+      if (type === 'radio') {
+        const group = el.name ? document.querySelectorAll(`input[type="radio"][name="${el.name}"]`) : [el];
+        for (const r of group) {
+          if (r.checked) {
+            let lab = '';
+            if (r.id) lab = document.querySelector(`label[for="${r.id}"]`)?.innerText || '';
+            if (!lab) lab = r.closest('label')?.innerText || '';
+            return String(r.value ?? '').toLowerCase() === want || String(lab ?? '').toLowerCase().includes(want);
+          }
+        }
+        return false;
+      }
+      return String(el.value ?? '').toLowerCase() === want;
     }
 
     async _executePressKey(element, actionPayload) {

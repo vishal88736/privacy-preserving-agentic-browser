@@ -21,33 +21,20 @@ test('Integration - Multi-step Aadhaar form filling scenario', async () => {
   const task = 'Fill this Aadhaar application using my saved profile';
   const history = [];
 
-  // Step 1 plan
+  // Step 1: bulk form plan (FormAnalyzer now handles fused {dom} shape).
+  // Must contain all fillable fields with correct symbolic sources and
+  // require confirmation because Aadhaar/PAN are sensitive.
   const step1 = await client.planNextStep(task, fusedObservation, history);
-  assert.strictEqual(step1.action.action, ActionType.TYPE);
-  assert.strictEqual(step1.action.target.element_id, 'el_1');
-  assert.strictEqual(step1.action.value_source, SymbolicSecretSource.LOCAL_FULL_NAME);
-  history.push({ step: 1, action: step1.action });
+  assert.strictEqual(step1.action.action, ActionType.FILL_FORM_PLAN);
+  assert.ok(step1.action.requires_confirmation === true, 'Sensitive bulk plan must require confirmation');
+  assert.ok(step1.action.risk === RiskLevel.HIGH || step1.action.risk === RiskLevel.MEDIUM);
+  const byId = new Map((step1.action.value.fields || []).map((f) => [f.field_id, f]));
+  assert.strictEqual(byId.get('el_1')?.value_source, SymbolicSecretSource.LOCAL_FULL_NAME);
+  assert.strictEqual(byId.get('el_2')?.value_source, SymbolicSecretSource.LOCAL_AADHAAR);
+  assert.strictEqual(byId.get('el_3')?.value_source, SymbolicSecretSource.LOCAL_PAN);
+  history.push({ step: 1, action: step1.action, success: true });
 
-  // Step 2 plan (Aadhaar)
-  const step2 = await client.planNextStep(task, fusedObservation, history);
-  assert.strictEqual(step2.action.action, ActionType.TYPE);
-  assert.strictEqual(step2.action.target.element_id, 'el_2');
-  assert.strictEqual(step2.action.value_source, SymbolicSecretSource.LOCAL_AADHAAR);
-  assert.ok(step2.action.risk === RiskLevel.HIGH || step2.action.risk === RiskLevel.MEDIUM);
-  history.push({ step: 2, action: step2.action });
-
-  // Step 3 plan (PAN)
-  const step3 = await client.planNextStep(task, fusedObservation, history);
-  assert.strictEqual(step3.action.action, ActionType.TYPE);
-  assert.strictEqual(step3.action.target.element_id, 'el_3');
-  assert.strictEqual(step3.action.value_source, SymbolicSecretSource.LOCAL_PAN);
-  history.push({ step: 3, action: step3.action });
-
-  // Fast forward history to submit
-  history.push({ step: 4, action: { action: ActionType.TYPE, target: { element_id: 'el_4' } } });
-  history.push({ step: 5, action: { action: ActionType.TYPE, target: { element_id: 'el_5' } } });
-
-  // Next step must be Submit with confirmation requirement
+  // After the bulk plan is executed, the next step must be Submit with confirmation
   const submitStep = await client.planNextStep(task, fusedObservation, history);
   assert.strictEqual(submitStep.action.action, ActionType.SUBMIT);
   assert.strictEqual(submitStep.action.target.element_id, 'el_6');

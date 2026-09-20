@@ -244,6 +244,7 @@ export class TaskManager {
             currentStep: t.currentStep, maxSteps: t.maxSteps,
             result: t.result || null, error: t.error || null, hint: t.hint || null,
             privacyMetrics: t.privacyMetrics,
+            lastLLMPayload: t.lastLLMPayload || null,
             steps: (t.steps || []).slice(-20)
           }
         }).catch(() => {});

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -296,6 +296,71 @@
           </div>
         </div>
         <p id="privacy-categories" class="privacy-cats-muted"></p>
+      </section>
+
+      <!-- LLM Transparency Card: what is actually sent to the AI -->
+      <section class="card llm-card" aria-labelledby="llm-label">
+        <div class="card-head">
+          <div class="privacy-head-group">
+            <span class="card-label" id="llm-label">What is sent to the AI</span>
+            <span class="pill-ok">Privacy proof</span>
+          </div>
+          <span id="llm-calls" class="card-meta-text">0 AI calls</span>
+        </div>
+        <p class="llm-sub">Every AI call carries <strong>only sanitized data</strong>. Vault values, passwords and document bytes never leave this device — the model only sees symbolic tokens.</p>
+
+        <div class="privacy-cols">
+          <div class="privacy-col">
+            <div class="privacy-col-header">
+              <span class="col-dot dot-ai"></span>
+              <p class="privacy-col-title info">Sent to LLM</p>
+            </div>
+            <ul class="privacy-list">
+              <li><span class="tick">→</span><span>Sanitized task text (PII stripped)</span></li>
+              <li><span class="tick">→</span><span>Element roles + labels with <code class="mono-token">[REDACTED]</code> values</span></li>
+              <li><span class="tick">→</span><span>Layout: bboxes, headings, prices</span></li>
+              <li><span class="tick">→</span><span>Masked screenshot (black boxes)</span></li>
+              <li><span class="tick">→</span><span>Symbolic tokens e.g. <code class="mono-token">LOCAL_AADHAAR</code></span></li>
+            </ul>
+          </div>
+          <div class="privacy-col">
+            <div class="privacy-col-header">
+              <span class="col-dot dot-local"></span>
+              <p class="privacy-col-title ok">Never sent</p>
+            </div>
+            <ul class="privacy-list">
+              <li><span class="tick">✓</span><span class="llm-never">Aadhaar / PAN / passwords / OTPs</span></li>
+              <li><span class="tick">✓</span><span class="llm-never">Vault plaintext values</span></li>
+              <li><span class="tick">✓</span><span class="llm-never">Document file bytes</span></li>
+              <li><span class="tick">✓</span><span class="llm-never">Full URLs with sensitive queries</span></li>
+              <li><span class="tick">✓</span><span class="llm-never">Unredacted screenshots</span></li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="llm-live-row">
+          <div class="llm-stat">
+            <span id="llm-el-count" class="llm-stat-num">0</span>
+            <span class="llm-stat-name">Elements sent</span>
+          </div>
+          <div class="llm-stat">
+            <span id="llm-redacted-count" class="llm-stat-num">0</span>
+            <span class="llm-stat-name">Values redacted</span>
+          </div>
+          <div class="llm-stat">
+            <span id="llm-screenshot-state" class="llm-stat-num">—</span>
+            <span class="llm-stat-name">Screenshot</span>
+          </div>
+          <div class="llm-stat">
+            <span id="llm-tokens" class="llm-stat-num">0</span>
+            <span class="llm-stat-name">Tokens used</span>
+          </div>
+        </div>
+
+        <details class="llm-details">
+          <summary>View last sanitized payload</summary>
+          <div id="llm-payload-preview" class="llm-payload">No AI calls yet. Start a task to see exactly what leaves this device.</div>
+        </details>
       </section>
 
       <!-- Agent Activity Feed -->

@@ -76,7 +76,10 @@ test('Diagnostic output: page_understanding included', () => {
 
   assert.ok(result.page_understanding, 'Should contain page_understanding');
   assert.strictEqual(result.page_understanding.page_type, 'login');
-  assert.strictEqual(result.action.action, 'TYPE', 'Should fill the field');
+  // 'Fill my name.' triggers the bulk FormAnalyzer path (fused-shape aware),
+  // so a single-field form yields FILL_FORM_PLAN, not per-field TYPE.
+  assert.strictEqual(result.action.action, 'FILL_FORM_PLAN', 'Should bulk-fill the field');
+  assert.ok((result.action.value.fields || []).some((f) => f.field_id === 'el_1'));
 });
 
 test('Simple click task produces correct action', () => {

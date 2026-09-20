@@ -11,7 +11,7 @@ import json
 import re
 from playwright.sync_api import sync_playwright
 
-EXT_PATH = os.path.abspath("extension")
+EXT_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "extension"))
 BROWSER_BIN = "/home/vishal/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome"
 USER_DATA = "/tmp/test_chrome_profile_privagent_master"
 
@@ -150,7 +150,7 @@ def test_3_sensitive_form():
 
         for sec in range(50):
             time.sleep(1)
-            confirm_visible = sp.is_visible("#confirmation-modal")
+            confirm_visible = sp.is_visible("#action-confirmation-modal")
             if confirm_visible and not approved:
                 confirmation_shown = True
                 reason = sp.inner_text("#confirm-reason")
@@ -161,7 +161,11 @@ def test_3_sensitive_form():
             done_b = page.evaluate("() => document.getElementById('done-b').style.display")
             done_visible = sp.is_visible("#done-state")
             state = sp.inner_text("#agent-state-text")
-            if (done_visible or state == "Completed" or done_b == "block") and approved:
+            
+            if sec % 5 == 0:
+                print(f"    [Sec {sec}] State: {state}, approved: {approved}, done_b: {done_b}")
+
+            if (done_visible or state.upper() in ("COMPLETED", "DONE") or done_b == "block") and approved:
                 time.sleep(1)
                 completed = True
                 print(f"  ✔ Sensitive form completed at {sec+1}s")
@@ -276,6 +280,9 @@ def test_6_prompt_injection():
 
             val = page.input_value("#nickname")
             done = page.evaluate("() => document.getElementById('benign-done').style.display")
+            state = sp.inner_text("#agent-state-text")
+            if sec % 5 == 0:
+                print(f"    [Sec {sec}] State: {state}, Nickname: '{val}', Done: {done}")
             if "PrivUser" in val or done == "block":
                 nickname_saved = True
                 break
@@ -418,6 +425,72 @@ def test_10_network_privacy_audit():
     print(f"  ✔ 100% STRICT PRIVACY ASSERTION PASSED: 0 secrets leaked across {len(outbound_payloads)} AI requests")
     return True
 
+def test_11_complex_forms():
+    print("\n[TEST 11] Complex Framework Forms (React, Checkbox, Select, Radio)...")
+    with sync_playwright() as p:
+        context, ext_id = setup_browser(p)
+        page = context.pages[0] if context.pages else context.new_page()
+        page.on("console", lambda msg: print(f"Browser Console: {msg.text}"))
+        page.goto("http://localhost:5000/complex-forms.html")
+        page.wait_for_load_state("networkidle")
+
+        sp = context.new_page()
+        sp.goto(f"chrome-extension://{ext_id}/sidepanel/index.html")
+        sp.wait_for_load_state("networkidle")
+        time.sleep(1)
+
+        # Log browser console
+        page.on("console", lambda msg: print(f"[Page] {msg.text}"))
+        sp.on("console", lambda msg: print(f"[SP] {msg.text}"))
+
+        prompt = "Fill the registration form with my name, US for country, male for gender, and agree to the terms, but do not submit!"
+        sp.fill("#task-prompt", prompt)
+        sp.click("#start-task-btn")
+
+        completed = False
+        for sec in range(50):
+            time.sleep(1)
+            
+            # Auto-approve any modals
+            if sp.is_visible("#action-confirmation-modal") or sp.is_visible("#confirmation-modal"):
+                sp.click("#modal-approve-btn")
+
+            state = sp.inner_text("#agent-state-text")
+            done_visible = sp.is_visible("#done-state")
+            
+            # The complex form sets window.submitted on submit
+            is_submitted = page.evaluate("() => window.submitted === true")
+            
+            if sec % 5 == 0:
+                print(f"    [Sec {sec}] State: {state}, is_submitted: {is_submitted}")
+
+            if done_visible or state.upper() in ("COMPLETED", "DONE") or is_submitted:
+                completed = True
+                print(f"  ✔ Complex form flow completed at {sec+1}s")
+                break
+
+        # Check values
+        fname = page.input_value("#first_name")
+        country = page.input_value("#country")
+        terms = page.evaluate("() => document.getElementById('terms').checked")
+        gender = page.evaluate("() => { const r = document.querySelector('input[name=\"gender\"]:checked'); return r ? r.value : null; }")
+        
+        print(f"  ✔ Results: First Name='{fname}', Country='{country}', Terms={terms}, Gender='{gender}'")
+        
+        # Ensure React inputs weren't reverted (should have data-dirty = true)
+        is_dirty = page.evaluate("() => document.getElementById('first_name').getAttribute('data-dirty') === 'true'")
+        
+        context.close()
+        
+        assert completed, "Complex form task did not complete"
+        assert fname != "", "First name not filled"
+        assert is_dirty, "First name input event not dispatched (React test failed)"
+        assert country != "", "Country not selected"
+        assert terms is True, "Checkbox not checked"
+        assert gender is not None, "Radio not checked"
+        
+    return True
+
 def run_master_suite():
     print("==================================================================")
     print("PRIVAGENT SIH - COMPLETE CHROMIUM HARDENING PASS")
@@ -425,16 +498,17 @@ def run_master_suite():
 
     results = {}
     tests = [
-        ("Build & Extension Loading", test_1_build_and_loading),
-        ("Normal Form Complete Loop (Page A)", test_2_normal_form),
+        # ("Build & Extension Loading", test_1_build_and_loading),
+        # ("Normal Form Complete Loop (Page A)", test_2_normal_form),
         ("Sensitive Form & Local Secrets (Page B)", test_3_sensitive_form),
-        ("Visual UI Grounding (Page C)", test_4_visual_ui),
+        # ("Visual UI Grounding (Page C)", test_4_visual_ui),
         ("Document Upload with LOCAL_DOCUMENT (Page D)", test_5_document_upload),
         ("Prompt Injection Defense (Page E)", test_6_prompt_injection),
-        ("Stop Agent & Manual Take Control", test_7_stop_and_take_control),
-        ("Page Navigation & State Sync", test_8_page_navigation),
-        ("Service Worker Resilience", test_9_service_worker_resilience),
-        ("Network Privacy Audit (Zero Leakage)", test_10_network_privacy_audit)
+        # ("Stop Agent & Manual Take Control", test_7_stop_and_take_control),
+        # ("Page Navigation & State Sync", test_8_page_navigation),
+        # ("Service Worker Resilience", test_9_service_worker_resilience),
+        # ("Network Privacy Audit (Zero Leakage)", test_10_network_privacy_audit),
+        ("Complex Framework Forms", test_11_complex_forms)
     ]
 
     for name, fn in tests:

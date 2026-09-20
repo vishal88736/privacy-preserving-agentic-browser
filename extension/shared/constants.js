@@ -38,7 +38,8 @@ export const ActionType = Object.freeze({
   SWITCH_TAB: 'SWITCH_TAB',
   ASK_USER: 'ASK_USER',
   SUBMIT: 'SUBMIT',
-  DONE: 'DONE'
+  DONE: 'DONE',
+  FILL_FORM_PLAN: 'FILL_FORM_PLAN'
 });
 
 export const MessageType = Object.freeze({
@@ -82,7 +83,10 @@ export const SymbolicSecretSource = Object.freeze({
   LOCAL_DOCUMENT: 'LOCAL_DOCUMENT',
   LOCAL_CREDIT_CARD: 'LOCAL_CREDIT_CARD',
   LOCAL_CVV: 'LOCAL_CVV',
-  LOCAL_PROFILE: 'LOCAL_PROFILE'
+  LOCAL_PROFILE: 'LOCAL_PROFILE',
+  LOCAL_COUNTRY: 'LOCAL_COUNTRY',
+  LOCAL_GENDER: 'LOCAL_GENDER',
+  LOCAL_TERMS: 'LOCAL_TERMS'
 });
 
 export const PIICategory = Object.freeze({

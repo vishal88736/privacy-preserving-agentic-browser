@@ -3,15 +3,26 @@ import { registry } from './element-registry.js';
 export class FormFiller {
   async executePlan(plan) {
     const results = [];
+    const fields = plan?.fields || [];
     
-    for (const field of plan.fields) {
-      if (!field.value) {
-        // value should be resolved before this gets called. If not, skip
-        console.warn('FormFiller: Skipping field, no value provided', field);
+    for (const field of fields) {
+      if (field.value === undefined || field.value === null || field.value === '') {
+        results.push({ field: field.field_id, success: false, reason: `Missing value for "${field.field_id}" (${field.value_source || 'no source'}). Add it to the Local Vault.` });
         continue;
       }
       
-      const el = registry.getElement(field.field_id);
+      let el = registry.getElement(field.field_id);
+      if (!el) {
+        el = document.getElementById(field.field_id);
+        if (!el) {
+          try {
+            el = document.querySelector(`[name="${field.field_id}"]`);
+          } catch (e) {
+            // Ignore SyntaxError from invalid selectors (like xpaths)
+          }
+        }
+      }
+      
       if (!el) {
         results.push({ field: field.field_id, success: false, reason: 'Element not found' });
         continue;
@@ -70,10 +81,11 @@ export class FormFiller {
   }
 
   async _fillSelect(el, value, options = []) {
-    // Attempt to find matching option by value or text
-    let matchedOption = Array.from(el.options).find(o => 
-      o.value.toLowerCase() === value.toLowerCase() || 
-      o.text.toLowerCase().includes(value.toLowerCase())
+    // Attempt to find matching option by value or text (String-safe)
+    const want = String(value ?? '').toLowerCase();
+    let matchedOption = Array.from(el.options).find(o =>
+      String(o.value ?? '').toLowerCase() === want ||
+      String(o.text ?? '').toLowerCase().includes(want)
     );
 
     if (matchedOption) {
@@ -94,11 +106,12 @@ export class FormFiller {
     // el might just be one of the radios
     const groupName = el.name;
     if (!groupName) return;
+    const want = String(value ?? '').toLowerCase();
 
     const group = document.querySelectorAll(`input[type="radio"][name="${groupName}"]`);
     for (const radio of group) {
       const labelText = this._getLabelText(radio);
-      if (radio.value.toLowerCase() === value.toLowerCase() || labelText.toLowerCase().includes(value.toLowerCase())) {
+      if (String(radio.value ?? '').toLowerCase() === want || String(labelText ?? '').toLowerCase().includes(want)) {
         if (!radio.checked) {
           radio.click();
         }
@@ -120,27 +133,29 @@ export class FormFiller {
   sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
+
   async _verifyElement(el, fieldData) {
     const value = fieldData.value;
     if (el.tagName === 'SELECT') {
       const selectedText = el.options[el.selectedIndex]?.text || '';
-      return el.value.toLowerCase() === String(value).toLowerCase() || selectedText.toLowerCase().includes(String(value).toLowerCase());
+      return String(el.value ?? '').toLowerCase() === String(value ?? '').toLowerCase() || String(selectedText ?? '').toLowerCase().includes(String(value ?? '').toLowerCase());
     } else if (el.type === 'checkbox') {
       const shouldBeChecked = value === true || value === 'true' || value === 'yes';
       return el.checked === shouldBeChecked;
     } else if (el.type === 'radio') {
       const groupName = el.name;
-      if (!groupName) return false;
+      if (!groupName) return String(el.value ?? '').toLowerCase() === String(value ?? '').toLowerCase() && el.checked === true;
       const group = document.querySelectorAll(`input[type="radio"][name="${groupName}"]`);
       for (const radio of group) {
-        if (radio.checked) {
-          const labelText = this._getLabelText(radio);
-          return radio.value.toLowerCase() === String(value).toLowerCase() || labelText.toLowerCase().includes(String(value).toLowerCase());
+        const labelText = this._getLabelText(radio);
+        const matches = String(radio.value ?? '').toLowerCase() === String(value ?? '').toLowerCase() || String(labelText ?? '').toLowerCase().includes(String(value ?? '').toLowerCase());
+        if (matches) {
+          return radio.checked === true;
         }
       }
       return false;
     } else {
-      return el.value.toLowerCase() === String(value).toLowerCase();
+      return String(el.value ?? '').toLowerCase() === String(value ?? '').toLowerCase();
     }
   }
 }

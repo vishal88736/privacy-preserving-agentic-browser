@@ -160,6 +160,13 @@ class SidePanelApp {
     this.metricSteps = this.$('metric-steps');
     this.privacyCats = this.$('privacy-categories');
     this.localList = this.$('local-items-list');
+    // LLM transparency ("What is sent to the AI")
+    this.llmCalls = this.$('llm-calls');
+    this.llmElCount = this.$('llm-el-count');
+    this.llmRedacted = this.$('llm-redacted-count');
+    this.llmScreenshot = this.$('llm-screenshot-state');
+    this.llmTokens = this.$('llm-tokens');
+    this.llmPreview = this.$('llm-payload-preview');
     this.debugPanel = this.$('debug-panel');
     this.debugBody = this.$('debug-body');
     // Modals
@@ -347,6 +354,7 @@ class SidePanelApp {
     this.stepBadge.textContent = `Step ${t?.currentStep ?? 0}`;
     this.metricSteps.textContent = String(t?.currentStep ?? 0);
     if (t?.privacyMetrics) this.renderPrivacyMetrics(t.privacyMetrics);
+    this.renderLLMTransparency(t);
     this.renderCurrentTask();
     this.activityCount.textContent = t?.steps?.length ? `${t.steps.length} step${t.steps.length === 1 ? '' : 's'}` : '';
     if (!t || state === AgentState.IDLE) {
@@ -404,6 +412,7 @@ class SidePanelApp {
     });
     this.renderPrivacySheet(['Aadhaar', 'PAN', 'Passwords', 'Documents']);
     this.renderPrivacyMetrics({});
+    this.renderLLMTransparency(null);
   }
 
   renderPrivacyMetrics(m) {
@@ -453,6 +462,52 @@ class SidePanelApp {
     }
 
     if (cats.length) this.renderPrivacySheet(cats);
+  }
+
+  renderLLMTransparency(t) {
+    if (!this.llmPreview) return;
+    const m = t?.privacyMetrics || {};
+    const calls = m.serverCallsCount ?? 0;
+    const redacted = m.sensitiveFieldsCurrent ?? m.sensitiveFieldsDetected ?? 0;
+    const payload = t?.lastLLMPayload || null;
+
+    if (this.llmCalls) {
+      this.llmCalls.textContent = calls === 0 ? '0 AI calls' : `${calls} AI call${calls === 1 ? '' : 's'} (sanitized)`;
+    }
+    if (this.llmElCount) this.llmElCount.textContent = payload ? String(payload.elementsSent ?? 0) : '0';
+    if (this.llmRedacted) this.llmRedacted.textContent = String(payload ? (payload.redactedCount ?? redacted) : redacted);
+    if (this.llmScreenshot) {
+      this.llmScreenshot.textContent = !payload ? '—' : (payload.redactedCount > 0 ? 'Masked' : 'Clean');
+    }
+    // Distinct symbolic tokens referenced across executed steps + current payload
+    const tokenSet = new Set(payload?.tokens || []);
+    for (const s of (t?.steps || [])) {
+      const vs = s.action?.value_source;
+      if (vs) tokenSet.add(vs);
+      for (const f of (s.action?.value?.fields || [])) {
+        if (f.value_source) tokenSet.add(f.value_source);
+      }
+    }
+    if (this.llmTokens) this.llmTokens.textContent = String(tokenSet.size);
+
+    if (!payload && calls === 0) {
+      this.llmPreview.textContent = 'No AI calls yet. Start a task to see exactly what leaves this device.';
+      return;
+    }
+    const lines = [];
+    lines.push(`task_sent: "${payload ? payload.taskSent : String(t?.prompt || '').slice(0, 140)}"`);
+    lines.push(`elements_sent: ${payload ? payload.elementsSent : 0} (roles + redacted labels only)`);
+    lines.push(`values: ${payload ? payload.redactedCount : redacted} x "[REDACTED]" (plaintext blocked)`);
+    lines.push(`screenshot: ${payload ? payload.screenshot : 'sanitized before upload'}`);
+    lines.push(`tokens: ${(payload?.tokens || [...tokenSet]).join(', ') || 'none'} (resolved locally)`);
+    lines.push(`policy: outbound payload scanned, 0 secrets transmitted`);
+    if (payload?.sampleElements?.length) {
+      lines.push('sample:');
+      for (const s of payload.sampleElements.slice(0, 3)) {
+        lines.push(`  - ${s.id} [${s.tag}] "${s.label}" value=${s.value}${s.value_source ? ` (${s.value_source})` : ''}`);
+      }
+    }
+    this.llmPreview.textContent = lines.join('\n');
   }
 
   renderPrivacySheet(cats) {

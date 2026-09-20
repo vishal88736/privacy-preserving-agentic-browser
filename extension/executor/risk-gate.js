@@ -63,6 +63,8 @@ export class RiskGate {
       };
     }
 
+
+
     // 4. Medium-Risk: Typing sensitive identity values into input fields.
     // All identity-bound tokens get MEDIUM so privacy UI can highlight them;
     // none require confirmation (values stay local by construction).

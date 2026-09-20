@@ -62,6 +62,11 @@ INDEX_HTML = """<!DOCTYPE html>
       <div class="card-desc">Name, email, phone, address, country, submit. Baseline: no PII gates expected.</div>
       <span class="tag tag-search">Validation</span>
     </a>
+    <a href="/complex-forms.html" class="card">
+      <div class="card-title">Complex Framework Forms Test</div>
+      <div class="card-desc">React-style controlled inputs, checkboxes, radios, native selects.</div>
+      <span class="tag tag-search">Validation</span>
+    </a>
     <a href="/page-b-sensitive-form.html" class="card">
       <div class="card-title">B. Sensitive Form (PII + password)</div>
       <div class="card-desc">Name, Aadhaar, PAN, DOB, password, submit. Every value stays local via symbolic refs.</div>

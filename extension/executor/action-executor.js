@@ -73,8 +73,13 @@ export class ActionExecutor {
 
     // Resolve local secret if symbolic source is provided
     let resolvedValue = null;
-    if (action.value_source || action.value) {
-      resolvedValue = this.valueResolver.resolve(action);
+    try {
+      if (action.value_source || action.value) {
+        resolvedValue = this.valueResolver.resolve(action);
+      }
+    } catch (e) {
+      console.error("[ActionExecutor] Value resolver error:", e);
+      return { success: false, error: e.message };
     }
 
     const payload = {
@@ -115,14 +120,13 @@ export class ActionExecutor {
                 );
                 return;
               } catch (injectErr) {
+                console.error("[ActionExecutor] Injection error:", injectErr);
                 resolve({ success: false, error: injectErr.message });
                 return;
               }
             }
-            resolve({
-              success: false,
-              error: errMsg
-            });
+            console.error("[ActionExecutor] sendMessage error:", errMsg);
+            resolve({ success: false, error: errMsg });
           } else {
             resolve(response || { success: true });
           }
