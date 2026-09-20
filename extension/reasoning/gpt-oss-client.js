@@ -220,6 +220,10 @@ export class GPTOSSClient {
       if (plans && plans.length > 0) {
         const askFirst = interpreted.constraints.includes('must ask user before submitting');
         const plan = plans[0];
+        const isSensitive = plan.fields?.some(f => 
+          [SymbolicSecretSource.LOCAL_AADHAAR, SymbolicSecretSource.LOCAL_PAN, SymbolicSecretSource.LOCAL_PASSWORD, SymbolicSecretSource.LOCAL_CREDIT_CARD, SymbolicSecretSource.LOCAL_CVV, SymbolicSecretSource.LOCAL_DOCUMENT].includes(f.value_source) ||
+          f.semantic_type === 'aadhaar' || f.semantic_type === 'pan' || f.semantic_type === 'password'
+        ) || askFirst;
         
         return {
           task_understanding: { intent: interpreted.intent, constraints: interpreted.constraints, target_entity: interpreted.target?.entity },
@@ -227,7 +231,8 @@ export class GPTOSSClient {
           thought: `[local-fallback] Detected forms, attempting bulk form fill...`,
           action: {
             action: 'FILL_FORM_PLAN',
-            risk: RiskLevel.MEDIUM,
+            risk: isSensitive ? RiskLevel.HIGH : RiskLevel.MEDIUM,
+            requires_confirmation: Boolean(isSensitive),
             value: plan // send the plan
           },
           isTerminal: false

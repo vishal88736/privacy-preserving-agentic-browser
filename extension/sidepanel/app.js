@@ -250,13 +250,15 @@ class SidePanelApp {
   async activeTabId() {
     try {
       const tabs = await chrome.tabs.query({ currentWindow: true });
-      const webTab = tabs.find(t => t.active && !String(t.url || '').startsWith('chrome-extension://'));
+      const webTab = tabs.find(t => t.active && /^(https?:\/\/)/i.test(String(t.url || '')));
       if (webTab) return webTab.id;
+      const anyWeb = tabs.find(t => /^(https?:\/\/)/i.test(String(t.url || '')));
+      if (anyWeb) return anyWeb.id;
+      const allTabs = await chrome.tabs.query({});
+      const anyAllWeb = allTabs.find(t => /^(https?:\/\/)/i.test(String(t.url || '')));
+      if (anyAllWeb) return anyAllWeb.id;
       const nonExt = tabs.find(t => !String(t.url || '').startsWith('chrome-extension://'));
       if (nonExt) return nonExt.id;
-      const allTabs = await chrome.tabs.query({});
-      const anyWebTab = allTabs.find(t => !String(t.url || '').startsWith('chrome-extension://'));
-      if (anyWebTab) return anyWebTab.id;
       let [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (!tab) [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
       return tab?.id ?? null;

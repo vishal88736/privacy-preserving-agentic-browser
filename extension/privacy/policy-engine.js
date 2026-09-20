@@ -9,6 +9,7 @@
 
 import { defaultLocalVault } from './local-vault.js';
 import { defaultPIIDetector, validateLuhn } from './pii-detector.js';
+import { SymbolicSecretSource } from '../shared/constants.js';
 
 export class OutboundPolicyViolationError extends Error {
   constructor(message, violationDetails = null) {
@@ -45,8 +46,14 @@ export class PolicyEngine {
 
     // 1. Scan against all plaintext secrets currently held in the local vault
     // L11: getAllSecretsForUI now returns only string values, so no blob bloat
+    const nonSecretTokens = new Set([
+      SymbolicSecretSource.LOCAL_COUNTRY,
+      SymbolicSecretSource.LOCAL_GENDER,
+      SymbolicSecretSource.LOCAL_TERMS
+    ]);
     const secrets = this.vault.getAllSecretsForUI();
     for (const [key, value] of Object.entries(secrets)) {
+      if (nonSecretTokens.has(key)) continue;
       if (typeof value === 'string' && value.length >= 4) {
         // Check raw inclusion
         if (scannable.includes(value)) {
