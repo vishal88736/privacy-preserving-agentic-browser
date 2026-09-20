@@ -42,7 +42,7 @@ export class FormAnalyzer {
       return fb;
     };
     return {
-      id: el.id || dom.id || '',
+      id: el.element_id || el.id || dom.id || '',
       tag: get('tag'),
       type: get('type'),
       name: get('name'),
@@ -178,6 +178,7 @@ export class FormAnalyzer {
       'email': SymbolicSecretSource.LOCAL_EMAIL,
       'phone': SymbolicSecretSource.LOCAL_PHONE,
       'date_of_birth': SymbolicSecretSource.LOCAL_DOB,
+      'dob': SymbolicSecretSource.LOCAL_DOB,
       'password': SymbolicSecretSource.LOCAL_PASSWORD,
       'address_line1': SymbolicSecretSource.LOCAL_ADDRESS,
       'pan': SymbolicSecretSource.LOCAL_PAN,
@@ -186,7 +187,7 @@ export class FormAnalyzer {
       'gender': SymbolicSecretSource.LOCAL_GENDER,
       'terms': SymbolicSecretSource.LOCAL_TERMS
     };
-    return map[semanticType] || SymbolicSecretSource.LOCAL_PROFILE;
+    return map[semanticType?.toLowerCase()] || SymbolicSecretSource.LOCAL_PROFILE;
   }
 }
 

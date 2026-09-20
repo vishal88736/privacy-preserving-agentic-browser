@@ -64,7 +64,9 @@ export class LocalVault {
    */
   resolveSecret(symbolicSource) {
     if (!symbolicSource) return null;
-    return this.memoryStore[symbolicSource] || null;
+    const value = this.memoryStore[symbolicSource] || null;
+    console.log(`[LocalVault] Resolving ${symbolicSource} -> ${value}`);
+    return value;
   }
 
   /**

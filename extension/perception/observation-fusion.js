@@ -90,8 +90,8 @@ export class ObservationFusion {
             visual_bbox: bestMatch.bbox
           },
           interaction: {
-            clickable: ['button', 'a'].includes(domEl.tag) || ['button', 'link'].includes(domEl.role) || Boolean(domEl.is_interactive && domEl.tag !== 'input' && domEl.tag !== 'textarea' && domEl.tag !== 'select'),
-            typeable: domEl.tag === 'input' || domEl.tag === 'textarea',
+            clickable: ['button', 'a', 'select'].includes(domEl.tag) || ['button', 'link'].includes(domEl.role) || Boolean(domEl.is_interactive && ((domEl.tag === 'input' && (domEl.type === 'checkbox' || domEl.type === 'radio' || domEl.type === 'submit' || domEl.type === 'button')) || (domEl.tag !== 'input' && domEl.tag !== 'textarea'))),
+            typeable: (domEl.tag === 'input' && domEl.type !== 'checkbox' && domEl.type !== 'radio' && domEl.type !== 'button' && domEl.type !== 'submit') || domEl.tag === 'textarea',
             uploadable: domEl.type === 'file'
           },
           matched_by: 'IOU',
@@ -129,8 +129,8 @@ export class ObservationFusion {
             confidence: 0.8
           },
           interaction: {
-            clickable: ['button', 'a'].includes(domEl.tag) || ['button', 'link'].includes(domEl.role) || Boolean(domEl.is_interactive && domEl.tag !== 'input' && domEl.tag !== 'textarea' && domEl.tag !== 'select'),
-            typeable: domEl.tag === 'input' || domEl.tag === 'textarea',
+            clickable: ['button', 'a'].includes(domEl.tag) || ['button', 'link'].includes(domEl.role) || Boolean(domEl.is_interactive && ((domEl.tag === 'input' && (domEl.type === 'checkbox' || domEl.type === 'radio' || domEl.type === 'submit' || domEl.type === 'button')) || (domEl.tag !== 'input' && domEl.tag !== 'textarea' && domEl.tag !== 'select'))),
+            typeable: (domEl.tag === 'input' && domEl.type !== 'checkbox' && domEl.type !== 'radio' && domEl.type !== 'button' && domEl.type !== 'submit') || domEl.tag === 'textarea',
             uploadable: domEl.type === 'file'
           },
           matched_by: 'DOM_ONLY'

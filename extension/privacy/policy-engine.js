@@ -41,7 +41,8 @@ export class PolicyEngine {
     // by the fail-closed canvas redaction before this point, and every DOM /
     // text / metadata field below remains fully scanned.
     const scannable = serialized
-      .replace(/"timestamp":\d+/g, '"timestamp":0')
+      .replace(/"timestamp"\s*:\s*\d+/g, '"timestamp":0')
+      .replace(/"timestamp"\s*:\s*"\d+"/g, '"timestamp":"0"')
       .replace(/data:[a-z]+\/[^"\\]*;base64,[A-Za-z0-9+/=]+/gi, 'data:image/omitted');
 
     // 1. Scan against all plaintext secrets currently held in the local vault
@@ -92,14 +93,22 @@ export class PolicyEngine {
     }
 
     // L8: 4. Scan for credit card numbers (13-19 digits passing Luhn check)
-    const cardMatches = scannable.matchAll(/(?<!\d)(?:\d[\s-]?){13,19}(?!\d)/g);
-    for (const m of cardMatches) {
-      const cleanDigits = m[0].replace(/[\s-]/g, '');
-      if (/^\d{13,19}$/.test(cleanDigits) && validateLuhn(cleanDigits)) {
-        throw new OutboundPolicyViolationError(
-          'Outbound policy blocked payload: Unmasked credit/debit card number (Luhn-valid) found in request body',
-          { match: cleanDigits.slice(0, 4) + '****' }
-        );
+    const ccRegex = /(?:\d[ -]*?){13,19}/g;
+    let match;
+    while ((match = ccRegex.exec(scannable)) !== null) {
+      const cleanNumber = match[0].replace(/[\s-]/g, '');
+      if (cleanNumber.length >= 13 && cleanNumber.length <= 19) {
+        // Skip if this looks like a timestamp in JSON
+        const precedingText = scannable.substring(Math.max(0, match.index - 20), match.index);
+        if (/timestamp["']?\s*:\s*$/i.test(precedingText)) continue;
+
+        if (validateLuhn(cleanNumber)) {
+          console.error(`[PolicyEngine] MATCHED CARD: ${match[0]}`);
+          throw new OutboundPolicyViolationError(
+            `Outbound policy blocked payload: Unmasked credit/debit card number (Luhn-valid) found in request body. Matched string: ${match[0]}`,
+            { match: cleanNumber.slice(0, 4) + '****' }
+          );
+        }
       }
     }
 

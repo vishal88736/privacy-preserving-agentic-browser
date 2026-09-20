@@ -18,16 +18,21 @@ export class GPTOSSClient {
     this.actionParser = defaultActionParser;
   }
 
+  async post(endpoint, data) {
+    console.log(`[gpt-oss-client] posting to ${endpoint}:`, JSON.stringify(data).substring(0, 500));
+    return fetch(`${this.baseUrl}${endpoint}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data)
+    });
+  }
+
   async interpretTask(taskPrompt) {
     const payload = { task: taskPrompt };
     this.policyEngine.enforceOutboundSafety(payload);
 
     try {
-      const response = await fetch(`${this.baseUrl}/interpret`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
+      const response = await this.post('/interpret', payload);
       if (!response.ok) throw new Error(`Interpret returned ${response.status}`);
       const data = await response.json();
       if (!data || data.intent === 'unknown') {
@@ -228,11 +233,12 @@ export class GPTOSSClient {
         return {
           task_understanding: { intent: interpreted.intent, constraints: interpreted.constraints, target_entity: interpreted.target?.entity },
           page_understanding: { page_type: obs.page?.page_type || 'unknown' },
+          current_state: { active_subgoal: interpreted.active_subgoal, completed_subgoals: interpreted.completed_subgoals, expected_state: interpreted.expected_state },
           thought: `[local-fallback] Detected forms, attempting bulk form fill...`,
           action: {
             action: 'FILL_FORM_PLAN',
-            risk: isSensitive ? RiskLevel.HIGH : RiskLevel.MEDIUM,
-            requires_confirmation: Boolean(isSensitive),
+            risk: RiskLevel.MEDIUM,
+            requires_confirmation: askFirst,
             value: plan // send the plan
           },
           isTerminal: false
@@ -328,6 +334,11 @@ export class GPTOSSClient {
     // with no target so the agent stops instead of submitting.
     const submitBtn = elements.find((e) => isSubmitBtn(e) && !clickedIds.has(e.id));
     if (submitBtn) {
+      // If we already successfully submitted this form, we are done.
+      if (taskHistory.some((h) => h.action?.action === ActionType.SUBMIT && h.action?.target?.element_id === submitBtn.id && h.success !== false)) {
+        return doneAction('Form submitted successfully.');
+      }
+      
       const remainingTypeables = elements.filter((e) => isTypeable(e) && !isSearchBox(e) && !typedIds.has(e.id));
       if (remainingTypeables.length === 0 || !wantsFormFill) {
         if (interpreted.constraints.includes('must NOT submit the form')) {

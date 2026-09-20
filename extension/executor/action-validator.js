@@ -50,10 +50,16 @@ export class ActionValidator {
     }
 
     if (action.action === ActionType.SUBMIT) {
-      if (formState.completion && formState.completion.empty > 0) {
+      // Basic check: don't submit if there are obviously empty text inputs
+      const empties = (fusedObservation.elements || []).filter(e => 
+        (e.dom?.tag === 'input' || e.dom?.tag === 'textarea') && 
+        (!e.dom?.type || e.dom?.type === 'text' || e.dom?.type === 'email' || e.dom?.type === 'password') &&
+        (!e.value || e.value.trim() === '') && (!e.dom?.value || e.dom?.value.trim() === '')
+      );
+      if (empties.length > 0) {
         return {
           valid: false,
-          reason: `Form submission rejected: there are still ${formState.completion.empty} unfilled input fields. You must fill them first.`
+          reason: `Form submission rejected: there are still ${empties.length} unfilled input fields. You must fill them first.`
         };
       }
     }
@@ -152,6 +158,14 @@ export class ActionValidator {
             };
           }
         }
+      }
+
+      // Reject CLICK on SELECT elements to guide model to use SELECT
+      if (action.action === ActionType.CLICK && match.dom?.tag === 'select') {
+        return {
+          valid: false,
+          reason: `Cannot CLICK a select element directly. You MUST use the "SELECT" action with the desired value for element "${action.target.element_id}".`
+        };
       }
     }
 

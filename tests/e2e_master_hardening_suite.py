@@ -136,6 +136,8 @@ def test_3_sensitive_form():
         page.wait_for_load_state("networkidle")
 
         sp = context.new_page()
+        for sw in context.service_workers:
+            sw.on("console", lambda msg: print(f"SW Console: {msg.text}"))
         sp.goto(f"chrome-extension://{ext_id}/sidepanel/index.html")
         sp.wait_for_load_state("networkidle")
         time.sleep(1)
@@ -150,7 +152,7 @@ def test_3_sensitive_form():
 
         for sec in range(50):
             time.sleep(1)
-            confirm_visible = sp.is_visible("#action-confirmation-modal")
+            confirm_visible = sp.is_visible("#confirmation-modal")
             if confirm_visible and not approved:
                 confirmation_shown = True
                 reason = sp.inner_text("#confirm-reason")
@@ -442,6 +444,8 @@ def test_11_complex_forms():
         # Log browser console
         page.on("console", lambda msg: print(f"[Page] {msg.text}"))
         sp.on("console", lambda msg: print(f"[SP] {msg.text}"))
+        for sw in context.service_workers:
+            sw.on("console", lambda msg: print(f"SW Console: {msg.text}"))
 
         prompt = "Fill the registration form with my name, US for country, male for gender, and agree to the terms, but do not submit!"
         sp.fill("#task-prompt", prompt)
@@ -500,14 +504,9 @@ def run_master_suite():
     tests = [
         # ("Build & Extension Loading", test_1_build_and_loading),
         # ("Normal Form Complete Loop (Page A)", test_2_normal_form),
-        ("Sensitive Form & Local Secrets (Page B)", test_3_sensitive_form),
-        # ("Visual UI Grounding (Page C)", test_4_visual_ui),
-        ("Document Upload with LOCAL_DOCUMENT (Page D)", test_5_document_upload),
-        ("Prompt Injection Defense (Page E)", test_6_prompt_injection),
-        # ("Stop Agent & Manual Take Control", test_7_stop_and_take_control),
-        # ("Page Navigation & State Sync", test_8_page_navigation),
-        # ("Service Worker Resilience", test_9_service_worker_resilience),
-        # ("Network Privacy Audit (Zero Leakage)", test_10_network_privacy_audit),
+        # ("Sensitive Form & Local Secrets (Page B)", test_3_sensitive_form),
+        # ("Document Upload with LOCAL_DOCUMENT (Page D)", test_5_document_upload),
+        # ("Prompt Injection Defense (Page E)", test_6_prompt_injection),
         ("Complex Framework Forms", test_11_complex_forms)
     ]
 

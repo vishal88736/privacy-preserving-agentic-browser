@@ -1,9 +1,3 @@
-"""
-GPT-OSS Reasoning & Planning Service
-Interprets unified observation, grounds the user request to real page
-evidence, and produces structured JSON actions. Never invents elements.
-"""
-
 import json
 import re
 from typing import Dict, Any, List, Optional
@@ -46,11 +40,11 @@ def _allowed_ids(fused_observation: Dict[str, Any], page_state: Optional[Dict[st
 def _repair_action(parsed: dict, allowed: set, page_state: Optional[Dict[str, Any]]) -> dict:
     act = parsed.get("action") or {}
     if not isinstance(act, dict):
-        return parsed
+        print(f"returning {parsed}"); return parsed
     target = act.get("target") or {}
     eid = target.get("element_id") if isinstance(target, dict) else None
     if act.get("action") in ("DONE", "WAIT", "NAVIGATE", "SCROLL", "GO_BACK", "GO_FORWARD", "EXTRACT", "PRESS_KEY", "OPEN_TAB", "SWITCH_TAB", "ASK_USER"):
-        return parsed
+        print(f"returning {parsed}"); return parsed
     if eid and allowed and eid not in allowed:
         refs = (page_state or {}).get("resolved_references") or {}
         fallback = (
@@ -72,7 +66,7 @@ def _repair_action(parsed: dict, allowed: set, page_state: Optional[Dict[str, An
             parsed["thought"] = (
                 parsed.get("thought") or ""
             ) + f" [grounding-repair: {eid} is not on the page; waiting to re-observe]"
-    return parsed
+    print(f"returning {parsed}"); return parsed
 
 
 class GPTOSSService:
@@ -145,15 +139,7 @@ Output ONLY a valid JSON object. Do NOT include markdown blocks:
 
     def plan_step(self, task: str, fused_observation: Dict[str, Any], task_history: List[Dict[str, Any]], task_state: Optional[Dict[str, Any]] = None, page_state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if not settings.API_KEY:
-            return {
-                "thought": "Error: API_KEY is missing. General semantic reasoning requires a live model.",
-                "action": {
-                    "action": "WAIT",
-                    "risk": "LOW",
-                    "requires_confirmation": False
-                },
-                "is_terminal": False
-            }
+            raise Exception("API_KEY is missing. General semantic reasoning requires a live model.")
 
         allowed = _allowed_ids(fused_observation, page_state)
 
@@ -267,20 +253,12 @@ CRITICAL RULES:
                         if act["value_source"] not in valid_sources:
                             act["value_source"] = None
                     parsed = _repair_action(parsed, allowed, page_state)
-                    return parsed
+                    print(f"returning {parsed}"); return parsed
                 raise Exception("Model returned invalid schema")
             raise Exception(f"Model API error: {resp.status_code} {resp.text}")
 
         except Exception as e:
             print(f"[GPTOSS] Error in semantic reasoning: {e}")
-            return {
-                "thought": f"Failed to reason: {str(e)}",
-                "action": {
-                    "action": "WAIT",
-                    "risk": "LOW",
-                    "requires_confirmation": False
-                },
-                "is_terminal": False
-            }
+            raise e
 
 gpt_oss_service = GPTOSSService()

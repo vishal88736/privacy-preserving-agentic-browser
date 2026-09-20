@@ -508,13 +508,29 @@
 
     async _executeType(element, text) {
       if (!element) throw new Error('Target type element not found');
+      
+      if (element.type === 'file' || (typeof text === 'object' && text !== null)) {
+        return this._executeUpload(element, text);
+      }
+
       const valueToSet = String(text || '');
 
       element.focus();
       element.value = '';
       element.dispatchEvent(new Event('input', { bubbles: true }));
 
-      element.value = valueToSet;
+      const tag = String(element.tagName || '').toUpperCase();
+      try {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
+          || Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+        if (setter && (tag === 'INPUT' || tag === 'TEXTAREA')) {
+          setter.call(element, valueToSet);
+        } else {
+          element.value = valueToSet;
+        }
+      } catch {
+        element.value = valueToSet;
+      }
       element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: valueToSet }));
       element.dispatchEvent(new Event('change', { bubbles: true }));
       element.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Enter' }));
@@ -525,7 +541,25 @@
     async _executeSelect(element, optionValue) {
       if (!element) throw new Error('Target select element not found');
       element.focus();
-      element.value = optionValue;
+      const str = String(optionValue ?? '').toLowerCase();
+      const opt = Array.from(element.options).find(o =>
+        String(o.value ?? '').toLowerCase() === str ||
+        String(o.text ?? '').toLowerCase().includes(str)
+      );
+      
+      const valueToSet = opt ? opt.value : optionValue;
+      
+      try {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value')?.set;
+        if (setter) {
+          setter.call(element, valueToSet);
+        } else {
+          element.value = valueToSet;
+        }
+      } catch {
+        element.value = valueToSet;
+      }
+      
       element.dispatchEvent(new Event('change', { bubbles: true }));
       return { success: true };
     }
