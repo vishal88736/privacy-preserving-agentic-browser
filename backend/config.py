@@ -59,5 +59,10 @@ class Settings:
     VLM_MODEL: str = os.getenv("VLM_MODEL", "qwen2.5-vl-72b")
     REASONING_MODEL: str = os.getenv("REASONING_MODEL", "gpt-oss-120b")
 
+    # Browser Agent Settings
+    BROWSER_CDP_ENDPOINT: str = os.getenv("BROWSER_CDP_ENDPOINT", "http://localhost:9222")
+    BROWSER_HEADLESS: bool = os.getenv("BROWSER_HEADLESS", "false").lower() == "true"
+    AGENT_MAX_ITERATIONS: int = int(os.getenv("AGENT_MAX_ITERATIONS", "30"))
+
 settings = Settings()
 

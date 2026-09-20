@@ -175,6 +175,28 @@ export class DOMExtractor {
       const context = this.getContextText(node);
       const price_value = this.parsePrice(`${label} ${context}`);
 
+      // Extract form context
+      const formEl = node.closest('form');
+      const form_id = formEl ? registry.register(formEl) : null;
+      const fieldsetEl = node.closest('fieldset');
+      const legendEl = fieldsetEl ? fieldsetEl.querySelector('legend') : null;
+      const legend = legendEl ? legendEl.innerText.trim() : '';
+
+      let options = undefined;
+      if (tag === 'select') {
+        options = Array.from(node.options || []).map(o => ({
+          text: String(o.text || '').trim(),
+          value: String(o.value || '').trim()
+        }));
+      } else if (node.type === 'radio' && node.name) {
+        // Find other radios in the same group to build options
+        const group = Array.from(document.querySelectorAll(`input[type="radio"][name="${node.name}"]`));
+        options = group.map(r => ({
+          text: this.getAccessibleLabel(r),
+          value: r.value || ''
+        }));
+      }
+
       extracted.push({
         id,
         tag,
@@ -185,16 +207,17 @@ export class DOMExtractor {
         value: node.value || '',
         autocomplete: node.autocomplete || '',
         ariaLabel: node.getAttribute('aria-label') || '',
+        ariaDescribedBy: node.getAttribute('aria-describedby') ? document.getElementById(node.getAttribute('aria-describedby'))?.innerText?.trim() || '' : '',
         role: node.getAttribute('role') || '',
         href: node.getAttribute('href') || '',
         disabled: Boolean(node.disabled),
-        in_form: Boolean(node.form),
+        in_form: Boolean(node.form || formEl),
+        form_id,
+        fieldset_legend: legend,
         checked: Boolean(node.checked),
         context,
         price_value,
-        options: tag === 'select'
-          ? Array.from(node.options || []).slice(0, 20).map((o) => String(o.text || o.value || '').trim()).filter(Boolean)
-          : undefined,
+        options,
         bbox: this.bboxOf(rect),
         is_interactive: true,
         is_visible: isVisible

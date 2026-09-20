@@ -14,3 +14,4 @@ scratch/
 # Test artifacts
 tests/qa_screenshots/
 
+browser_agent-main/

@@ -15,12 +15,16 @@ import uvicorn
 from vlm_service import vlm_service
 from gpt_oss_service import gpt_oss_service
 from config import settings
+from agent_bridge import router as agent_router
 
 app = FastAPI(
     title="Privacy-Preserving Browser Agent Backend",
     version="1.0.0",
-    description="VLM Perception & GPT-OSS 120B Reasoning API"
+    description="VLM Perception & GPT-OSS 120B Reasoning API + Agentic Browsing"
 )
+
+# Mount the agent router for /agent/* endpoints
+app.include_router(agent_router)
 
 app.add_middleware(
     CORSMiddleware,

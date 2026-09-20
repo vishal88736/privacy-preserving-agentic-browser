@@ -9,6 +9,7 @@ import { defaultPolicyEngine } from '../privacy/policy-engine.js';
 import { defaultActionParser } from './action-parser.js';
 import { localInterpretTask, parseTaskSemantics } from './task-understanding.js';
 import { defaultPromptBuilder } from './prompt-builder.js';
+import { defaultFormAnalyzer } from './form-analyzer.js';
 
 export class GPTOSSClient {
   constructor(baseUrl = ServerDefaults.BACKEND_BASE_URL) {
@@ -206,9 +207,28 @@ export class GPTOSSClient {
       }
     }
 
-    // 2. Fill empty typeable fields (form-filling). Skip search boxes when the
-    // task is a pure search/play flow handled below, unless filling a form.
-    const wantsFormFill = /fill|form|application|register|sign\s*up|aadhaar|kyc|profile/i.test(lowerTask);
+    // 2. Fill empty typeable fields (form-filling) using FormAnalyzer
+    const wantsFormFill = /fill|form|application|register|sign\s*up|aadhaar|kyc|profile/i.test(lowerTask) || interpreted.intent === 'FILL_FORM';
+    
+    if (wantsFormFill && elements.length > 0 && !doneTargets.has('FILL_FORM_PLAN::::')) {
+      const plans = defaultFormAnalyzer.analyzeForms(elements, task);
+      if (plans.length > 0) {
+        // Return a FILL_FORM_PLAN action
+        return {
+          task_understanding: { intent: interpreted.intent, constraints: interpreted.constraints, target_entity: interpreted.target?.entity },
+          page_understanding: { page_type: obs.page?.page_type || 'unknown' },
+          thought: `[local-fallback] Analyzed form and generated fill plan with ${plans[0].fields.length} fields.`,
+          action: {
+            action: 'FILL_FORM_PLAN',
+            risk: RiskLevel.MEDIUM,
+            requires_confirmation: false,
+            value: plans[0] // send the plan
+          },
+          isTerminal: false
+        };
+      }
+    }
+
     const typeables = elements.filter((e) => isTypeable(e) && !typedIds.has(e.id));
     if (typeables.length) {
       // Prefer non-search fields for form fills; prefer search box for searches.

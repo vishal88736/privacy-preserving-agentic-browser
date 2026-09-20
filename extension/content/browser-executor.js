@@ -6,6 +6,7 @@
 
 import { registry } from './element-registry.js';
 import { visualOverlay } from './visual-overlay.js';
+import { formFiller } from './form-filler.js';
 
 export class BrowserExecutor {
   /**
@@ -56,6 +57,10 @@ export class BrowserExecutor {
 
       case 'SUBMIT':
         return this._executeSubmit(targetElement);
+
+      case 'FILL_FORM_PLAN':
+        // resolvedValue is the plan with resolved values
+        return formFiller.executePlan(resolvedValue);
 
       case 'WAIT':
         await this.sleep(actionPayload.duration || 1000);
