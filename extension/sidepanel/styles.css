@@ -26,11 +26,69 @@
 }
 
 /* ==========================================================================
+   Light Theme (Clean, Crisp, Airy, Modern UI) — Default
+   bg #f8fafc, surface #ffffff, borders #e2e8f0, text #0f172a,
+   secondary #475569, accent #2563eb
+   ========================================================================== */
+:root,
+:root[data-theme="light"] {
+  --bg-app: #f8fafc;
+  --bg-surface: #ffffff;
+  --bg-elevated: #ffffff;
+  --bg-sunken: #f1f5f9;
+  --bg-highlight: rgba(15, 23, 42, 0.03);
+
+  --border-subtle: #f1f5f9;
+  --border-default: #e2e8f0;
+  --border-strong: #cbd5e1;
+  --border-hover: #94a3b8;
+
+  --text-primary: #0f172a;
+  --text-secondary: #334155;
+  --text-muted: #64748b;
+  --text-disabled: #94a3b8;
+
+  /* Modern vibrant blue */
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-ink: #ffffff;
+  --accent-subtle: rgba(37, 99, 235, 0.08);
+  --accent-border: rgba(37, 99, 235, 0.22);
+
+  --ok: #16a34a;
+  --ok-hover: #15803d;
+  --ok-ink: #ffffff;
+  --ok-subtle: rgba(22, 163, 74, 0.08);
+  --ok-border: rgba(22, 163, 74, 0.22);
+
+  --warn: #d97706;
+  --warn-hover: #b45309;
+  --warn-ink: #ffffff;
+  --warn-subtle: rgba(217, 119, 6, 0.08);
+  --warn-border: rgba(217, 119, 6, 0.22);
+
+  --danger: #dc2626;
+  --danger-hover: #b91c1c;
+  --danger-ink: #ffffff;
+  --danger-subtle: rgba(220, 38, 38, 0.08);
+  --danger-border: rgba(220, 38, 38, 0.22);
+
+  --info: #0284c7;
+  --info-subtle: rgba(2, 132, 199, 0.08);
+  --info-border: rgba(2, 132, 199, 0.22);
+
+  --shadow-sm: 0 1px 3px 0 rgba(0, 0, 0, 0.05), 0 1px 2px -1px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.07), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.08), 0 4px 6px -4px rgba(0, 0, 0, 0.04);
+
+  --focus-ring: 0 0 0 3px rgba(37, 99, 235, 0.2);
+}
+
+/* ==========================================================================
    Dark Theme (Google Chrome Dark — Material You)
    bg #1f1f1f, surface #282828, borders #3c4043, text #e3e3e3,
    secondary #9aa0a6, accent #a8c7fa
    ========================================================================== */
-:root,
 :root[data-theme="dark"] {
   --bg-app: #1f1f1f;
   --bg-surface: #282828;
@@ -83,106 +141,6 @@
 
   --focus-ring: 0 0 0 2px rgba(168, 199, 250, 0.45);
 }
-
-/* ==========================================================================
-   Light Theme (Google Chrome Light — Material You)
-   ========================================================================== */
-:root[data-theme="light"] {
-  --bg-app: #ffffff;
-  --bg-surface: #f0f4f9;
-  --bg-elevated: #e1e7ee;
-  --bg-sunken: #f8fafd;
-  --bg-highlight: rgba(31, 31, 31, 0.03);
-
-  --border-subtle: #dfe3ea;
-  --border-default: #c7cbd4;
-  --border-strong: #9aa0a6;
-  --border-hover: #80868b;
-
-  --text-primary: #1f1f1f;
-  --text-secondary: #444746;
-  --text-muted: #5f6368;
-  --text-disabled: #9aa0a6;
-
-  --accent: #0b57d0;
-  --accent-hover: #0842a0;
-  --accent-ink: #ffffff;
-  --accent-subtle: rgba(11, 87, 208, 0.08);
-  --accent-border: rgba(11, 87, 208, 0.28);
-
-  --ok: #146c2e;
-  --ok-hover: #0f5223;
-  --ok-ink: #ffffff;
-  --ok-subtle: rgba(20, 108, 46, 0.08);
-  --ok-border: rgba(20, 108, 46, 0.25);
-
-  --warn: #934806;
-  --warn-hover: #7a3a05;
-  --warn-ink: #ffffff;
-  --warn-subtle: rgba(147, 72, 6, 0.08);
-  --warn-border: rgba(147, 72, 6, 0.28);
-
-  --danger: #b3261e;
-  --danger-hover: #8f1d17;
-  --danger-ink: #ffffff;
-  --danger-subtle: rgba(179, 38, 30, 0.08);
-  --danger-border: rgba(179, 38, 30, 0.26);
-
-  --info: #0b57d0;
-  --info-subtle: rgba(11, 87, 208, 0.08);
-  --info-border: rgba(11, 87, 208, 0.26);
-
-  --shadow-sm: 0 1px 2px rgba(31, 31, 31, 0.08);
-  --shadow-md: 0 4px 12px rgba(31, 31, 31, 0.1);
-  --shadow-lg: 0 12px 32px rgba(31, 31, 31, 0.16);
-
-  --focus-ring: 0 0 0 2px rgba(11, 87, 208, 0.35);
-}
-
-/* Auto system preference — Chrome follows OS; default panel to Chrome dark */
-@media (prefers-color-scheme: light) {
-  :root:not([data-theme]) {
-    --bg-app: #ffffff;
-    --bg-surface: #f0f4f9;
-    --bg-elevated: #e1e7ee;
-    --bg-sunken: #f8fafd;
-    --bg-highlight: rgba(31, 31, 31, 0.03);
-    --border-subtle: #dfe3ea;
-    --border-default: #c7cbd4;
-    --border-strong: #9aa0a6;
-    --border-hover: #80868b;
-    --text-primary: #1f1f1f;
-    --text-secondary: #444746;
-    --text-muted: #5f6368;
-    --text-disabled: #9aa0a6;
-    --accent: #0b57d0;
-    --accent-hover: #0842a0;
-    --accent-ink: #ffffff;
-    --accent-subtle: rgba(11, 87, 208, 0.08);
-    --accent-border: rgba(11, 87, 208, 0.28);
-    --ok: #146c2e;
-    --ok-hover: #0f5223;
-    --ok-ink: #ffffff;
-    --ok-subtle: rgba(20, 108, 46, 0.08);
-    --ok-border: rgba(20, 108, 46, 0.25);
-    --warn: #934806;
-    --warn-hover: #7a3a05;
-    --warn-ink: #ffffff;
-    --warn-subtle: rgba(147, 72, 6, 0.08);
-    --warn-border: rgba(147, 72, 6, 0.28);
-    --danger: #b3261e;
-    --danger-hover: #8f1d17;
-    --danger-ink: #ffffff;
-    --danger-subtle: rgba(179, 38, 30, 0.08);
-    --danger-border: rgba(179, 38, 30, 0.26);
-    --info: #0b57d0;
-    --info-subtle: rgba(11, 87, 208, 0.08);
-    --info-border: rgba(11, 87, 208, 0.26);
-    --shadow-sm: 0 1px 2px rgba(31, 31, 31, 0.08);
-    --shadow-md: 0 4px 12px rgba(31, 31, 31, 0.1);
-    --shadow-lg: 0 12px 32px rgba(31, 31, 31, 0.16);
-    --focus-ring: 0 0 0 2px rgba(11, 87, 208, 0.35);
-  }
 }
 
 /* ==========================================================================
@@ -652,16 +610,17 @@ summary:focus-visible {
 .chip {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 500;
   color: var(--text-secondary);
-  background: var(--bg-sunken);
-  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
   border-radius: 999px;
-  padding: 3px 8px;
+  padding: 4px 10px;
   cursor: pointer;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
   transition: all var(--transition-fast);
 }
 
@@ -671,9 +630,11 @@ summary:focus-visible {
 }
 
 .chip:hover {
-  color: var(--text-primary);
-  border-color: var(--accent-border);
+  color: var(--accent);
+  border-color: var(--accent);
   background: var(--accent-subtle);
+  transform: translateY(-0.5px);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.06);
 }
 
 .chip:hover svg {
@@ -712,14 +673,15 @@ summary:focus-visible {
 .btn-primary {
   background: var(--accent);
   color: var(--accent-ink);
-  border-color: rgba(0, 0, 0, 0.2);
+  border-color: transparent;
   flex: 1;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 1px 3px rgba(37, 99, 235, 0.25);
 }
 
 .btn-primary:hover:not(:disabled) {
   background: var(--accent-hover);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 3px 8px rgba(37, 99, 235, 0.35);
+  transform: translateY(-0.5px);
 }
 
 .btn-secondary {

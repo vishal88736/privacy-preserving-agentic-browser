@@ -98,9 +98,34 @@ export class DOMExtractor {
       inner[1] + inner[3] <= outer[1] + outer[3] + 6;
   }
 
+  /**
+   * Recursively queries elements piercing open Shadow DOM roots.
+   */
+  queryAllDeep(selector, root = (typeof document !== 'undefined' ? document : null)) {
+    if (!root || !root.querySelectorAll) return [];
+    let matches = [];
+    try {
+      matches = Array.from(root.querySelectorAll(selector));
+    } catch {
+      matches = [];
+    }
+
+    try {
+      const allElements = root.querySelectorAll('*');
+      for (let i = 0; i < allElements.length; i++) {
+        const shadow = allElements[i]?.shadowRoot;
+        if (shadow) {
+          matches = matches.concat(this.queryAllDeep(selector, shadow));
+        }
+      }
+    } catch {}
+
+    return matches;
+  }
+
   extractHeadings() {
     const out = [];
-    for (const h of document.querySelectorAll('h1, h2, h3, [role="heading"]')) {
+    for (const h of this.queryAllDeep('h1, h2, h3, [role="heading"]')) {
       const rect = h.getBoundingClientRect();
       if (!this.isElementVisible(h, rect)) continue;
       const text = (h.innerText || '').replace(/\s+/g, ' ').trim();
@@ -116,7 +141,7 @@ export class DOMExtractor {
     const seen = new Set();
     let nodes = [];
     try {
-      nodes = Array.from(document.querySelectorAll(CARD_SELECTORS));
+      nodes = this.queryAllDeep(CARD_SELECTORS);
     } catch {
       nodes = [];
     }
@@ -158,7 +183,7 @@ export class DOMExtractor {
   extractPageElements() {
     registry.clear();
     const selector = 'input, button, a, select, textarea, [role="button"], [role="textbox"], [role="checkbox"], [role="option"], [role="link"], [tabindex]:not([tabindex="-1"])';
-    const rawNodes = Array.from(document.querySelectorAll(selector));
+    const rawNodes = this.queryAllDeep(selector);
 
     const extracted = [];
 

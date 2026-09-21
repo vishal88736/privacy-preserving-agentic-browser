@@ -131,12 +131,35 @@ export class BrowserExecutor {
     const valueToSet = String(rawText || '');
 
     element.focus();
-    // Clear existing text
-    element.value = '';
+    // Clear existing text using prototype setter if available
+    const tag = String(element.tagName || '').toUpperCase();
+    try {
+      const clearSetter = (tag === 'TEXTAREA')
+        ? Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement?.prototype || {}, 'value')?.set
+        : Object.getOwnPropertyDescriptor(window.HTMLInputElement?.prototype || {}, 'value')?.set;
+      if (clearSetter) {
+        clearSetter.call(element, '');
+      } else {
+        element.value = '';
+      }
+    } catch {
+      element.value = '';
+    }
     element.dispatchEvent(new Event('input', { bubbles: true }));
 
-    // Set new value
-    element.value = valueToSet;
+    // Set new value with React prototype setter
+    try {
+      const valSetter = (tag === 'TEXTAREA')
+        ? Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement?.prototype || {}, 'value')?.set
+        : Object.getOwnPropertyDescriptor(window.HTMLInputElement?.prototype || {}, 'value')?.set;
+      if (valSetter) {
+        valSetter.call(element, valueToSet);
+      } else {
+        element.value = valueToSet;
+      }
+    } catch {
+      element.value = valueToSet;
+    }
     element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: valueToSet }));
     element.dispatchEvent(new Event('change', { bubbles: true }));
     element.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Enter' }));
@@ -147,8 +170,26 @@ export class BrowserExecutor {
   async _executeSelect(element, optionValue) {
     if (!element) throw new Error('Select target element not found');
     element.focus();
-    element.value = optionValue;
+    const str = String(optionValue ?? '').toLowerCase();
+    const options = Array.from(element.options || []);
+    const opt = options.find(o =>
+      String(o.value ?? '').toLowerCase() === str ||
+      String(o.text ?? '').toLowerCase().includes(str)
+    );
+    const valueToSet = opt ? opt.value : optionValue;
+
+    try {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement?.prototype || {}, 'value')?.set;
+      if (setter) {
+        setter.call(element, valueToSet);
+      } else {
+        element.value = valueToSet;
+      }
+    } catch {
+      element.value = valueToSet;
+    }
     element.dispatchEvent(new Event('change', { bubbles: true }));
+    element.dispatchEvent(new Event('input', { bubbles: true }));
     return { success: true };
   }
 

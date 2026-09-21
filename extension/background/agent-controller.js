@@ -357,14 +357,30 @@ export class AgentController {
     taskManager.updateState(AgentState.VISUAL_ANALYSIS, 'Interpreting the visual layout…');
     this.notify('STATE_CHANGED', { state: AgentState.VISUAL_ANALYSIS });
 
+    // Evaluate Fast-Path VLM Skip:
+    // When semantic DOM elements are rich, clear, and no previous step failure occurred,
+    // skip the remote VLM roundtrip to reduce per-step latency by 2-4 seconds.
+    const useFastPath = Boolean(
+      taskManager.settings?.fastMode ||
+      (taskManager.settings?.fastPath !== false &&
+       !taskManager.settings?.alwaysRemoteVision &&
+       sanitizedElements &&
+       sanitizedElements.length >= 2 &&
+       (task.consecutiveFailures || 0) === 0 &&
+       sanitizedElements.some(e => e.label || e.placeholder || e.ariaLabel))
+    );
+
     const visualObservation = await defaultVLMClient.processVisuals(
       task.id,
       redactedScreenshot,
       sanitizedDOM,
-      { viewport: rawDOM.viewport, title: rawDOM.title, url: defaultDOMSanitizer.sanitizeUrl(rawDOM.url) }
+      { viewport: rawDOM.viewport, title: rawDOM.title, url: defaultDOMSanitizer.sanitizeUrl(rawDOM.url) },
+      { fastPath: useFastPath }
     );
 
-    taskManager.updatePrivacyMetrics({ serverCallsCount: 1 });
+    if (visualObservation._source !== 'local-fast-path') {
+      taskManager.updatePrivacyMetrics({ serverCallsCount: 1 });
+    }
 
     // STEP 4: OBSERVATION FUSION + injection quarantine
     const fusedObservation = defaultObservationFusion.fuse(
@@ -724,14 +740,28 @@ export class AgentController {
     // site homepage (if deterministically known), then re-observe.
     if (capability !== PageCapability.AUTOMATABLE_WEB) {
       const site = task.taskState?.site;
-      const home = site ? getSiteHomepage(site) : null;
+      let home = site ? getSiteHomepage(site) : null;
+
+      // Smart bootstrap: If on a blank new tab with a search/find task
+      // and no specific website was mentioned ("Find cheapest flight...", "Search for laptops..."),
+      // automatically navigate to Google so the agent can execute the search!
+      const currentUrl = currentTab?.url || '';
+      const isNewTabOrBlank = capability === PageCapability.ABOUT_BLANK ||
+        currentUrl.includes('newtab') ||
+        currentUrl === 'about:blank';
+      const intent = task.taskState?.intent;
+
+      if (!home && isNewTabOrBlank && (intent === 'SEARCH' || /search|find|flight|cheap|compare/i.test(task.prompt))) {
+        home = 'https://www.google.com/';
+      }
+
       if (home) {
         const validation = validateNavigationUrl(home);
         if (!validation.valid) return notHandled;
         console.log(`[NAVIGATION] target=${validation.normalizedUrl} validated=true`);
         return await this._executeBootstrapNavigation(task, currentTab, validation.normalizedUrl, {
           pure: false,
-          thought: `Current page is not automatable (${capability}); navigate to ${site} first, then continue.`
+          thought: `Current page is a new tab (${capability}); navigate to ${home.includes('google') ? 'Google' : site} first, then continue.`
         });
       }
     }
@@ -997,23 +1027,17 @@ export class AgentController {
       await new Promise((resolve) => {
         let settled = false;
         const done = () => { if (!settled) { settled = true; clearTimeout(timer); resolve(); } };
-        const timer = setTimeout(done, 2000);
+        const timer = setTimeout(done, 1200);
         chrome.tabs.sendMessage(
           tabId,
-          { type: MessageType.CHECK_PAGE_STABILITY, payload: { quietMs: 250 } },
-          (response) => {
-            if (chrome.runtime.lastError) {
-              // Content script not ready — just wait a flat amount
-              done();
-            } else {
-              done();
-            }
+          { type: MessageType.CHECK_PAGE_STABILITY, payload: { quietMs: 120 } },
+          () => {
+            done();
           }
         );
-        // Timeout in case the message never gets a response
       });
     } catch {
-      await this.sleep(400);
+      await this.sleep(150);
     }
   }
 
@@ -1024,18 +1048,18 @@ export class AgentController {
   _getPostActionWait(actionType) {
     switch (actionType) {
       case ActionType.NAVIGATE:
-        return 1200; // Full page navigation needs more time
+        return 700;
       case ActionType.CLICK:
       case ActionType.SUBMIT:
-        return 800;  // Clicks often trigger AJAX/re-renders
+        return 250;
       case ActionType.TYPE:
-        return 400;  // Typing may trigger autocomplete/validation
+        return 100;
       case ActionType.SELECT:
-        return 400;
+        return 150;
       case ActionType.SCROLL:
-        return 500;  // Infinite scroll / lazy loading
+        return 200;
       default:
-        return 300;
+        return 100;
     }
   }
 

@@ -336,3 +336,21 @@ test('13. executor crash during navigation leaves an honest recoverable task', a
     restoreChrome();
   }
 });
+
+// ---------- 14: search task from blank newtab auto-bootstraps to Google ----------
+
+test('14. "Find the cheapest flight from Pune to Delhi" from chrome://newtab auto-bootstraps to Google', async () => {
+  const tabs = { 85: { id: 85, url: 'chrome://newtab', windowId: 1 } };
+  const calls = stubChrome(tabs);
+  try {
+    const c = new AgentController();
+    const task = makeTask('Find the cheapest flight from Pune to Delhi.', 85);
+    const cont = await c.runSingleStep(task);
+    assert.strictEqual(cont, true, 'search task must auto-bootstrap and continue');
+    assert.strictEqual(calls.update.length, 1);
+    assert.ok(String(calls.update[0][1].url).includes('google.com'), 'must navigate to Google first');
+  } finally {
+    restoreChrome();
+  }
+});
+

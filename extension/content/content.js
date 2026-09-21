@@ -128,9 +128,34 @@
         inner[1] + inner[3] <= outer[1] + outer[3] + 6;
     }
 
+    /**
+     * Recursively queries elements piercing open Shadow DOM roots.
+     */
+    queryAllDeep(selector, root = (typeof document !== 'undefined' ? document : null)) {
+      if (!root || !root.querySelectorAll) return [];
+      let matches = [];
+      try {
+        matches = Array.from(root.querySelectorAll(selector));
+      } catch {
+        matches = [];
+      }
+
+      try {
+        const allElements = root.querySelectorAll('*');
+        for (let i = 0; i < allElements.length; i++) {
+          const shadow = allElements[i]?.shadowRoot;
+          if (shadow) {
+            matches = matches.concat(this.queryAllDeep(selector, shadow));
+          }
+        }
+      } catch {}
+
+      return matches;
+    }
+
     extractHeadings() {
       const out = [];
-      for (const h of document.querySelectorAll('h1, h2, h3, [role="heading"]')) {
+      for (const h of this.queryAllDeep('h1, h2, h3, [role="heading"]')) {
         const rect = h.getBoundingClientRect();
         if (!this.isElementVisible(h, rect)) continue;
         const text = (h.innerText || '').replace(/\s+/g, ' ').trim();
@@ -146,7 +171,7 @@
       const cards = [];
       const seen = new Set();
       let nodes = [];
-      try { nodes = Array.from(document.querySelectorAll(selectors)); } catch { nodes = []; }
+      try { nodes = this.queryAllDeep(selectors); } catch { nodes = []; }
 
       for (const node of nodes) {
         if (seen.has(node) || node.closest('nav, header, footer, [role="navigation"]')) continue;
@@ -185,7 +210,7 @@
     extractPageElements() {
       registry.clear();
       const selector = 'input, button, a, select, textarea, [role="button"], [role="textbox"], [role="checkbox"], [role="option"], [role="link"], [tabindex]:not([tabindex="-1"])';
-      const rawNodes = Array.from(document.querySelectorAll(selector));
+      const rawNodes = this.queryAllDeep(selector);
 
       const extracted = [];
 
@@ -351,21 +376,42 @@
   class PageStabilityObserver {
     constructor() {
       this.lastMutationTime = Date.now();
-      if (document.body) {
-        this.observer = new MutationObserver(() => {
-          this.lastMutationTime = Date.now();
-        });
-        this.observer.observe(document.body, { childList: true, subtree: true, attributes: true, characterData: true });
-      }
+      this.observer = null;
+      this._startObserving();
     }
 
-    async waitForStability(quietMs = 300, timeoutMs = 2500) {
+    _startObserving() {
+      if (typeof MutationObserver === 'undefined') return;
+      const target = (typeof document !== 'undefined') ? (document.body || document.documentElement) : null;
+      if (!target) {
+        if (typeof window !== 'undefined' && window.addEventListener) {
+          window.addEventListener('DOMContentLoaded', () => this._startObserving(), { once: true });
+        }
+        return;
+      }
+      if (this.observer) {
+        try { this.observer.disconnect(); } catch {}
+      }
+      this.observer = new MutationObserver(() => {
+        this.lastMutationTime = Date.now();
+      });
+      try {
+        this.observer.observe(target, { childList: true, subtree: true, attributes: true, characterData: true });
+      } catch {}
+    }
+
+    markAction() {
+      this.lastMutationTime = Date.now();
+    }
+
+    async waitForStability(quietMs = 120, timeoutMs = 1500) {
+      if (!this.observer) this._startObserving();
       const startTime = Date.now();
       while (Date.now() - startTime < timeoutMs) {
         if (Date.now() - this.lastMutationTime >= quietMs) {
           return true;
         }
-        await new Promise(r => setTimeout(r, 50));
+        await new Promise(r => setTimeout(r, 25));
       }
       return true;
     }
@@ -561,7 +607,8 @@
       if (!element) throw new Error('Target select element not found');
       element.focus();
       const str = String(optionValue ?? '').toLowerCase();
-      const opt = Array.from(element.options).find(o =>
+      const options = Array.from(element.options || []);
+      const opt = options.find(o =>
         String(o.value ?? '').toLowerCase() === str ||
         String(o.text ?? '').toLowerCase().includes(str)
       );
@@ -580,6 +627,7 @@
       }
       
       element.dispatchEvent(new Event('change', { bubbles: true }));
+      element.dispatchEvent(new Event('input', { bubbles: true }));
       return { success: true };
     }
 

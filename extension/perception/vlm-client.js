@@ -15,9 +15,15 @@ export class VLMClient {
   }
 
   /**
-   * Calls the server VLM endpoint with sanitized data
+   * Calls the server VLM endpoint with sanitized data (or resolves via fast-path)
    */
-  async processVisuals(taskId, sanitizedScreenshot, sanitizedDom, metadata = {}) {
+  async processVisuals(taskId, sanitizedScreenshot, sanitizedDom, metadata = {}, options = {}) {
+    if (options.fastPath) {
+      const fastResult = this._localVisualInferenceFallback(sanitizedDom);
+      fastResult._source = 'local-fast-path';
+      return fastResult;
+    }
+
     const payload = {
       task_id: taskId,
       sanitized_screenshot: sanitizedScreenshot,

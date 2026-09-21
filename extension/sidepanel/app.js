@@ -865,7 +865,7 @@ class SidePanelApp {
 
   applyTheme() {
     try {
-      const t = localStorage.getItem('privagent_theme') || 'dark';
+      const t = localStorage.getItem('privagent_theme') || 'light';
       document.documentElement.dataset.theme = t;
       this.syncThemeIcon(t);
     } catch { /* ignore */ }
@@ -885,7 +885,7 @@ class SidePanelApp {
   }
 
   toggleTheme() {
-    const cur = document.documentElement.dataset.theme || 'dark';
+    const cur = document.documentElement.dataset.theme || 'light';
     const next = cur === 'dark' ? 'light' : 'dark';
     document.documentElement.dataset.theme = next;
     try { localStorage.setItem('privagent_theme', next); } catch { /* ignore */ }
