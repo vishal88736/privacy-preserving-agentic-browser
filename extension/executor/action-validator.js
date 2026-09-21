@@ -50,6 +50,12 @@ export class ActionValidator {
     }
 
     if (action.action === ActionType.SUBMIT) {
+      if (formState?.completion?.empty > 0) {
+        return {
+          valid: false,
+          reason: `Form submission rejected: there are still ${formState.completion.empty} unfilled input fields. You must fill them first.`
+        };
+      }
       // Basic check: don't submit if there are obviously empty text inputs
       const empties = (fusedObservation.elements || []).filter(e => 
         (e.dom?.tag === 'input' || e.dom?.tag === 'textarea') && 

@@ -18,6 +18,7 @@ import { AgentState, ActionType, RiskLevel } from '../shared/constants.js';
 import { MessageType } from '../shared/messages.js';
 import { taskManager } from './task-manager.js';
 import { defaultDOMSanitizer } from '../privacy/dom-sanitizer.js';
+import { defaultLocalVault } from '../privacy/local-vault.js';
 import { defaultScreenshotSanitizer } from '../privacy/screenshot-sanitizer.js';
 import { defaultScreenshotService } from '../perception/screenshot.js';
 import { defaultVLMClient } from '../perception/vlm-client.js';
@@ -74,6 +75,7 @@ export class AgentController {
     this.isCancelled = false;
     this.listeners = new Set();
     this.pendingUserConfirmationResolver = null;
+    this.pendingUserInputResolver = null;
     this.runToken = 0;
   }
 
@@ -101,6 +103,7 @@ export class AgentController {
     this.isPaused = false;
     this.isCancelled = false;
     this.pendingUserConfirmationResolver = null;
+    this.pendingUserInputResolver = null;
 
     // Apply current settings to network clients (privacy: same sanitized payloads, new host only)
     const settings = taskManager.settings || {};
@@ -521,6 +524,103 @@ export class AgentController {
       execResult = await defaultActionExecutor.execute(task.tabId, proposedAction);
     } catch (execErr) {
       execResult = { success: false, error: execErr?.message || 'Execution failed' };
+    }
+
+    // Intercept ASK_USER / needs_user_input to pause and await user clarification
+    if (proposedAction.action === ActionType.ASK_USER || execResult?.needs_user_input) {
+      const askData = {
+        prompt: execResult?.prompt || proposedAction.value?.prompt || 'User clarification required',
+        ambiguousFields: execResult?.ambiguousFields || proposedAction.value?.ambiguousFields || [],
+        action: proposedAction
+      };
+      taskManager.setPendingUserInput(askData);
+      this.notify('STATE_CHANGED', { state: AgentState.WAITING_FOR_USER });
+      this.notify('USER_INPUT_REQUIRED', askData);
+
+      const userInput = await new Promise((resolve) => {
+        this.pendingUserInputResolver = resolve;
+        setTimeout(() => {
+          if (this.pendingUserInputResolver === resolve) {
+            this.pendingUserInputResolver = null;
+            resolve({ skipped: true, answers: {} });
+          }
+        }, 5 * 60 * 1000);
+      });
+
+      taskManager.clearPendingUserInput();
+
+      if (userInput?.cancelled) {
+        taskManager.cancelTask();
+        this.clearOverlays(task.tabId);
+        this.notify('TASK_CANCELLED', { reason: 'User cancelled input request' });
+        return false;
+      }
+
+      // If user saved any values to vault:
+      if (Array.isArray(userInput?.saveToVault)) {
+        for (const item of userInput.saveToVault) {
+          if (item?.key && item?.value !== undefined) {
+            try {
+              await defaultLocalVault.updateSecret(item.key, item.value);
+            } catch (vErr) {
+              console.warn('[AgentController] Could not save vault secret:', vErr);
+            }
+          }
+        }
+      }
+
+      // If user provided field answers, fill them into the page
+      if (userInput?.answers && Object.keys(userInput.answers).length > 0) {
+        for (const [fieldId, val] of Object.entries(userInput.answers)) {
+          if (val !== undefined && val !== null && val !== '') {
+            const fieldMeta = (askData.ambiguousFields || []).find(f => f.field_id === fieldId);
+            try {
+              if (fieldMeta?.element_type === 'select') {
+                await defaultActionExecutor.execute(task.tabId, {
+                  action: ActionType.SELECT,
+                  target: { element_id: fieldId },
+                  value: val
+                });
+              } else if (fieldMeta?.input_type === 'checkbox') {
+                await defaultActionExecutor.execute(task.tabId, {
+                  action: (val === true || val === 'yes' || val === 'true') ? ActionType.CHECK : ActionType.UNCHECK,
+                  target: { element_id: fieldId }
+                });
+              } else {
+                await defaultActionExecutor.execute(task.tabId, {
+                  action: ActionType.TYPE,
+                  target: { element_id: fieldId },
+                  value: String(val)
+                });
+              }
+            } catch (fillErr) {
+              console.warn(`[AgentController] Could not fill user-provided value for ${fieldId}:`, fillErr);
+            }
+          }
+        }
+      }
+
+      // Record step in history with user's responses
+      taskManager.recordStep({
+        thought: planResult.thought,
+        action: proposedAction,
+        result: {
+          ...execResult,
+          userInputReceived: userInput?.answers || {}
+        },
+        success: true
+      });
+
+      this.notify('STEP_COMPLETED', {
+        stepNumber: task.currentStep,
+        thought: 'User clarification received and applied',
+        action: proposedAction,
+        success: true,
+        timestamp: Date.now()
+      });
+
+      await this.sleep(400);
+      return true;
     }
 
     // STEP 8: VERIFY — execution result determines recovery
@@ -956,6 +1056,13 @@ export class AgentController {
     }
   }
 
+  handleUserInput(payload) {
+    if (this.pendingUserInputResolver) {
+      this.pendingUserInputResolver(payload);
+      this.pendingUserInputResolver = null;
+    }
+  }
+
   pauseTask() {
     this.isPaused = true;
   }
@@ -973,6 +1080,10 @@ export class AgentController {
     if (this.pendingUserConfirmationResolver) {
       this.pendingUserConfirmationResolver(false);
       this.pendingUserConfirmationResolver = null;
+    }
+    if (this.pendingUserInputResolver) {
+      this.pendingUserInputResolver({ cancelled: true });
+      this.pendingUserInputResolver = null;
     }
     this.notify('TASK_CANCELLED', task);
     this.notify('STATE_CHANGED', { state: AgentState.CANCELLED });

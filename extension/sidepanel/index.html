@@ -439,6 +439,50 @@
     </div>
   </div>
 
+  <!-- User Clarification Modal Dialog -->
+  <div id="user-input-modal" class="backdrop" hidden>
+    <div class="modal user-input-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="user-input-title" aria-describedby="user-input-prompt-text">
+      <div class="modal-head user-input-head">
+        <div class="user-input-icon-box" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/>
+            <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/>
+            <line x1="12" y1="17" x2="12.01" y2="17"/>
+          </svg>
+        </div>
+        <div class="user-input-head-text">
+          <div class="confirm-badge-row">
+            <h3 id="user-input-title" class="modal-title">Clarification Needed</h3>
+            <span class="mini-tag ok-tag">Interactive</span>
+          </div>
+          <p class="modal-sub">PrivAgent needs your input to continue</p>
+        </div>
+      </div>
+
+      <div class="user-input-prompt-box">
+        <p id="user-input-prompt-text" class="user-input-prompt"></p>
+      </div>
+
+      <!-- Container for dynamic ambiguous fields -->
+      <div id="user-input-fields-container" class="user-input-fields-list"></div>
+
+      <!-- Container for free-form text input fallback -->
+      <div id="user-input-single-container" class="vault-field" hidden>
+        <textarea id="user-input-single-text" rows="3" placeholder="Enter your response or instructions..."></textarea>
+      </div>
+
+      <div class="confirm-note">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+        <span>Entered values stay local on your device and are never sent to remote AI.</span>
+      </div>
+
+      <div class="modal-actions">
+        <button id="user-input-skip-btn" class="btn btn-secondary">Skip</button>
+        <button id="user-input-submit-btn" class="btn btn-primary btn-confirm-primary">Submit &amp; Continue</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Privacy Info Sheet Modal -->
   <div id="privacy-modal" class="backdrop" hidden>
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="privacy-sheet-title">

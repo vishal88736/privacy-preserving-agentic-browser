@@ -65,7 +65,8 @@ export class LocalVault {
   resolveSecret(symbolicSource) {
     if (!symbolicSource) return null;
     const value = this.memoryStore[symbolicSource] || null;
-    console.log(`[LocalVault] Resolving ${symbolicSource} -> ${value}`);
+    // Privacy: never log plaintext values — token name + configured flag only.
+    console.log(`[LocalVault] Resolving ${symbolicSource} -> ${value === null || value === undefined || value === '' ? '(not configured)' : '(configured, kept local)'}`);
     return value;
   }
 

@@ -172,3 +172,46 @@ test('LocalValueResolver - FILL_FORM_PLAN: fields without value_source are left 
   // Should not throw; field value unchanged
   assert.equal(result.fields[0].value, 'static_text');
 });
+
+test('LocalValueResolver - parseAddressParts derives city/state/zip', () => {
+  const { resolver } = makeResolver({
+    LOCAL_ADDRESS: 'Flat 402, Green Meadows, Baner, Pune, Maharashtra - 411045'
+  });
+  const parts = resolver.parseAddressParts(resolver.vault.resolveSecret('LOCAL_ADDRESS'));
+  assert.equal(parts.city, 'Pune');
+  assert.equal(parts.state, 'Maharashtra');
+  assert.equal(parts.zip, '411045');
+});
+
+test('LocalValueResolver - FILL_FORM_PLAN resolves address_part without name fallback', () => {
+  const { resolver } = makeResolver({
+    LOCAL_ADDRESS: 'Flat 402, Green Meadows, Baner, Pune, Maharashtra - 411045'
+  });
+  const action = {
+    action: ActionType.FILL_FORM_PLAN,
+    value: {
+      fields: [
+        { field_id: 'el_city', semantic_type: 'city', value_source: SymbolicSecretSource.LOCAL_ADDRESS, address_part: 'city' },
+        { field_id: 'el_zip', semantic_type: 'zip_code', value_source: SymbolicSecretSource.LOCAL_ADDRESS, address_part: 'zip' }
+      ]
+    }
+  };
+  const result = resolver.resolve(action);
+  assert.equal(result.fields[0].value, 'Pune');
+  assert.equal(result.fields[1].value, '411045');
+});
+
+test('LocalValueResolver - unparseable address_part marks field ambiguous', () => {
+  const { resolver } = makeResolver({ LOCAL_ADDRESS: 'nowhere' });
+  const action = {
+    action: ActionType.FILL_FORM_PLAN,
+    value: {
+      fields: [
+        { field_id: 'el_zip', semantic_type: 'zip_code', value_source: SymbolicSecretSource.LOCAL_ADDRESS, address_part: 'zip' }
+      ]
+    }
+  };
+  const result = resolver.resolve(action);
+  assert.equal(result.fields[0].value, '');
+  assert.equal(result.fields[0].ambiguous, true);
+});

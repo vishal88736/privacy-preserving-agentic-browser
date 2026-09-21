@@ -87,8 +87,21 @@ export class SecretDetector {
       }
     }
 
-    // 4. Keyword heuristic matching across name, id, placeholder, label, aria-label
+    // 4. Postal PIN-code guard (runs BEFORE the keyword loop): a "PIN"
+    // next to postal context (pincode / postal / zip / "PIN / ZIP") is a
+    // postal code, not a password/security PIN. Bare "PIN" (ATM PIN,
+    // UPI PIN, "Enter PIN") still falls through to the PASSWORD rule.
     const corpus = `${name} ${id} ${placeholder} ${label} ${ariaLabel}`;
+    if (/\bpin\b/i.test(corpus) && /\b(pin\s*code|pincode|postal(\s*code)?|zip(\s*code)?|pin\s*\/\s*zip)\b/i.test(corpus)) {
+      return {
+        isSensitive: false,
+        category: null,
+        source: null,
+        reason: 'postal_pin_not_secret'
+      };
+    }
+
+    // 5. Keyword heuristic matching across name, id, placeholder, label, aria-label
     for (const entry of this.sensitiveKeywords) {
       if (entry.pattern.test(corpus)) {
         return {

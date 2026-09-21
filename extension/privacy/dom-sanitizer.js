@@ -31,6 +31,35 @@ export class DOMSanitizer {
     }
   }
 
+  _escapeRegExp(s) {
+    return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  /**
+   * Replaces whole-token occurrences of a vault secret inside page-authored
+   * text. Word-boundary + case-sensitive matching prevents corrupting
+   * structural labels that merely contain the secret as a substring
+   * (e.g. vault "male" must not rewrite the label "Female").
+   */
+  _scrubVaultToken(out, secret, replacement) {
+    if (!secret || typeof secret !== 'string' || secret.length < 4) return out;
+    const variants = [secret];
+    const clean = secret.replace(/[\s-]/g, '');
+    if (clean.length >= 6 && clean !== secret) variants.push(clean);
+    for (const v of variants) {
+      if (!out.includes(v)) continue;
+      try {
+        out = out.replace(new RegExp(`(?<!\\w)${this._escapeRegExp(v)}(?!\\w)`, 'g'), replacement);
+      } catch {
+        // Lookbehind unsupported (very old engines): bounded match fallback.
+        try {
+          out = out.replace(new RegExp(`(^|\\W)${this._escapeRegExp(v)}($|\\W)`, 'g'), (m, p1, p2) => `${p1}${replacement}${p2}`);
+        } catch { /* keep original text on regex failure */ }
+      }
+    }
+    return out;
+  }
+
   /**
    * Scrubs page-authored decorative text (input placeholders) that contains
    * PII-shaped example values (e.g. placeholder="ABCDE1234F").
@@ -38,18 +67,14 @@ export class DOMSanitizer {
    * secrets must still never reach remote models — and the server VLM
    * rejects any payload containing unmasked PAN/Aadhaar patterns.
    * Classification always runs on the RAW text first, so field identity is kept.
+   * NOTE: vault-secret scrubbing here is whole-token only so labels such
+   * as "Female" are never rewritten because of a "male" substring.
    */
   scrubPlaceholderText(text) {
     if (!text || typeof text !== 'string') return text;
     let out = text;
     for (const secret of this._vaultSecrets()) {
-      if (secret.length >= 4 && out.includes(secret)) {
-        out = out.split(secret).join('[example]');
-      }
-      const clean = secret.replace(/[\s-]/g, '');
-      if (clean.length >= 6 && clean !== secret && out.includes(clean)) {
-        out = out.split(clean).join('[example]');
-      }
+      out = this._scrubVaultToken(out, secret, '[example]');
     }
     // PII-shaped examples independent of vault contents
     // L13: PAN regex is case-insensitive
@@ -66,19 +91,12 @@ export class DOMSanitizer {
     if (!text || typeof text !== 'string') return text;
     let out = text;
     
-    // 1. Vault secrets
+    // 1. Vault secrets (whole-token only — see _scrubVaultToken: page text
+    // like "Female" must not be corrupted by a "male" substring).
     try {
       const store = this.vault || defaultLocalVault;
       for (const [key, value] of Object.entries(store.getAllSecretsForUI())) {
-        if (typeof value === 'string' && value.length >= 4) {
-          if (out.includes(value)) {
-            out = out.split(value).join(`[${key}]`);
-          }
-          const clean = value.replace(/[\s-]/g, '');
-          if (clean.length >= 6 && clean !== value && out.includes(clean)) {
-            out = out.split(clean).join(`[${key}]`);
-          }
-        }
+        out = this._scrubVaultToken(out, value, `[${key}]`);
       }
     } catch {
       // ignore vault errors

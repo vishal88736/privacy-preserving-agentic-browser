@@ -44,8 +44,31 @@ export class FormFiller {
     return { success: results.every(r => r.success), details: results };
   }
 
+  /**
+   * Normalizes vault date formats for native date inputs, which only accept
+   * YYYY-MM-DD. Vault DOBs are stored DD/MM/YYYY; assigning that string to
+   * <input type=date> is silently rejected by the browser (value stays ''),
+   * so verification would always fail without this conversion.
+   */
+  _normalizeDateForInput(el, value) {
+    try {
+      const type = String(el?.type || '').toLowerCase();
+      if (type !== 'date' || typeof value !== 'string') return value;
+      if (/^\d{4}-\d{2}-\d{2}$/.test(value.trim())) return value.trim();
+      const m = String(value).trim().match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/);
+      if (m) {
+        const dd = m[1].padStart(2, '0');
+        const mm = m[2].padStart(2, '0');
+        return `${m[3]}-${mm}-${dd}`;
+      }
+    } catch { /* fall through with original value */ }
+    return value;
+  }
+
   async _fillElement(el, fieldData) {
-    const value = fieldData.value;
+    const value = this._normalizeDateForInput(el, fieldData.value);
+    // Keep verification consistent with what was actually assigned.
+    fieldData.value = value;
 
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     await this.sleep(100);
@@ -135,7 +158,7 @@ export class FormFiller {
   }
 
   async _verifyElement(el, fieldData) {
-    const value = fieldData.value;
+    const value = this._normalizeDateForInput(el, fieldData.value);
     if (el.tagName === 'SELECT') {
       const selectedText = el.options[el.selectedIndex]?.text || '';
       return String(el.value ?? '').toLowerCase() === String(value ?? '').toLowerCase() || String(selectedText ?? '').toLowerCase().includes(String(value ?? '').toLowerCase());

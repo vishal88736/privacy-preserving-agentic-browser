@@ -22,11 +22,12 @@ test('Integration - Multi-step Aadhaar form filling scenario', async () => {
   const history = [];
 
   // Step 1: bulk form plan (FormAnalyzer now handles fused {dom} shape).
-  // Must contain all fillable fields with correct symbolic sources and
-  // require confirmation because Aadhaar/PAN are sensitive.
+  // Must contain all fillable fields with correct symbolic sources.
+  // Bulk profile fills stay confirmation-free (values never leave the
+  // device); only SUBMIT requires approval (asserted in the next step).
   const step1 = await client.planNextStep(task, fusedObservation, history);
   assert.strictEqual(step1.action.action, ActionType.FILL_FORM_PLAN);
-  assert.ok(step1.action.requires_confirmation === true, 'Sensitive bulk plan must require confirmation');
+  assert.ok(step1.action.requires_confirmation === false, 'Bulk profile fill must NOT require confirmation');
   assert.ok(step1.action.risk === RiskLevel.HIGH || step1.action.risk === RiskLevel.MEDIUM);
   const byId = new Map((step1.action.value.fields || []).map((f) => [f.field_id, f]));
   assert.strictEqual(byId.get('el_1')?.value_source, SymbolicSecretSource.LOCAL_FULL_NAME);

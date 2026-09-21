@@ -442,8 +442,16 @@
         }
 
         case 'ASK_USER': {
-          const prompt = resolvedValue || actionPayload.value || target?.prompt || 'User input required';
-          return { success: true, needs_user_input: true, prompt: String(prompt).slice(0, 500) };
+          const raw = resolvedValue ?? actionPayload.value ?? target?.prompt ?? 'User input required';
+          // Planner sends { prompt, ambiguousFields } for clarification
+          // requests; accept a plain string for backward compatibility.
+          const promptText = (raw && typeof raw === 'object' && typeof raw.prompt === 'string')
+            ? raw.prompt
+            : String(raw);
+          const fields = (raw && typeof raw === 'object' && Array.isArray(raw.ambiguousFields))
+            ? raw.ambiguousFields
+            : undefined;
+          return { success: true, needs_user_input: true, prompt: promptText.slice(0, 500), ...(fields ? { ambiguousFields: fields } : {}) };
         }
 
         case 'OPEN_TAB':
@@ -513,7 +521,18 @@
         return this._executeUpload(element, text);
       }
 
-      const valueToSet = String(text || '');
+      // Native date inputs reject non-ISO strings (value stays ''); normalize first.
+      let rawText = text;
+      try {
+        if (String(element.type || '').toLowerCase() === 'date' && typeof text === 'string') {
+          const t = text.trim();
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(t)) {
+            const m = t.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/);
+            if (m) rawText = `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+          }
+        }
+      } catch { /* use original text */ }
+      const valueToSet = String(rawText || '');
 
       element.focus();
       element.value = '';
@@ -626,8 +645,19 @@
       return { success: details.length > 0 && details.every(r => r.success), details };
     }
 
+    _normalizeDateForInput(el, value) {
+      try {
+        const type = String(el?.type || '').toLowerCase();
+        if (type !== 'date' || typeof value !== 'string') return value;
+        if (/^\d{4}-\d{2}-\d{2}$/.test(value.trim())) return value.trim();
+        const m = String(value).trim().match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/);
+        if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+      } catch { /* fall through with original value */ }
+      return value;
+    }
+
     async _fillPlanElement(el, value) {
-      const str = String(value ?? '');
+      const str = String(this._normalizeDateForInput(el, value) ?? '');
       el.scrollIntoView({ behavior: 'auto', block: 'center' });
       await this.sleep(80);
       el.focus();
@@ -670,7 +700,7 @@
     }
 
     _verifyPlanElement(el, value) {
-      const want = String(value ?? '').toLowerCase();
+      const want = String(this._normalizeDateForInput(el, value) ?? '').toLowerCase();
       const tag = String(el.tagName || '').toUpperCase();
       const type = String(el.type || '').toLowerCase();
       if (tag === 'SELECT') {

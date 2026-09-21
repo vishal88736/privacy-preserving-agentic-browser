@@ -20,6 +20,8 @@ const SEMANTIC_PATTERNS = [
   { type: 'zip_code', regex: /\b(zip|postal.?code|pincode|postcode)\b/i, weight: 1.0 },
   { type: 'country', regex: /\b(country|nation)\b/i, weight: 1.0 },
   { type: 'gender', regex: /\b(gender|sex)\b/i, weight: 1.0 },
+  { type: 'newsletter', regex: /\b(newsletter|subscribe|opt.?in|updates|promotions)\b/i, weight: 0.9 },
+  { type: 'comments', regex: /\b(comments?|remarks|notes|additional.?info|message)\b/i, weight: 0.9 },
   { type: 'pan', regex: /\b(pan|pan.?number|pan.?card|permanent.?account.?number)\b/i, weight: 1.0 },
   { type: 'aadhaar', regex: /\b(aadhaar|aadhar|uidai)\b/i, weight: 1.0 },
   { type: 'terms', regex: /\b(terms|conditions|agree|accept)\b/i, weight: 1.0 }
@@ -87,7 +89,11 @@ export class FormAnalyzer {
     forms.forEach((fields, formId) => {
       const plan = {
         form_id: formId,
-        fields: []
+        fields: [],
+        // Fields the agent classified but cannot fill from the vault
+        // (no value mapping). The planner surfaces these via ASK_USER
+        // instead of silently dropping them.
+        ambiguous: []
       };
 
       fields.forEach(field => {
@@ -96,20 +102,35 @@ export class FormAnalyzer {
         const classification = this.classifyField(field);
         if (classification) {
           const valueSource = this.mapToValueSource(classification.semantic_type);
-          
-          plan.fields.push({
-            field_id: field.id,
-            semantic_type: classification.semantic_type,
-            value_source: valueSource,
-            confidence: classification.confidence,
-            element_type: field.tag,
-            input_type: field.type,
-            options: field.options
-          });
+
+          if (valueSource) {
+            const entry = {
+              field_id: field.id,
+              semantic_type: classification.semantic_type,
+              value_source: valueSource,
+              confidence: classification.confidence,
+              element_type: field.tag,
+              input_type: field.type,
+              options: field.options
+            };
+            const part = this.addressPartFor(classification.semantic_type);
+            if (part) entry.address_part = part;
+            plan.fields.push(entry);
+          } else {
+            plan.ambiguous.push({
+              field_id: field.id,
+              semantic_type: classification.semantic_type,
+              confidence: classification.confidence,
+              element_type: field.tag,
+              input_type: field.type,
+              label: String(field.label || field.placeholder || field.name || '').slice(0, 80),
+              reason: `No saved value for "${classification.semantic_type}" — needs user clarification.`
+            });
+          }
         }
       });
 
-      if (plan.fields.length > 0) {
+      if (plan.fields.length > 0 || plan.ambiguous.length > 0) {
         plans.push(plan);
       }
     });
@@ -181,13 +202,42 @@ export class FormAnalyzer {
       'dob': SymbolicSecretSource.LOCAL_DOB,
       'password': SymbolicSecretSource.LOCAL_PASSWORD,
       'address_line1': SymbolicSecretSource.LOCAL_ADDRESS,
+      // Address sub-fields resolve from LOCAL_ADDRESS via the structured
+      // address resolver (LocalValueResolver + address_part). They must NOT
+      // fall back to LOCAL_PROFILE (a name string) — see analyzeForms.
+      'city': SymbolicSecretSource.LOCAL_ADDRESS,
+      'state': SymbolicSecretSource.LOCAL_ADDRESS,
+      'zip_code': SymbolicSecretSource.LOCAL_ADDRESS,
       'pan': SymbolicSecretSource.LOCAL_PAN,
       'aadhaar': SymbolicSecretSource.LOCAL_AADHAAR,
       'country': SymbolicSecretSource.LOCAL_COUNTRY,
       'gender': SymbolicSecretSource.LOCAL_GENDER,
-      'terms': SymbolicSecretSource.LOCAL_TERMS
+      'terms': SymbolicSecretSource.LOCAL_TERMS,
+      // Opt-in and free-text fields have no vault mapping: the planner must
+      // ask the user (ASK_USER) instead of guessing. null = needs user.
+      'newsletter': null,
+      'comments': null
     };
-    return map[semanticType?.toLowerCase()] || SymbolicSecretSource.LOCAL_PROFILE;
+    // NOTE: null is a meaningful "needs user" signal (newsletter/comments),
+    // so test key presence — ?? and || would both swallow it into
+    // LOCAL_PROFILE.
+    const key = semanticType?.toLowerCase();
+    if (key && Object.hasOwn(map, key)) return map[key];
+    return SymbolicSecretSource.LOCAL_PROFILE;
+  }
+
+  /**
+   * Address sub-field routing: city/state/zip resolve from the street
+   * address record held under LOCAL_ADDRESS. Returns the address_part the
+   * LocalValueResolver must extract, or null for non-address semantics.
+   */
+  addressPartFor(semanticType) {
+    const part = {
+      'city': 'city',
+      'state': 'state',
+      'zip_code': 'zip'
+    }[semanticType?.toLowerCase()];
+    return part || null;
   }
 }
 

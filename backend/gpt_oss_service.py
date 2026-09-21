@@ -88,13 +88,16 @@ class GPTOSSService:
         prompt = """You are PrivAgent's task interpreter.
 Analyze the user's natural language request and output a structured JSON semantic goal.
 
-Distinguish:
-- intent: primary verb (SEARCH, NAVIGATE, FILL_FORM, UPLOAD, PLAY, CLICK, EXTRACT)
-- target: what they want (type + entity + attributes)
-- constraints: cheapest, latest, first, price limits, brand, location
-- references: words like this/that/the first one/on this page
-- expected_state: what the browser should look like when fully done
-- subgoals: ordered atomic steps
+ Distinguish:
+ - intent: primary verb (SEARCH, NAVIGATE, FILL_FORM, UPLOAD, PLAY, CLICK, EXTRACT)
+ - target: what they want (type + entity + attributes)
+ - constraints: cheapest, latest, first, price limits, brand, location,
+   AND submission/scope guards: "must NOT submit the form" when the user
+   says do not submit / don't submit / stop before submitting / ask before
+   submitting, plus any section scoping ("personal information section only")
+ - references: words like this/that/the first one/on this page
+ - expected_state: what the browser should look like when fully done
+ - subgoals: ordered atomic steps
 
 Output ONLY a valid JSON object. Do NOT include markdown blocks:
 {
@@ -107,8 +110,11 @@ Output ONLY a valid JSON object. Do NOT include markdown blocks:
   "subgoals": ["search", "filter by budget", "open cheapest matching result"],
   "current_subgoal": "search",
   "confidence": 0.95
-}
-"""
+ }
+
+ For form tasks, append submission guards verbatim when the user states
+ them, e.g. "constraints": ["must NOT submit the form"].
+ """
         headers = {
             "Authorization": f"Bearer {settings.API_KEY}",
             "Content-Type": "application/json"

@@ -47,8 +47,10 @@ export class VLMClient {
 
       const data = await response.json();
       const obs = data.visual_observation || data;
-      // Mark provenance so fusion/logs never mistake remote vs local.
-      obs._source = 'remote-vlm';
+      // Provenance honesty: the server falls back to a DOM-echo heuristic
+      // when no vision model responds. Never label that "remote-vlm" —
+      // downstream fusion must know it is not visual proof.
+      obs._source = obs?.grounding_source === 'vision_model' ? 'remote-vlm' : 'remote-vlm-heuristic';
       return obs;
     } catch (err) {
       console.warn(`[VLMClient] Remote VLM request failed (${err.message}). Using local visual inference.`);

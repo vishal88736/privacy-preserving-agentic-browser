@@ -25,9 +25,11 @@ class VLMService:
             raise ValueError("Security rejection: Outgoing payload contains unmasked PAN number")
 
         heuristic = self._from_dom(sanitized_dom, metadata)
+        heuristic["grounding_source"] = "dom_heuristic"
         vision = self._try_real_vlm(sanitized_screenshot, heuristic, metadata)
         if vision:
             heuristic.update(vision)
+            heuristic["grounding_source"] = "vision_model"
         return heuristic
 
     def _try_real_vlm(self, screenshot: str, heuristic: Dict[str, Any], metadata: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -112,7 +114,9 @@ class VLMService:
                 "role": role,
                 "label": label,
                 "bbox": bbox,
-                "confidence": 0.96,
+                # DOM-echo heuristic, not a vision detection: keep confidence
+                # modest so fusion never mistakes it for visual proof.
+                "confidence": 0.6,
                 "visual_description": description
             })
 

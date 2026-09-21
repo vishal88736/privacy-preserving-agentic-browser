@@ -171,6 +171,13 @@ class SidePanelApp {
     this.debugBody = this.$('debug-body');
     // Modals
     this.confirmModal = this.$('confirmation-modal');
+    this.userInputModal = this.$('user-input-modal');
+    this.userInputPrompt = this.$('user-input-prompt-text');
+    this.userInputFieldsContainer = this.$('user-input-fields-container');
+    this.userInputSingleContainer = this.$('user-input-single-container');
+    this.userInputSingleText = this.$('user-input-single-text');
+    this.userInputSkipBtn = this.$('user-input-skip-btn');
+    this.userInputSubmitBtn = this.$('user-input-submit-btn');
     this.privacyModal = this.$('privacy-modal');
     this.vaultModal = this.$('vault-modal');
     this.settingsModal = this.$('settings-modal');
@@ -202,6 +209,9 @@ class SidePanelApp {
 
     this.$('modal-approve-btn').addEventListener('click', () => this.confirm(true));
     this.$('modal-reject-btn').addEventListener('click', () => this.confirm(false));
+
+    this.userInputSkipBtn?.addEventListener('click', () => this.skipUserInput());
+    this.userInputSubmitBtn?.addEventListener('click', () => this.submitUserInput());
 
     this.$('privacy-pill').addEventListener('click', () => this.openModal(this.privacyModal));
     this.$('close-privacy-btn').addEventListener('click', () => this.closeModal(this.privacyModal));
@@ -289,6 +299,7 @@ class SidePanelApp {
   stop() {
     this.send(MessageType.CANCEL_TASK);
     this.closeModal(this.confirmModal);
+    this.closeModal(this.userInputModal);
     this.setControls('idle');
   }
 
@@ -335,6 +346,7 @@ class SidePanelApp {
       case 'STEP_COMPLETED': if (data) this.addStep(data, 'done'); break;
       case 'STEP_FAILED': if (data) this.addStep(data, 'failed'); break;
       case 'CONFIRMATION_REQUIRED': this.showConfirmation(data); break;
+      case 'USER_INPUT_REQUIRED': this.showUserInput(data); break;
       case 'TASK_COMPLETED': this.showDone(data); break;
       case 'TASK_FAILED': this.showError(data?.error, data?.hint); break;
       case 'TASK_CANCELLED': this.showStopped(); break;
@@ -358,6 +370,8 @@ class SidePanelApp {
     if (t?.privacyMetrics) this.renderPrivacyMetrics(t.privacyMetrics);
     this.renderLLMTransparency(t);
     this.renderCurrentTask();
+    if (t?.pendingConfirmation) this.showConfirmation(t.pendingConfirmation);
+    if (t?.pendingUserInput) this.showUserInput(t.pendingUserInput);
     this.activityCount.textContent = t?.steps?.length ? `${t.steps.length} step${t.steps.length === 1 ? '' : 's'}` : '';
     if (!t || state === AgentState.IDLE) {
       this.emptyState.hidden = false;
@@ -585,6 +599,7 @@ class SidePanelApp {
 
   showConfirmation(data) {
     if (!data?.action) return;
+    this.closeModal(this.userInputModal);
     this.$('confirm-reason').textContent = data.reason || 'This action needs your approval.';
     this.$('confirm-action-verb').textContent = data.action.action || 'ACTION';
     this.$('confirm-action-target').textContent = data.action.target?.label || data.action.target?.element_id || data.action.target?.url || 'Page element';
@@ -593,9 +608,152 @@ class SidePanelApp {
     this.$('modal-approve-btn').focus();
   }
 
+  showUserInput(data) {
+    if (!data) return;
+    this.currentAskData = data;
+    this.closeModal(this.confirmModal);
+    const prompt = data.prompt || 'Please provide clarification for the agent to continue:';
+    if (this.userInputPrompt) this.userInputPrompt.textContent = prompt;
+
+    const fields = Array.isArray(data.ambiguousFields) ? data.ambiguousFields : [];
+    if (this.userInputFieldsContainer) this.userInputFieldsContainer.replaceChildren();
+
+    if (fields.length > 0) {
+      if (this.userInputSingleContainer) this.userInputSingleContainer.hidden = true;
+      if (this.userInputFieldsContainer) this.userInputFieldsContainer.hidden = false;
+
+      fields.forEach(field => {
+        const item = el('div', 'user-input-field-item');
+        const header = el('div', 'user-input-field-header');
+        const labelText = field.label || field.field_id || 'Field';
+        const label = el('span', 'user-input-field-label', labelText);
+        header.appendChild(label);
+
+        if (field.semantic_type) {
+          const badge = el('span', 'mono-token', field.semantic_type);
+          header.appendChild(badge);
+        }
+        item.appendChild(header);
+
+        // Input element
+        if (field.input_type === 'checkbox') {
+          const checkWrap = el('label', 'user-input-save-vault');
+          const input = document.createElement('input');
+          input.type = 'checkbox';
+          input.dataset.fieldId = field.field_id;
+          input.className = 'user-input-field-input-box';
+          checkWrap.appendChild(input);
+          checkWrap.appendChild(el('span', null, 'Enable / Yes'));
+          item.appendChild(checkWrap);
+        } else if (field.element_type === 'select' && Array.isArray(field.options) && field.options.length > 0) {
+          const select = document.createElement('select');
+          select.className = 'user-input-field-input user-input-field-input-box';
+          select.dataset.fieldId = field.field_id;
+          const defaultOpt = document.createElement('option');
+          defaultOpt.value = '';
+          defaultOpt.textContent = '-- Select an option --';
+          select.appendChild(defaultOpt);
+          field.options.forEach(opt => {
+            const o = document.createElement('option');
+            o.value = opt.value || opt.text;
+            o.textContent = opt.text || opt.value;
+            select.appendChild(o);
+          });
+          item.appendChild(select);
+        } else {
+          const input = document.createElement('input');
+          input.type = field.input_type || 'text';
+          input.className = 'user-input-field-input user-input-field-input-box';
+          input.placeholder = field.placeholder || `Enter ${labelText}...`;
+          input.dataset.fieldId = field.field_id;
+          item.appendChild(input);
+        }
+
+        // Vault save toggle
+        const saveWrap = el('label', 'user-input-save-vault');
+        const saveCheck = document.createElement('input');
+        saveCheck.type = 'checkbox';
+        saveCheck.className = 'user-input-save-vault-check';
+        saveCheck.dataset.fieldId = field.field_id;
+        saveCheck.dataset.semanticType = field.semantic_type || '';
+        saveCheck.checked = Boolean(field.semantic_type && !['comments', 'message', 'other'].includes(String(field.semantic_type).toLowerCase()));
+        saveWrap.appendChild(saveCheck);
+        saveWrap.appendChild(el('span', null, 'Save to Local Vault for future forms'));
+        item.appendChild(saveWrap);
+
+        this.userInputFieldsContainer.appendChild(item);
+      });
+    } else {
+      if (this.userInputFieldsContainer) this.userInputFieldsContainer.hidden = true;
+      if (this.userInputSingleContainer) {
+        this.userInputSingleContainer.hidden = false;
+        if (this.userInputSingleText) this.userInputSingleText.value = '';
+      }
+    }
+
+    this.openModal(this.userInputModal);
+    const firstInput = this.userInputModal.querySelector('input:not([type="checkbox"]), select, textarea');
+    if (firstInput) firstInput.focus();
+  }
+
+  submitUserInput() {
+    const answers = {};
+    const saveToVault = [];
+    const fields = Array.isArray(this.currentAskData?.ambiguousFields) ? this.currentAskData.ambiguousFields : [];
+
+    if (fields.length > 0) {
+      const inputs = this.userInputModal.querySelectorAll('.user-input-field-input-box');
+      inputs.forEach(inp => {
+        const fid = inp.dataset.fieldId;
+        if (!fid) return;
+        let val;
+        if (inp.type === 'checkbox') {
+          val = inp.checked ? 'yes' : 'no';
+        } else {
+          val = inp.value.trim();
+        }
+        if (val) answers[fid] = val;
+      });
+
+      const vaultChecks = this.userInputModal.querySelectorAll('.user-input-save-vault-check:checked');
+      vaultChecks.forEach(chk => {
+        const fid = chk.dataset.fieldId;
+        const sem = chk.dataset.semanticType;
+        const val = answers[fid];
+        if (val && sem) {
+          const vaultKey = `LOCAL_${sem.toUpperCase()}`;
+          saveToVault.push({ key: vaultKey, value: val });
+        }
+      });
+    } else {
+      const freeText = this.userInputSingleText?.value?.trim() || '';
+      if (freeText) {
+        answers['response'] = freeText;
+      }
+    }
+
+    this.closeModal(this.userInputModal);
+    this.send(MessageType.USER_PROVIDE_INPUT, {
+      cancelled: false,
+      answers,
+      saveToVault
+    });
+  }
+
+  skipUserInput() {
+    this.closeModal(this.userInputModal);
+    this.send(MessageType.USER_PROVIDE_INPUT, {
+      cancelled: false,
+      skipped: true,
+      answers: {},
+      saveToVault: []
+    });
+  }
+
   showDone(data) {
     this.setControls('done');
     this.closeModal(this.confirmModal);
+    this.closeModal(this.userInputModal);
     this.doneState.hidden = false;
     this.errorState.hidden = true;
     this.doneSummary.textContent = data?.result || 'Application submitted successfully.';
@@ -608,6 +766,7 @@ class SidePanelApp {
   showError(error, hint) {
     this.setControls('failed');
     this.closeModal(this.confirmModal);
+    this.closeModal(this.userInputModal);
     this.errorState.hidden = false;
     this.doneState.hidden = true;
     this.errorSummary.textContent = error || 'PrivAgent could not complete the current step.';
@@ -618,6 +777,7 @@ class SidePanelApp {
   showStopped() {
     this.setControls('idle');
     this.closeModal(this.confirmModal);
+    this.closeModal(this.userInputModal);
     this.hideStatePanels();
     this.stateText.textContent = 'Stopped';
     this.subText.textContent = 'The browser is now under your control.';
@@ -635,7 +795,7 @@ class SidePanelApp {
   // ---- vault / settings / theme ----
   openModal(m) { m.hidden = false; }
   closeModal(m) { m.hidden = true; }
-  closeAllModals() { [this.confirmModal, this.privacyModal, this.vaultModal, this.settingsModal].forEach((m) => { m.hidden = true; }); }
+  closeAllModals() { [this.confirmModal, this.userInputModal, this.privacyModal, this.vaultModal, this.settingsModal].forEach((m) => { if (m) m.hidden = true; }); }
 
   openVault() {
     this.send(MessageType.GET_VAULT, undefined, (res) => {

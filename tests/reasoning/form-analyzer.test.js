@@ -233,3 +233,30 @@ test('FormAnalyzer - analyzeForms: groups floating fields separately', () => {
   // Result could be 0 plans or floating group with 0 fields
   assert.ok(Array.isArray(plans));
 });
+
+test('FormAnalyzer - mapToValueSource: city/state/zip resolve from LOCAL_ADDRESS', () => {
+  const a = makeAnalyzer();
+  assert.equal(a.mapToValueSource('city'), SymbolicSecretSource.LOCAL_ADDRESS);
+  assert.equal(a.mapToValueSource('state'), SymbolicSecretSource.LOCAL_ADDRESS);
+  assert.equal(a.mapToValueSource('zip_code'), SymbolicSecretSource.LOCAL_ADDRESS);
+});
+
+test('FormAnalyzer - mapToValueSource: newsletter/comments return null (needs user)', () => {
+  const a = makeAnalyzer();
+  assert.equal(a.mapToValueSource('newsletter'), null);
+  assert.equal(a.mapToValueSource('comments'), null);
+});
+
+test('FormAnalyzer - analyzeForms: ambiguous fields surface instead of vanishing', () => {
+  const a = makeAnalyzer();
+  const elements = [
+    { id: 'el_city', tag: 'input', type: 'text', name: 'city', label: 'City', in_form: true, form_id: 'f1' },
+    { id: 'el_news', tag: 'input', type: 'checkbox', name: 'newsletter', label: 'Subscribe to newsletter', in_form: true, form_id: 'f1' }
+  ];
+  const plans = a.analyzeForms(elements, 'Fill this form');
+  assert.equal(plans.length, 1);
+  assert.equal(plans[0].fields[0].field_id, 'el_city');
+  assert.equal(plans[0].fields[0].address_part, 'city');
+  assert.equal(plans[0].ambiguous[0].field_id, 'el_news');
+  assert.equal(plans[0].ambiguous[0].semantic_type, 'newsletter');
+});

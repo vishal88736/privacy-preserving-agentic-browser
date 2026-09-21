@@ -6,9 +6,75 @@
 
 import { defaultLocalVault } from '../privacy/local-vault.js';
 
+// Canonical state/province names used to split a free-form address record
+// into city/state/zip parts. Matched case-insensitively; the matched
+// substring is returned as-is.
+const KNOWN_REGIONS = [
+  // Indian states & UTs
+  'Andhra Pradesh', 'Arunachal Pradesh', 'Assam', 'Bihar', 'Chhattisgarh', 'Goa',
+  'Gujarat', 'Haryana', 'Himachal Pradesh', 'Jharkhand', 'Karnataka', 'Kerala',
+  'Madhya Pradesh', 'Maharashtra', 'Manipur', 'Meghalaya', 'Mizoram', 'Nagaland',
+  'Odisha', 'Punjab', 'Rajasthan', 'Sikkim', 'Tamil Nadu', 'Telangana', 'Tripura',
+  'Uttar Pradesh', 'Uttarakhand', 'West Bengal', 'Delhi', 'Jammu and Kashmir',
+  'Ladakh', 'Puducherry', 'Chandigarh',
+  // Common US states + UK nations (profile portability)
+  'Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California', 'Colorado',
+  'Connecticut', 'Delaware', 'Florida', 'Georgia', 'Hawaii', 'Idaho', 'Illinois',
+  'Indiana', 'Iowa', 'Kansas', 'Kentucky', 'Louisiana', 'Maine', 'Maryland',
+  'Massachusetts', 'Michigan', 'Minnesota', 'Mississippi', 'Missouri', 'Montana',
+  'Nebraska', 'Nevada', 'New Hampshire', 'New Jersey', 'New Mexico', 'New York',
+  'North Carolina', 'North Dakota', 'Ohio', 'Oklahoma', 'Oregon', 'Pennsylvania',
+  'Rhode Island', 'South Carolina', 'South Dakota', 'Tennessee', 'Texas', 'Utah',
+  'Vermont', 'Virginia', 'Washington', 'Wisconsin', 'Wyoming', 'England',
+  'Scotland', 'Wales'
+];
+
 export class LocalValueResolver {
   constructor(vault = defaultLocalVault) {
     this.vault = vault;
+  }
+
+  /**
+   * Derives city/state/zip parts from a free-form address record such as
+   * "Flat 402, Green Meadows, Baner, Pune, Maharashtra - 411045".
+   * Returns whichever parts could be extracted ({city?, state?, zip?}).
+   * Never throws: unparseable input yields {} and the caller marks the
+   * field ambiguous so the planner asks the user.
+   */
+  parseAddressParts(address) {
+    const parts = {};
+    if (!address || typeof address !== 'string') return parts;
+    try {
+      const zipMatch = address.match(/\b(\d{6})\b/) || address.match(/\b(\d{5}(?:-\d{4})?)\b/);
+      if (zipMatch) parts.zip = zipMatch[1];
+      const rest = address.replace(zipMatch ? zipMatch[0] : '', ' ');
+      for (const region of KNOWN_REGIONS) {
+        const m = rest.match(new RegExp(`\\b${region.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i'));
+        if (m) { parts.state = m[0].trim(); break; }
+      }
+      const segs = rest.split(',').map((s) => s.trim()).filter(Boolean);
+      if (parts.state) {
+        const idx = segs.findIndex((s) => s.toLowerCase().includes(parts.state.toLowerCase()));
+        if (idx > 0) {
+          parts.city = segs[idx - 1].replace(/\s*-\s*$/, '').trim() || undefined;
+        } else if (segs.length >= 2 && idx === -1) {
+          // Known-region match failed to align on comma segments (e.g.
+          // "Pune Maharashtra"): fall back to the token before the state.
+          const tokens = rest.split(/\s+/).filter(Boolean);
+          const sIdx = tokens.findIndex((t) => parts.state.toLowerCase().includes(t.toLowerCase().replace(/[-,]$/, '')));
+          if (sIdx > 0) parts.city = tokens[sIdx - 1].replace(/,$/, '');
+        }
+        if (!parts.city && segs.length >= 2) {
+          parts.city = segs[segs.length - 2].replace(/\s*-\s*$/, '').trim() || undefined;
+        }
+      } else if (segs.length >= 2) {
+        parts.city = segs[segs.length - 2].trim() || undefined;
+      }
+      if (!parts.city) delete parts.city;
+      if (!parts.state) delete parts.state;
+      if (!parts.zip) delete parts.zip;
+    } catch { /* unparseable -> {} */ }
+    return parts;
   }
 
   /**
@@ -36,16 +102,34 @@ export class LocalValueResolver {
                 throw new Error(`Local credential "${field.value_source}" for field "${field.field_id}" is not configured in your Local Vault.`);
               }
               field.value = '';
-            } else {
-              if (field.semantic_type === 'first_name' && typeof resolved === 'string') {
-                field.value = resolved.split(' ')[0] || resolved;
-              } else if (field.semantic_type === 'last_name' && typeof resolved === 'string') {
-                field.value = resolved.split(' ').slice(1).join(' ') || resolved;
+            } else if (field.address_part && typeof resolved === 'string') {
+              // Structured address derivation (city/state/zip from LOCAL_ADDRESS).
+              // Check direct vault token first if saved by user (LOCAL_CITY, LOCAL_STATE, LOCAL_ZIP)
+              const directToken = {
+                city: 'LOCAL_CITY',
+                state: 'LOCAL_STATE',
+                zip: 'LOCAL_ZIP'
+              }[field.address_part];
+              const directVal = directToken ? this.vault.resolveSecret(directToken) : null;
+              const partVal = directVal || this.parseAddressParts(resolved)[field.address_part];
+              if (!partVal) {
+                field.value = '';
+                field.ambiguous = true;
+                field.ambiguity_reason = `Could not derive "${field.address_part}" from the saved address — needs user clarification.`;
               } else {
-                field.value = resolved;
+                field.value = partVal;
               }
-              console.log(`[LocalValueResolver] Resolved ${field.value_source} for ${field.field_id}: ${resolved}`);
-            }
+            } else {
+                if (field.semantic_type === 'first_name' && typeof resolved === 'string') {
+                  field.value = resolved.split(' ')[0] || resolved;
+                } else if (field.semantic_type === 'last_name' && typeof resolved === 'string') {
+                  field.value = resolved.split(' ').slice(1).join(' ') || resolved;
+                } else {
+                  field.value = resolved;
+                }
+                // Privacy: token name + field only — never the plaintext value.
+                console.log(`[LocalValueResolver] Resolved ${field.value_source} for ${field.field_id} (kept local)`);
+              }
           } catch (e) {
             console.warn(`[LocalValueResolver] Failed to resolve ${field.value_source}: ${e.message}`);
             if (STRICT_SOURCES.has(field.value_source)) {
@@ -63,7 +147,8 @@ export class LocalValueResolver {
       if (resolved === null || resolved === undefined) {
         throw new Error(`Local credential "${action.value_source}" is not configured in your Local Vault.`);
       }
-      console.log(`[LocalValueResolver] Resolved action value_source ${action.value_source}`);
+      // Privacy: token name only — never the plaintext value.
+      console.log(`[LocalValueResolver] Resolved action value_source ${action.value_source} (kept local)`);
       return resolved;
     }
     return action.value || '';

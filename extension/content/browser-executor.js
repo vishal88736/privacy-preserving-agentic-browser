@@ -117,7 +117,18 @@ export class BrowserExecutor {
 
   async _executeType(element, text) {
     if (!element) throw new Error('Type target element not found');
-    const valueToSet = String(text || '');
+    // Native date inputs reject non-ISO strings (value stays ''); normalize first.
+    let rawText = text;
+    try {
+      if (String(element.type || '').toLowerCase() === 'date' && typeof text === 'string') {
+        const t = text.trim();
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(t)) {
+          const m = t.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/);
+          if (m) rawText = `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+        }
+      }
+    } catch { /* use original text */ }
+    const valueToSet = String(rawText || '');
 
     element.focus();
     // Clear existing text

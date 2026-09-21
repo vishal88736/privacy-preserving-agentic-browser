@@ -181,3 +181,10 @@ test('DOMSanitizer - Handles elements with null attributes gracefully without to
   }, 'Must not throw TypeError: Cannot read properties of null (reading toLowerCase)');
 });
 
+
+test('DOMSanitizer - vault substrings must not corrupt labels (Female vs male)', async () => {
+  const { DOMSanitizer } = await import('../../extension/privacy/dom-sanitizer.js');
+  const sanitizer = new DOMSanitizer();
+  assert.equal(sanitizer.scrubPlaceholderText('Female'), 'Female');
+  assert.equal(sanitizer.sanitizeUserPrompt('Gender Female Other'), 'Gender Female Other');
+});

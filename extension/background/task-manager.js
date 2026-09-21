@@ -135,6 +135,7 @@ export class TaskManager {
       currentStep: 0,
       maxSteps: this.settings.maxSteps || DEFAULT_SETTINGS.maxSteps,
       pendingConfirmation: null,
+      pendingUserInput: null,
       error: null,
       hint: null,
       consecutiveFailures: 0,
@@ -203,6 +204,20 @@ export class TaskManager {
     }
   }
 
+  setPendingUserInput(inputData) {
+    if (this.currentTask) {
+      this.currentTask.state = AgentState.WAITING_FOR_USER;
+      this.currentTask.pendingUserInput = { ...inputData, timestamp: Date.now() };
+      this.persist();
+    }
+  }
+
+  clearPendingUserInput() {
+    if (this.currentTask) {
+      this.currentTask.pendingUserInput = null;
+    }
+  }
+
   completeTask(result = 'Task completed successfully') {
     if (this.currentTask) {
       this.currentTask.state = AgentState.COMPLETED;
@@ -227,6 +242,8 @@ export class TaskManager {
   cancelTask() {
     if (this.currentTask) {
       this.currentTask.state = AgentState.CANCELLED;
+      this.currentTask.pendingConfirmation = null;
+      this.currentTask.pendingUserInput = null;
       this.currentTask.endTime = Date.now();
       this.persist();
     }
@@ -243,6 +260,8 @@ export class TaskManager {
             id: t.id, prompt: t.prompt, tabId: t.tabId, state: t.state,
             currentStep: t.currentStep, maxSteps: t.maxSteps,
             result: t.result || null, error: t.error || null, hint: t.hint || null,
+            pendingConfirmation: t.pendingConfirmation || null,
+            pendingUserInput: t.pendingUserInput || null,
             privacyMetrics: t.privacyMetrics,
             lastLLMPayload: t.lastLLMPayload || null,
             steps: (t.steps || []).slice(-20)

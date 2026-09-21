@@ -212,3 +212,17 @@ test('SecretDetector - classifyElement with no argument returns non-sensitive', 
   const r = d.classifyElement();
   assert.equal(r.isSensitive, false);
 });
+
+test('SecretDetector - postal PIN/ZIP is NOT a password secret', () => {
+  const d = makeDetector();
+  const r = d.classifyElement({ label: 'PIN / ZIP', name: 'pincode', id: 'zip', type: 'text', placeholder: '411045' });
+  assert.equal(r.isSensitive, false);
+  assert.equal(r.reason, 'postal_pin_not_secret');
+});
+
+test('SecretDetector - bare security PIN is still PASSWORD', () => {
+  const d = makeDetector();
+  const r = d.classifyElement({ label: 'Enter UPI PIN', name: 'upi_pin', id: 'pin', type: 'text' });
+  assert.equal(r.isSensitive, true);
+  assert.equal(r.source, 'LOCAL_PASSWORD');
+});

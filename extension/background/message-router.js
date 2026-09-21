@@ -53,6 +53,11 @@ export function setupMessageRouter() {
         sendResponse({ success: true });
         break;
 
+      case MessageType.USER_PROVIDE_INPUT:
+        agentController.handleUserInput(payload || {});
+        sendResponse({ success: true });
+        break;
+
       case MessageType.GET_AGENT_STATUS:
         sendResponse({
           task: taskManager.getTask(),

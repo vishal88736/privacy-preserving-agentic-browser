@@ -246,7 +246,53 @@ export class GPTOSSClient {
       }
     }
 
-    const typeables = elements.filter((e) => isTypeable(e) && !typedIds.has(e.id));
+    // 2b. Ambiguous fields: surface them via ASK_USER instead of guessing.
+    // Runs after a bulk plan was executed; asks once per field (tracked in
+    // history) then lets the flow converge to DONE / SUBMIT handling.
+    if (wantsFormFill && elements.length > 0 && hasExecutedFormPlan) {
+      const askedIds = new Set();
+      taskHistory.forEach((h) => {
+        const prev = h.action?.value?.ambiguousFields;
+        if (h.action?.action === 'ASK_USER' && Array.isArray(prev)) {
+          prev.forEach((f) => { if (f?.field_id) askedIds.add(f.field_id); });
+        }
+      });
+      const pending = [];
+      for (const p of (defaultFormAnalyzer.analyzeForms(elements, task) || [])) {
+        for (const a of (p.ambiguous || [])) {
+          if (!askedIds.has(a.field_id)) pending.push(a);
+        }
+      }
+      if (pending.length) {
+        const names = pending.map((a) => a.label || a.field_id).join(', ');
+        return {
+          task_understanding: { intent: interpreted.intent, constraints: interpreted.constraints, target_entity: interpreted.target?.entity },
+          page_understanding: { page_type: obs.page?.page_type || 'unknown' },
+          thought: `[local-fallback] Requesting user clarification for: ${names}`,
+          action: {
+            action: ActionType.ASK_USER,
+            risk: RiskLevel.LOW,
+            requires_confirmation: false,
+            value: {
+              prompt: `The following fields need clarification: ${names}. Reply with the values or "skip".`,
+              ambiguousFields: pending
+            }
+          },
+          isTerminal: false
+        };
+      }
+    }
+
+    // Ambiguous-classified fields (newsletter, comments) are ASK_USER
+    // territory: never single-fill them with a guessed profile value.
+    const ambiguousIds = new Set();
+    try {
+      for (const p of (defaultFormAnalyzer.analyzeForms(elements, task) || [])) {
+        for (const am of (p.ambiguous || [])) ambiguousIds.add(am.field_id);
+      }
+    } catch { /* analyzer failure must never block planning */ }
+
+    const typeables = elements.filter((e) => isTypeable(e) && !typedIds.has(e.id) && !ambiguousIds.has(e.id));
     if (typeables.length) {
       // Prefer non-search fields for form fills; prefer search box for searches.
       const searchBoxes = typeables.filter(isSearchBox);
@@ -339,7 +385,7 @@ export class GPTOSSClient {
         return doneAction('Form submitted successfully.');
       }
       
-      const remainingTypeables = elements.filter((e) => isTypeable(e) && !isSearchBox(e) && !typedIds.has(e.id));
+      const remainingTypeables = elements.filter((e) => isTypeable(e) && !isSearchBox(e) && !typedIds.has(e.id) && !ambiguousIds.has(e.id));
       if (remainingTypeables.length === 0 || !wantsFormFill) {
         if (interpreted.constraints.includes('must NOT submit the form')) {
           return doneAction(`User asked not to submit; stopping before ${submitBtn.id}.`);
@@ -361,6 +407,7 @@ export class GPTOSSClient {
     // controls are never generic targets (they stall search/select flows).
     const genericClick = elements.find((e) => {
       if (!isClickable(e) || clickedIds.has(e.id) || isSubmitBtn(e)) return false;
+      if (wantsFormFill && ambiguousIds.has(e.id)) return false; // unasked opt-ins: never toggle blindly
       const l = labelOf(e);
       if (/cookie|privacy policy|subscribe|terms|copyright|footer/i.test(l)) return false;
       if (/previous|next|play|pause|volume|mute|replay|shuffle|mix|like|dislike|share|clip|save|miniplayer/i.test(l)) return false;
