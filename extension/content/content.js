@@ -227,6 +227,23 @@
         const context = this.getContextText(node);
         const price_value = this.parsePrice(`${label} ${context}`);
 
+        let options = undefined;
+        if (tag === 'select') {
+          options = Array.from(node.options || []).map(option => ({
+            text: String(option.text || '').trim(),
+            value: String(option.value || '').trim(),
+            selected: Boolean(option.selected)
+          }));
+        } else if (node.type === 'radio' && node.name) {
+          options = Array.from(document.querySelectorAll('input[type="radio"]'))
+            .filter(radio => radio.name === node.name && radio.form === node.form)
+            .map(radio => ({
+              text: this.getAccessibleLabel(radio),
+              value: String(radio.value || ''),
+              checked: Boolean(radio.checked)
+            }));
+        }
+
         extracted.push({
           id,
           tag,
@@ -241,12 +258,11 @@
           href: node.getAttribute('href') || '',
           disabled: Boolean(node.disabled),
           in_form: Boolean(node.form),
+          form_id: node.form?.id || null,
           checked: Boolean(node.checked),
           context,
           price_value,
-          options: tag === 'select'
-            ? Array.from(node.options || []).slice(0, 20).map((o) => String(o.text || o.value || '').trim()).filter(Boolean)
-            : undefined,
+          options,
           bbox: this.bboxOf(rect),
           is_interactive: true,
           is_visible: isVisible
@@ -692,8 +708,8 @@
           continue;
         }
         try {
-          await this._fillPlanElement(el, field.value);
-          const ok = this._verifyPlanElement(el, field.value);
+          await this._fillPlanElement(el, field.value, field);
+          const ok = this._verifyPlanElement(el, field.value, field);
           details.push({ field: field.field_id, success: ok, ...(ok ? {} : { reason: 'Verification failed: value mismatch' }) });
         } catch (e) {
           details.push({ field: field.field_id, success: false, reason: e.message });
@@ -713,7 +729,21 @@
       return value;
     }
 
-    async _fillPlanElement(el, value) {
+    _normalizeFormOption(value, semanticType = '') {
+      let normalized = String(value ?? '').trim().toLowerCase().replace(/[._-]+/g, ' ').replace(/\s+/g, ' ');
+      if (semanticType === 'country') {
+        const aliases = {
+          us: 'united states', 'u s': 'united states', usa: 'united states',
+          'u s a': 'united states', 'united states of america': 'united states',
+          in: 'india', uk: 'united kingdom', 'u k': 'united kingdom',
+          'great britain': 'united kingdom'
+        };
+        normalized = aliases[normalized] || normalized;
+      }
+      return normalized;
+    }
+
+    async _fillPlanElement(el, value, field = {}) {
       const str = String(this._normalizeDateForInput(el, value) ?? '');
       el.scrollIntoView({ behavior: 'auto', block: 'center' });
       await this.sleep(80);
@@ -721,31 +751,47 @@
       const tag = String(el.tagName || '').toUpperCase();
       const type = String(el.type || '').toLowerCase();
       if (tag === 'SELECT') {
-        const want = str.toLowerCase();
-        const opt = Array.from(el.options).find(o =>
-          String(o.value ?? '').toLowerCase() === want ||
-          String(o.text ?? '').toLowerCase().includes(want));
-        if (opt) { el.value = opt.value; el.dispatchEvent(new Event('change', { bubbles: true })); }
+        const semanticType = field.semantic_type || '';
+        const normalize = candidate => this._normalizeFormOption(candidate, semanticType);
+        const want = normalize(value);
+        const opt = Array.from(el.options || []).find(option => normalize(option.value) === want)
+          || Array.from(el.options || []).find(option => normalize(option.text) === want);
+        if (!opt) throw new Error('No select option matches the configured profile value.');
+        if (el.selectedIndex !== Array.from(el.options).indexOf(opt)) {
+          const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value')?.set;
+          if (setter) setter.call(el, opt.value);
+          else el.value = opt.value;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        }
       } else if (type === 'checkbox') {
-        const should = value === true || value === 'true' || value === 'yes';
-        if (el.checked !== should && typeof el.click === 'function') el.click();
-        else { el.checked = should; el.dispatchEvent(new Event('change', { bubbles: true })); }
+        const normalized = String(value ?? '').trim().toLowerCase();
+        let should;
+        if (value === true || value === 1 || ['true', 'yes', '1', 'checked', 'agree', 'agreed', 'accepted', 'accept'].includes(normalized)) should = true;
+        else if (value === false || value === 0 || ['false', 'no', '0', 'unchecked', 'decline', 'declined', 'not agree', ''].includes(normalized)) should = false;
+        else throw new Error('The configured checkbox value is ambiguous.');
+        if (el.checked !== should) el.click();
       } else if (type === 'radio') {
-        const want = str.toLowerCase();
-        const group = el.name ? document.querySelectorAll(`input[type="radio"][name="${el.name}"]`) : [el];
+        const want = this._normalizeFormOption(value, field.semantic_type || '');
+        const group = el.name
+          ? Array.from(document.querySelectorAll('input[type="radio"]')).filter(radio => radio.name === el.name && radio.form === el.form)
+          : [el];
+        let matched = false;
         for (const r of group) {
           let lab = '';
           if (r.id) lab = document.querySelector(`label[for="${r.id}"]`)?.innerText || '';
           if (!lab) lab = r.closest('label')?.innerText || '';
-          if (String(r.value ?? '').toLowerCase() === want || String(lab ?? '').toLowerCase().includes(want)) {
+          if (this._normalizeFormOption(r.value, field.semantic_type || '') === want || this._normalizeFormOption(lab, field.semantic_type || '') === want) {
+            matched = true;
             if (!r.checked && typeof r.click === 'function') r.click();
             break;
           }
         }
+        if (!matched) throw new Error('No radio option matches the configured profile value.');
       } else {
         try {
-          const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
-            || Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+          const proto = tag === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+          const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
           if (setter && (tag === 'INPUT' || tag === 'TEXTAREA')) setter.call(el, str);
           else el.value = str;
         } catch { el.value = str; }
@@ -756,27 +802,34 @@
       await this.sleep(40);
     }
 
-    _verifyPlanElement(el, value) {
+    _verifyPlanElement(el, value, field = {}) {
       const want = String(this._normalizeDateForInput(el, value) ?? '').toLowerCase();
       const tag = String(el.tagName || '').toUpperCase();
       const type = String(el.type || '').toLowerCase();
       if (tag === 'SELECT') {
-        const sel = el.options[el.selectedIndex]?.text || '';
-        return String(el.value ?? '').toLowerCase() === want || String(sel ?? '').toLowerCase().includes(want);
+        const expected = this._normalizeFormOption(value, field.semantic_type || '');
+        const selected = el.options[el.selectedIndex];
+        return Boolean(selected) && selected.selected === true && (
+          this._normalizeFormOption(el.value, field.semantic_type || '') === expected ||
+          this._normalizeFormOption(selected.text, field.semantic_type || '') === expected
+        );
       }
       if (type === 'checkbox') {
-        const should = value === true || value === 'true' || value === 'yes';
+        const normalized = String(value ?? '').trim().toLowerCase();
+        const should = value === true || value === 1 || ['true', 'yes', '1', 'checked', 'agree', 'agreed', 'accepted', 'accept'].includes(normalized);
         return el.checked === should;
       }
       if (type === 'radio') {
-        const group = el.name ? document.querySelectorAll(`input[type="radio"][name="${el.name}"]`) : [el];
+        const group = el.name
+          ? Array.from(document.querySelectorAll('input[type="radio"]')).filter(radio => radio.name === el.name && radio.form === el.form)
+          : [el];
+        const expected = this._normalizeFormOption(value, field.semantic_type || '');
         for (const r of group) {
-          if (r.checked) {
-            let lab = '';
-            if (r.id) lab = document.querySelector(`label[for="${r.id}"]`)?.innerText || '';
-            if (!lab) lab = r.closest('label')?.innerText || '';
-            return String(r.value ?? '').toLowerCase() === want || String(lab ?? '').toLowerCase().includes(want);
-          }
+          let lab = '';
+          if (r.id) lab = document.querySelector(`label[for="${r.id}"]`)?.innerText || '';
+          if (!lab) lab = r.closest('label')?.innerText || '';
+          const matches = this._normalizeFormOption(r.value, field.semantic_type || '') === expected || this._normalizeFormOption(lab, field.semantic_type || '') === expected;
+          if (matches) return r.checked === true;
         }
         return false;
       }

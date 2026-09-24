@@ -24,6 +24,7 @@ import { defaultScreenshotService } from '../perception/screenshot.js';
 import { defaultVLMClient } from '../perception/vlm-client.js';
 import { defaultObservationFusion } from '../perception/observation-fusion.js';
 import { defaultGPTOSSClient } from '../reasoning/gpt-oss-client.js';
+import { defaultFormPlanBuilder } from '../reasoning/form-plan-builder.js';
 import { defaultRiskGate } from '../executor/risk-gate.js';
 import { defaultActionValidator } from '../executor/action-validator.js';
 import { defaultActionExecutor } from '../executor/action-executor.js';
@@ -69,7 +70,8 @@ function containsInjection(text) {
 }
 
 export class AgentController {
-  constructor() {
+  constructor(formPlanBuilder = defaultFormPlanBuilder) {
+    this.formPlanBuilder = formPlanBuilder;
     this.activeTabId = null;
     this.isPaused = false;
     this.isCancelled = false;
@@ -441,10 +443,16 @@ export class AgentController {
       task.consecutiveFailures = 0;
     }
 
-    taskManager.updatePrivacyMetrics({ serverCallsCount: 1 });
-    const proposedAction = planResult.action;
+    if (planResult.remoteCallMade !== false) taskManager.updatePrivacyMetrics({ serverCallsCount: 1 });
+    let proposedAction = planResult.action;
 
-    if (proposedAction.action === ActionType.DONE || planResult.isTerminal) {
+    // A model's DONE is not evidence that a form is complete. Reconcile the
+    // latest local observation against configured local sources before
+    // accepting terminal output.
+    const guarded = this._guardProfileFormCompletion(task, taskIntent, planResult, sanitizedElements);
+    proposedAction = guarded.action;
+
+    if (proposedAction?.action === ActionType.DONE || planResult.isTerminal) {
       taskManager.completeTask(planResult.thought);
       this.clearOverlays(task.tabId);
       this.notify('TASK_COMPLETED', { result: planResult.thought });
@@ -591,44 +599,50 @@ export class AgentController {
         }
       }
 
-      // If user provided field answers, fill them into the page
+      // Apply user answers locally. Store field IDs and execution outcomes
+      // only; answer strings can contain personal values.
+      const resolvedFieldIds = [];
+      const answerIds = Object.keys(userInput?.answers || {});
       if (userInput?.answers && Object.keys(userInput.answers).length > 0) {
         for (const [fieldId, val] of Object.entries(userInput.answers)) {
           if (val !== undefined && val !== null && val !== '') {
             const fieldMeta = (askData.ambiguousFields || []).find(f => f.field_id === fieldId);
             try {
-              if (fieldMeta?.element_type === 'select') {
-                await defaultActionExecutor.execute(task.tabId, {
-                  action: ActionType.SELECT,
-                  target: { element_id: fieldId },
-                  value: val
-                });
-              } else if (fieldMeta?.input_type === 'checkbox') {
-                await defaultActionExecutor.execute(task.tabId, {
-                  action: (val === true || val === 'yes' || val === 'true') ? ActionType.CHECK : ActionType.UNCHECK,
-                  target: { element_id: fieldId }
-                });
+              let answerAction;
+              if (fieldMeta?.control_type === 'SELECT' || fieldMeta?.element_type === 'select') {
+                answerAction = { action: ActionType.SELECT, target: { element_id: fieldId }, value: val };
+              } else if (fieldMeta?.control_type === 'CHECKBOX' || fieldMeta?.input_type === 'checkbox') {
+                const checked = val === true || ['yes', 'true', '1', 'checked', 'agree', 'accepted'].includes(String(val).toLowerCase());
+                answerAction = { action: checked ? ActionType.CHECK : ActionType.UNCHECK, target: { element_id: fieldId } };
+              } else if (fieldMeta?.control_type === 'RADIO' || fieldMeta?.input_type === 'radio') {
+                answerAction = {
+                  action: ActionType.FILL_FORM_PLAN,
+                  value: { fields: [{ field_id: fieldId, control_type: 'RADIO', semantic_type: fieldMeta.semantic_type, value: String(val) }] }
+                };
               } else {
-                await defaultActionExecutor.execute(task.tabId, {
-                  action: ActionType.TYPE,
-                  target: { element_id: fieldId },
-                  value: String(val)
-                });
+                answerAction = { action: ActionType.TYPE, target: { element_id: fieldId }, value: String(val) };
               }
-            } catch (fillErr) {
-              console.warn(`[AgentController] Could not fill user-provided value for ${fieldId}:`, fillErr);
+              const answerResult = await defaultActionExecutor.execute(task.tabId, answerAction);
+              if (answerResult?.success) resolvedFieldIds.push(fieldId);
+            } catch {
+              console.warn('[AgentController] Could not apply a user-provided field value.');
             }
           }
         }
       }
+      const skippedFieldIds = (askData.ambiguousFields || [])
+        .map((field) => field.field_id)
+        .filter((id) => !resolvedFieldIds.includes(id));
 
       // Record step in history with user's responses
       taskManager.recordStep({
         thought: planResult.thought,
         action: proposedAction,
         result: {
-          ...execResult,
-          userInputReceived: userInput?.answers || {}
+          needs_user_input: Boolean(execResult?.needs_user_input),
+          resolvedFieldIds,
+          skippedFieldIds,
+          answeredFieldIds: answerIds.filter((id) => resolvedFieldIds.includes(id))
         },
         success: true
       });
@@ -697,6 +711,22 @@ export class AgentController {
     await this.sleep(postActionWait);
 
     return true;
+  }
+
+  _guardProfileFormCompletion(task, taskIntent, planResult, sanitizedElements) {
+    let action = planResult?.action;
+    const profileDrivenForm = /\b(saved profile|my profile|local vault|saved details|profile details)\b/i.test(String(task?.prompt || ''));
+    if ((action?.action === ActionType.DONE || planResult?.isTerminal) && taskIntent === 'FILL_FORM' && profileDrivenForm) {
+      const formDecision = this.formPlanBuilder.decide(sanitizedElements, task.prompt, task.steps);
+      if (formDecision.status === 'REMAINING' || formDecision.status === 'ASK_USER') {
+        action = formDecision.action;
+        planResult.isTerminal = false;
+        planResult.thought = formDecision.status === 'REMAINING'
+          ? 'The form still has configured profile fields to resolve.'
+          : 'The form has fields that require user input or an explicit skip decision.';
+      }
+    }
+    return { action, planResult };
   }
 
   /**

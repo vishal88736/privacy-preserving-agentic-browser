@@ -6,8 +6,12 @@ export class FormFiller {
     const fields = plan?.fields || [];
     
     for (const field of fields) {
+      if (field.status === 'UNAVAILABLE' || field.status === 'AMBIGUOUS') {
+        results.push({ field: field.field_id, success: false, status: field.status });
+        continue;
+      }
       if (field.value === undefined || field.value === null || field.value === '') {
-        results.push({ field: field.field_id, success: false, reason: `Missing value for "${field.field_id}" (${field.value_source || 'no source'}). Add it to the Local Vault.` });
+        results.push({ field: field.field_id, success: false, status: 'UNAVAILABLE' });
         continue;
       }
       
@@ -70,12 +74,17 @@ export class FormFiller {
     // Keep verification consistent with what was actually assigned.
     fieldData.value = value;
 
+    const actualControlType = this._controlType(el);
+    if (fieldData.control_type && fieldData.control_type !== actualControlType) {
+      throw new Error('The form control changed after observation. Re-observe before acting.');
+    }
+
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     await this.sleep(100);
     el.focus();
 
     if (el.tagName === 'SELECT') {
-      await this._fillSelect(el, value, fieldData.options);
+      await this._fillSelect(el, value, fieldData.options, fieldData.semantic_type);
     } else if (el.type === 'checkbox') {
       await this._fillCheckbox(el, value);
     } else if (el.type === 'radio') {
@@ -90,8 +99,13 @@ export class FormFiller {
 
   async _fillText(el, value) {
     // Framework-compatible native value setter
-    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
-                                || Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+    const win = typeof window !== 'undefined' ? window : {};
+    const proto = String(el?.tagName || '').toUpperCase() === 'TEXTAREA'
+      ? win.HTMLTextAreaElement?.prototype
+      : win.HTMLInputElement?.prototype;
+    const nativeInputValueSetter = proto
+      ? Object.getOwnPropertyDescriptor(proto, 'value')?.set
+      : null;
     
     if (nativeInputValueSetter) {
       nativeInputValueSetter.call(el, value);
@@ -103,44 +117,79 @@ export class FormFiller {
     el.dispatchEvent(new Event('change', { bubbles: true }));
   }
 
-  async _fillSelect(el, value, options = []) {
-    // Attempt to find matching option by value or text (String-safe)
-    const want = String(value ?? '').toLowerCase();
-    let matchedOption = Array.from(el.options).find(o =>
-      String(o.value ?? '').toLowerCase() === want ||
-      String(o.text ?? '').toLowerCase().includes(want)
-    );
-
-    if (matchedOption) {
-      el.value = matchedOption.value;
+  async _fillSelect(el, value, options = [], semanticType = '') {
+    const matchedOption = this._findSelectOption(el, value, semanticType);
+    if (!matchedOption) throw new Error('No select option matches the configured profile value.');
+    const expectedIndex = Array.from(el.options).indexOf(matchedOption);
+    if (el.selectedIndex !== expectedIndex) {
+      const setter = typeof window !== 'undefined'
+        ? Object.getOwnPropertyDescriptor(window.HTMLSelectElement?.prototype || {}, 'value')?.set
+        : null;
+      if (setter) setter.call(el, matchedOption.value);
+      else el.value = matchedOption.value;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
     }
   }
 
+  _normalizeOptionValue(value, semanticType = '') {
+    let normalized = String(value ?? '').trim().toLowerCase().replace(/[._-]+/g, ' ').replace(/\s+/g, ' ');
+    if (semanticType === 'country') {
+      const countryAliases = new Map([
+        ['us', 'united states'], ['u s', 'united states'], ['usa', 'united states'],
+        ['u s a', 'united states'], ['united states of america', 'united states'],
+        ['in', 'india'], ['uk', 'united kingdom'], ['u k', 'united kingdom'],
+        ['great britain', 'united kingdom']
+      ]);
+      normalized = countryAliases.get(normalized) || normalized;
+    }
+    return normalized;
+  }
+
+  _findSelectOption(el, value, semanticType = '') {
+    const target = this._normalizeOptionValue(value, '');
+    const normalize = (v) => this._normalizeOptionValue(v, semanticType);
+    const available = Array.from(el.options || []);
+    return available.find((option) => String(option.value ?? '').trim() === String(value ?? '').trim())
+      || available.find((option) => normalize(option.value) === normalize(value))
+      || available.find((option) => normalize(option.text) === normalize(value))
+      || available.find((option) => normalize(option.text).includes(normalize(value)) && target.length >= 3);
+  }
+
   async _fillCheckbox(el, value) {
-    const shouldBeChecked = value === true || value === 'true' || value === 'yes';
+    const shouldBeChecked = this._checkboxTarget(value);
     if (el.checked !== shouldBeChecked) {
       el.click();
     }
+  }
+
+  _checkboxTarget(value) {
+    if (value === true || value === 1) return true;
+    if (value === false || value === 0) return false;
+    const normalized = String(value ?? '').trim().toLowerCase();
+    if (['yes', 'true', '1', 'checked', 'agree', 'agreed', 'accepted', 'accept'].includes(normalized)) return true;
+    if (['no', 'false', '0', 'unchecked', 'decline', 'declined', 'not agree', ''].includes(normalized)) return false;
+    throw new Error('The configured checkbox value is ambiguous.');
   }
 
   async _fillRadio(el, value, options = []) {
     // Locate the specific radio button in the group that matches the value
     // el might just be one of the radios
     const groupName = el.name;
-    if (!groupName) return;
-    const want = String(value ?? '').toLowerCase();
-
-    const group = document.querySelectorAll(`input[type="radio"][name="${groupName}"]`);
+    const want = this._normalizeOptionValue(value);
+    const group = groupName
+      ? Array.from(document.querySelectorAll('input[type="radio"]')).filter((radio) => radio.name === groupName)
+      : [el];
     for (const radio of group) {
       const labelText = this._getLabelText(radio);
-      if (String(radio.value ?? '').toLowerCase() === want || String(labelText ?? '').toLowerCase().includes(want)) {
+      if (this._normalizeOptionValue(radio.value) === want || this._normalizeOptionValue(labelText) === want) {
         if (!radio.checked) {
           radio.click();
         }
         return;
       }
     }
+    throw new Error('No radio option matches the configured profile value.');
   }
 
   _getLabelText(el) {
@@ -160,18 +209,22 @@ export class FormFiller {
   async _verifyElement(el, fieldData) {
     const value = this._normalizeDateForInput(el, fieldData.value);
     if (el.tagName === 'SELECT') {
-      const selectedText = el.options[el.selectedIndex]?.text || '';
-      return String(el.value ?? '').toLowerCase() === String(value ?? '').toLowerCase() || String(selectedText ?? '').toLowerCase().includes(String(value ?? '').toLowerCase());
+      const expectedOption = this._findSelectOption(el, value, fieldData.semantic_type);
+      return Boolean(expectedOption) && el.selectedIndex === Array.from(el.options).indexOf(expectedOption) &&
+        el.options[el.selectedIndex]?.selected === true;
     } else if (el.type === 'checkbox') {
-      const shouldBeChecked = value === true || value === 'true' || value === 'yes';
+      const shouldBeChecked = this._checkboxTarget(value);
       return el.checked === shouldBeChecked;
     } else if (el.type === 'radio') {
       const groupName = el.name;
       if (!groupName) return String(el.value ?? '').toLowerCase() === String(value ?? '').toLowerCase() && el.checked === true;
-      const group = document.querySelectorAll(`input[type="radio"][name="${groupName}"]`);
+      const group = groupName
+        ? Array.from(document.querySelectorAll('input[type="radio"]')).filter((radio) => radio.name === groupName)
+        : [el];
       for (const radio of group) {
         const labelText = this._getLabelText(radio);
-        const matches = String(radio.value ?? '').toLowerCase() === String(value ?? '').toLowerCase() || String(labelText ?? '').toLowerCase().includes(String(value ?? '').toLowerCase());
+        const expected = this._normalizeOptionValue(value);
+        const matches = this._normalizeOptionValue(radio.value) === expected || this._normalizeOptionValue(labelText) === expected;
         if (matches) {
           return radio.checked === true;
         }
@@ -180,6 +233,20 @@ export class FormFiller {
     } else {
       return String(el.value ?? '').toLowerCase() === String(value ?? '').toLowerCase();
     }
+  }
+
+  _controlType(el) {
+    const tag = String(el?.tagName || '').toLowerCase();
+    const type = String(el?.type || '').toLowerCase();
+    if (tag === 'select') return 'SELECT';
+    if (tag === 'textarea') return 'TEXTAREA';
+    if (type === 'radio') return 'RADIO';
+    if (type === 'checkbox') return 'CHECKBOX';
+    if (type === 'email') return 'EMAIL';
+    if (type === 'tel') return 'PHONE';
+    if (type === 'number') return 'NUMBER';
+    if (type === 'date') return 'DATE';
+    return 'TEXT';
   }
 }
 export const formFiller = new FormFiller();

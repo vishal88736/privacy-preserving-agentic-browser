@@ -10,16 +10,20 @@ import { defaultActionParser } from './action-parser.js';
 import { localInterpretTask, parseTaskSemantics } from './task-understanding.js';
 import { defaultPromptBuilder } from './prompt-builder.js';
 import { defaultFormAnalyzer } from './form-analyzer.js';
+import { defaultFormPlanBuilder } from './form-plan-builder.js';
 
 export class GPTOSSClient {
-  constructor(baseUrl = ServerDefaults.BACKEND_BASE_URL) {
+  constructor(baseUrl = ServerDefaults.BACKEND_BASE_URL, formPlanBuilder = defaultFormPlanBuilder) {
     this.baseUrl = baseUrl;
     this.policyEngine = defaultPolicyEngine;
     this.actionParser = defaultActionParser;
+    this.formPlanBuilder = formPlanBuilder;
   }
 
   async post(endpoint, data) {
-    console.log(`[gpt-oss-client] posting to ${endpoint}:`, JSON.stringify(data).substring(0, 500));
+    // Diagnostic output may identify the route and schema keys, never the
+    // task, page text, local values, or request body.
+    console.debug(`[gpt-oss-client] POST ${endpoint}; fields=${Object.keys(data || {}).join(',')}`);
     return fetch(`${this.baseUrl}${endpoint}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -46,6 +50,60 @@ export class GPTOSSClient {
   }
 
   async planNextStep(task, fusedObservation, taskHistory = [], taskState = null, pageState = null) {
+    const interpreted = taskState || localInterpretTask(task);
+    if (String(interpreted?.intent || '').toUpperCase() === 'UPLOAD' || /\b(upload|attach)\b/i.test(String(task || ''))) {
+      return {
+        task_understanding: { intent: 'UPLOAD', constraints: interpreted.constraints || [] },
+        page_understanding: { page_type: fusedObservation?.page?.page_type || 'document_upload' },
+        thought: 'Local document selection is unsupported; the user must choose the file in the webpage.',
+        action: {
+          action: ActionType.ASK_USER,
+          risk: RiskLevel.LOW,
+          requires_confirmation: false,
+          value: { prompt: 'Choose the file directly in the webpage file picker. The extension does not read or upload local documents.' }
+        },
+        isTerminal: false,
+        remoteCallMade: false
+      };
+    }
+    const isFormTask = String(interpreted?.intent || '').toUpperCase() === 'FILL_FORM' ||
+      /\b(fill|form|application|register|sign\s*up|profile)\b/i.test(String(task || ''));
+    const profileDrivenForm = /\b(saved profile|my profile|local vault|saved details|profile details)\b/i.test(String(task || ''));
+    if (isFormTask && profileDrivenForm) {
+      const formDecision = this.formPlanBuilder.decide(
+        fusedObservation?.elements || [], task, taskHistory
+      );
+      if (formDecision.status === 'REMAINING' || formDecision.status === 'ASK_USER') {
+        return {
+          task_understanding: {
+            intent: 'FILL_FORM',
+            constraints: interpreted.constraints || [],
+            active_subgoal: 'fill form fields'
+          },
+          page_understanding: { page_type: fusedObservation?.page?.page_type || 'form' },
+          thought: formDecision.status === 'REMAINING'
+            ? 'Filling grounded form controls from local profile sources.'
+            : 'Waiting for the user to resolve fields without a clear saved value.',
+          action: formDecision.action,
+          isTerminal: false,
+          remoteCallMade: false
+        };
+      }
+
+      const noSubmit = (interpreted.constraints || []).some((constraint) => /must\s*not\s*submit/i.test(String(constraint))) ||
+        /\bdo not submit\b|\bdon't submit\b/i.test(String(task || ''));
+      if (formDecision.status === 'COMPLETE' && noSubmit) {
+        return {
+          task_understanding: { intent: 'FILL_FORM', constraints: interpreted.constraints || [] },
+          page_understanding: { page_type: fusedObservation?.page?.page_type || 'form' },
+          thought: 'All actionable profile fields are resolved; the form was left unsubmitted.',
+          action: { action: ActionType.DONE, risk: RiskLevel.LOW, requires_confirmation: false },
+          isTerminal: true,
+          remoteCallMade: false
+        };
+      }
+    }
+
     const compactObs = defaultPromptBuilder.compactObservation(fusedObservation, pageState);
     const history = (taskHistory || []).slice(-5).map((s) => ({
       thought: s.thought,
@@ -217,10 +275,10 @@ export class GPTOSSClient {
     const wantsFormFill = /fill|form|application|register|sign\s*up|aadhaar|kyc|profile/i.test(lowerTask) || interpreted.intent === 'FILL_FORM';
     
     const hasExecutedFormPlan = taskHistory.some(h => h.action?.action === 'FILL_FORM_PLAN' && h.success !== false);
-    console.log(`PrivacyAgent: wantsFormFill=${wantsFormFill}, hasExecutedFormPlan=${hasExecutedFormPlan}, elements.length=${elements.length}`);
+    console.debug(`Local fallback form check: detected=${wantsFormFill}, prior_plan=${hasExecutedFormPlan}, element_count=${elements.length}`);
     if (wantsFormFill && elements.length > 0 && !hasExecutedFormPlan) {
       const plans = defaultFormAnalyzer.analyzeForms(elements, task);
-      console.log("PrivacyAgent: analyzeForms returned", JSON.stringify(plans));
+      console.debug(`Local fallback form analysis: plan_count=${plans.length}`);
       if (plans && plans.length > 0) {
         const askFirst = interpreted.constraints.includes('must ask user before submitting');
         const plan = plans[0];

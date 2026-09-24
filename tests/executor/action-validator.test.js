@@ -56,6 +56,23 @@ test('ActionValidator - FILL_FORM_PLAN requires no target', () => {
   assert.equal(r.valid, true);
 });
 
+test('ActionValidator - bulk form targets must exist in the current observation and retain their control type', () => {
+  const v = makeValidator();
+  const obs = makeObs([{ id: 'el_country', dom: { tag: 'select', type: 'select-one', disabled: false } }]);
+  assert.equal(v.validatePreExecution({
+    action: ActionType.FILL_FORM_PLAN,
+    value: { fields: [{ field_id: 'el_stale', control_type: 'SELECT' }] }
+  }, obs).valid, false);
+  assert.equal(v.validatePreExecution({
+    action: ActionType.FILL_FORM_PLAN,
+    value: { fields: [{ field_id: 'el_country', control_type: 'TEXT' }] }
+  }, obs).valid, false);
+  assert.equal(v.validatePreExecution({
+    action: ActionType.FILL_FORM_PLAN,
+    value: { fields: [{ field_id: 'el_country', control_type: 'SELECT' }] }
+  }, obs).valid, true);
+});
+
 // ── Missing target ────────────────────────────────────────────────────────
 
 test('ActionValidator - CLICK without target is invalid', () => {

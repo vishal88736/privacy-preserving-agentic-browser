@@ -88,61 +88,63 @@ export class LocalValueResolver {
    */
   resolve(action) {
     if (action.action === 'FILL_FORM_PLAN' && action.value && action.value.fields) {
-      // Deeply resolve form fields
-      const STRICT_SOURCES = new Set([
-        'LOCAL_AADHAAR', 'LOCAL_PAN', 'LOCAL_PASSWORD', 'LOCAL_DOCUMENT',
-        'LOCAL_CREDIT_CARD', 'LOCAL_CVV'
-      ]);
-      action.value.fields.forEach(field => {
-        if (field.value_source) {
-          try {
-            const resolved = this.vault.resolveSecret(field.value_source);
-            if (resolved === null || resolved === undefined || resolved === '') {
-              const directToken = { city: 'LOCAL_CITY', state: 'LOCAL_STATE', zip: 'LOCAL_ZIP' }[field.address_part];
-              const directVal = directToken ? this.vault.resolveSecret(directToken) : null;
-              if (field.address_part && directVal) {
-                field.value = directVal;
-              } else if (STRICT_SOURCES.has(field.value_source)) {
-                throw new Error(`Local credential "${field.value_source}" for field "${field.field_id}" is not configured in your Local Vault.`);
-              } else field.value = '';
-            } else if (field.address_part && typeof resolved === 'string') {
-              // Structured address derivation (city/state/zip from LOCAL_ADDRESS).
-              // Check direct vault token first if saved by user (LOCAL_CITY, LOCAL_STATE, LOCAL_ZIP)
-              const directToken = {
-                city: 'LOCAL_CITY',
-                state: 'LOCAL_STATE',
-                zip: 'LOCAL_ZIP'
-              }[field.address_part];
-              const directVal = directToken ? this.vault.resolveSecret(directToken) : null;
-              const partVal = directVal || this.parseAddressParts(resolved)[field.address_part];
-              if (!partVal) {
-                field.value = '';
-                field.ambiguous = true;
-                field.ambiguity_reason = `Could not derive "${field.address_part}" from the saved address — needs user clarification.`;
-              } else {
-                field.value = partVal;
-              }
+      // Work on a local clone so plaintext values never get written into the
+      // action history, task status, or side-panel messages by mutation.
+      const plan = {
+        ...action.value,
+        fields: action.value.fields.map((field) => ({ ...field }))
+      };
+      plan.fields.forEach((field) => {
+        if (!field.value_source) {
+          field.status = field.value !== undefined && field.value !== '' ? 'AVAILABLE' : 'UNAVAILABLE';
+          return;
+        }
+
+        try {
+          const resolved = this.vault.resolveSecret(field.value_source);
+          if (resolved === null || resolved === undefined || resolved === '') {
+            const directToken = { city: 'LOCAL_CITY', state: 'LOCAL_STATE', zip: 'LOCAL_ZIP' }[field.address_part];
+            const directVal = directToken ? this.vault.resolveSecret(directToken) : null;
+            if (field.address_part && directVal) {
+              field.value = directVal;
+              field.status = 'AVAILABLE';
             } else {
-                if (field.semantic_type === 'first_name' && typeof resolved === 'string') {
-                  field.value = resolved.split(' ')[0] || resolved;
-                } else if (field.semantic_type === 'last_name' && typeof resolved === 'string') {
-                  field.value = resolved.split(' ').slice(1).join(' ') || resolved;
-                } else {
-                  field.value = resolved;
-                }
-                // Privacy: token name + field only — never the plaintext value.
-                console.log(`[LocalValueResolver] Resolved ${field.value_source} for ${field.field_id} (kept local)`);
-              }
-          } catch (e) {
-            console.warn(`[LocalValueResolver] Failed to resolve ${field.value_source}: ${e.message}`);
-            if (STRICT_SOURCES.has(field.value_source)) {
-              throw e;
+              field.status = 'UNAVAILABLE';
+              field.unavailable_reason = 'The mapped local profile value is not configured.';
             }
-            field.value = '';
+            return;
           }
+
+          let value = resolved;
+          if (field.address_part && typeof resolved === 'string') {
+            const directToken = {
+              city: 'LOCAL_CITY',
+              state: 'LOCAL_STATE',
+              zip: 'LOCAL_ZIP'
+            }[field.address_part];
+            value = this.vault.resolveSecret(directToken) || this.parseAddressParts(resolved)[field.address_part];
+            if (!value) {
+              field.status = 'AMBIGUOUS';
+              field.unavailable_reason = `Could not derive the ${field.address_part} from the saved address.`;
+              return;
+            }
+          }
+
+          if (field.semantic_type === 'first_name' && typeof value === 'string') {
+            value = value.split(' ')[0] || value;
+          } else if (field.semantic_type === 'last_name' && typeof value === 'string') {
+            value = value.split(' ').slice(1).join(' ') || value;
+          }
+          field.value = value;
+          field.status = 'AVAILABLE';
+        } catch {
+          // Missing local values are reported to the planner as unavailable;
+          // they are never silently sent to the page as empty strings.
+          field.status = 'UNAVAILABLE';
+          field.unavailable_reason = 'The mapped local profile value is unavailable.';
         }
       });
-      return action.value;
+      return plan;
     }
 
     if (action.value_source) {

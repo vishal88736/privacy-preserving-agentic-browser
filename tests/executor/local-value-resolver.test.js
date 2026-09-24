@@ -130,7 +130,7 @@ test('LocalValueResolver - FILL_FORM_PLAN: first_name semantic splits full name'
   assert.equal(byId.get('el_last').value, 'User');
 });
 
-test('LocalValueResolver - FILL_FORM_PLAN: strict source missing throws error', () => {
+test('LocalValueResolver - FILL_FORM_PLAN: missing strict profile source is marked unavailable', () => {
   const { resolver, vault } = makeResolver();
   delete vault.memoryStore[SymbolicSecretSource.LOCAL_PASSWORD];
   const action = {
@@ -141,10 +141,12 @@ test('LocalValueResolver - FILL_FORM_PLAN: strict source missing throws error', 
       ]
     }
   };
-  assert.throws(() => resolver.resolve(action), /not configured/);
+  const result = resolver.resolve(action);
+  assert.equal(result.fields[0].status, 'UNAVAILABLE');
+  assert.equal(result.fields[0].value, undefined);
 });
 
-test('LocalValueResolver - FILL_FORM_PLAN: non-strict missing source resolves to empty string', () => {
+test('LocalValueResolver - FILL_FORM_PLAN: missing profile source is explicitly unavailable', () => {
   const { resolver, vault } = makeResolver();
   // LOCAL_GENDER is NOT a strict source
   delete vault.memoryStore[SymbolicSecretSource.LOCAL_GENDER];
@@ -157,7 +159,8 @@ test('LocalValueResolver - FILL_FORM_PLAN: non-strict missing source resolves to
     }
   };
   const result = resolver.resolve(action);
-  assert.equal(result.fields[0].value, '');
+  assert.equal(result.fields[0].status, 'UNAVAILABLE');
+  assert.equal(result.fields[0].value, undefined);
 });
 
 test('LocalValueResolver - FILL_FORM_PLAN: fields without value_source are left unchanged', () => {
@@ -174,6 +177,7 @@ test('LocalValueResolver - FILL_FORM_PLAN: fields without value_source are left 
   const result = resolver.resolve(action);
   // Should not throw; field value unchanged
   assert.equal(result.fields[0].value, 'static_text');
+  assert.equal(action.value.fields[0].status, undefined, 'resolution must not mutate the persisted action');
 });
 
 test('LocalValueResolver - parseAddressParts derives city/state/zip', () => {
@@ -215,6 +219,7 @@ test('LocalValueResolver - unparseable address_part marks field ambiguous', () =
     }
   };
   const result = resolver.resolve(action);
-  assert.equal(result.fields[0].value, '');
-  assert.equal(result.fields[0].ambiguous, true);
+  assert.equal(result.fields[0].status, 'AMBIGUOUS');
+  assert.equal(result.fields[0].value, undefined);
+  assert.match(result.fields[0].unavailable_reason, /Could not derive/);
 });

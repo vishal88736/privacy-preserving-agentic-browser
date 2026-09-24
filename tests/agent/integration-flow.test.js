@@ -2,9 +2,27 @@ import test from 'node:test';
 import assert from 'node:assert';
 import { GPTOSSClient } from '../../extension/reasoning/gpt-oss-client.js';
 import { ActionType, RiskLevel, SymbolicSecretSource } from '../../extension/shared/constants.js';
+import { FormAnalyzer } from '../../extension/reasoning/form-analyzer.js';
+import { FormPlanBuilder } from '../../extension/reasoning/form-plan-builder.js';
+import { LocalValueResolver } from '../../extension/executor/local-value-resolver.js';
+
+function clientWithSyntheticProfile() {
+  const vault = {
+    resolveSecret(source) {
+      return {
+        LOCAL_FULL_NAME: 'Synthetic Integration User',
+        LOCAL_AADHAAR: 'SYNTHETIC_AADHAAR_FIXTURE',
+        LOCAL_PAN: 'SYNTHETIC_PAN_FIXTURE',
+        LOCAL_DOB: '01/01/1990',
+        LOCAL_PHONE: '9000000000'
+      }[source] || null;
+    }
+  };
+  return new GPTOSSClient('http://127.0.0.1:9999', new FormPlanBuilder(new FormAnalyzer(), new LocalValueResolver(vault)));
+}
 
 test('Integration - Multi-step Aadhaar form filling scenario', async () => {
-  const client = new GPTOSSClient('http://127.0.0.1:9999');
+  const client = clientWithSyntheticProfile();
 
   // Step 1: Provide observation with Aadhaar, PAN, Name, DOB, Phone and Submit button
   const fusedObservation = {
@@ -12,8 +30,8 @@ test('Integration - Multi-step Aadhaar form filling scenario', async () => {
       { id: 'el_1', dom: { tag: 'input', name: 'full_name', label: 'Full Name', sensitive: false } },
       { id: 'el_2', dom: { tag: 'input', name: 'aadhaar_number', label: 'Aadhaar Number', sensitive: true, value_source: SymbolicSecretSource.LOCAL_AADHAAR } },
       { id: 'el_3', dom: { tag: 'input', name: 'pan_number', label: 'PAN Card', sensitive: true, value_source: SymbolicSecretSource.LOCAL_PAN } },
-      { id: 'el_4', dom: { tag: 'input', name: 'dob', label: 'Date of Birth', sensitive: false } },
-      { id: 'el_5', dom: { tag: 'input', name: 'phone', label: 'Registered Mobile', sensitive: false } },
+      { id: 'el_4', dom: { tag: 'input', type: 'date', name: 'dob', label: 'Date of Birth', sensitive: false } },
+      { id: 'el_5', dom: { tag: 'input', type: 'tel', name: 'phone', label: 'Registered Mobile', sensitive: false } },
       { id: 'el_6', dom: { tag: 'button', type: 'submit', label: 'Submit Application' } }
     ]
   };
@@ -33,10 +51,26 @@ test('Integration - Multi-step Aadhaar form filling scenario', async () => {
   assert.strictEqual(byId.get('el_1')?.value_source, SymbolicSecretSource.LOCAL_FULL_NAME);
   assert.strictEqual(byId.get('el_2')?.value_source, SymbolicSecretSource.LOCAL_AADHAAR);
   assert.strictEqual(byId.get('el_3')?.value_source, SymbolicSecretSource.LOCAL_PAN);
-  history.push({ step: 1, action: step1.action, success: true });
+  history.push({
+    step: 1,
+    action: step1.action,
+    success: true,
+    result: { details: step1.action.value.fields.map((field) => ({ field: field.field_id, success: true })) }
+  });
+
+  const afterFill = {
+    ...fusedObservation,
+    elements: fusedObservation.elements.map((el) => ({
+      ...el,
+      dom: {
+        ...el.dom,
+        value: ['el_1', 'el_2', 'el_3', 'el_4', 'el_5'].includes(el.id) ? '[REDACTED]' : el.dom.value
+      }
+    }))
+  };
 
   // After the bulk plan is executed, the next step must be Submit with confirmation
-  const submitStep = await client.planNextStep(task, fusedObservation, history);
+  const submitStep = await client.planNextStep(task, afterFill, history);
   assert.strictEqual(submitStep.action.action, ActionType.SUBMIT);
   assert.strictEqual(submitStep.action.target.element_id, 'el_6');
   assert.strictEqual(submitStep.action.risk, RiskLevel.HIGH);

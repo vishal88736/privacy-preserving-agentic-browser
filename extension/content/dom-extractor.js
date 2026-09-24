@@ -211,14 +211,17 @@ export class DOMExtractor {
       if (tag === 'select') {
         options = Array.from(node.options || []).map(o => ({
           text: String(o.text || '').trim(),
-          value: String(o.value || '').trim()
+          value: String(o.value || '').trim(),
+          selected: Boolean(o.selected)
         }));
       } else if (node.type === 'radio' && node.name) {
         // Find other radios in the same group to build options
-        const group = Array.from(document.querySelectorAll(`input[type="radio"][name="${node.name}"]`));
+        const group = Array.from(document.querySelectorAll('input[type="radio"]'))
+          .filter(r => r.name === node.name);
         options = group.map(r => ({
           text: this.getAccessibleLabel(r),
-          value: r.value || ''
+          value: r.value || '',
+          checked: Boolean(r.checked)
         }));
       }
 

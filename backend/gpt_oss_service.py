@@ -1,8 +1,24 @@
 import json
+import logging
 import re
 from typing import Dict, Any, List, Optional
 import requests
 from config import settings
+
+logger = logging.getLogger(__name__)
+_SAFE_ACTION_TYPES = {
+    "CLICK", "TYPE", "SELECT", "SUBMIT", "UPLOAD", "NAVIGATE", "SCROLL",
+    "WAIT", "DONE", "ASK_USER", "PRESS_KEY", "GO_BACK", "GO_FORWARD",
+    "EXTRACT", "OPEN_TAB", "SWITCH_TAB"
+}
+
+
+def _log_safe_plan_shape(parsed: dict) -> None:
+    action = parsed.get("action") if isinstance(parsed, dict) else None
+    action_type = action.get("action") if isinstance(action, dict) else None
+    if action_type not in _SAFE_ACTION_TYPES:
+        action_type = "OTHER"
+    logger.info("plan_step: action_type=%s", action_type)
 
 
 def _extract_json(content: str) -> dict:
@@ -40,11 +56,13 @@ def _allowed_ids(fused_observation: Dict[str, Any], page_state: Optional[Dict[st
 def _repair_action(parsed: dict, allowed: set, page_state: Optional[Dict[str, Any]]) -> dict:
     act = parsed.get("action") or {}
     if not isinstance(act, dict):
-        print(f"returning {parsed}"); return parsed
+        _log_safe_plan_shape(parsed)
+        return parsed
     target = act.get("target") or {}
     eid = target.get("element_id") if isinstance(target, dict) else None
     if act.get("action") in ("DONE", "WAIT", "NAVIGATE", "SCROLL", "GO_BACK", "GO_FORWARD", "EXTRACT", "PRESS_KEY", "OPEN_TAB", "SWITCH_TAB", "ASK_USER"):
-        print(f"returning {parsed}"); return parsed
+        _log_safe_plan_shape(parsed)
+        return parsed
     if eid and allowed and eid not in allowed:
         refs = (page_state or {}).get("resolved_references") or {}
         fallback = (
@@ -66,7 +84,8 @@ def _repair_action(parsed: dict, allowed: set, page_state: Optional[Dict[str, An
             parsed["thought"] = (
                 parsed.get("thought") or ""
             ) + f" [grounding-repair: {eid} is not on the page; waiting to re-observe]"
-    print(f"returning {parsed}"); return parsed
+    _log_safe_plan_shape(parsed)
+    return parsed
 
 
 class GPTOSSService:
@@ -135,7 +154,7 @@ Output ONLY a valid JSON object. Do NOT include markdown blocks:
                 return _extract_json(content)
             raise Exception(f"Model error: {resp.status_code}")
         except Exception as e:
-            print(f"[GPTOSS] Interpretation error: {e}")
+            logger.warning("Task interpretation failed (%s).", type(e).__name__)
             return {
                 "intent": "unknown",
                 "target": None,
@@ -259,12 +278,12 @@ CRITICAL RULES:
                         if act["value_source"] not in valid_sources:
                             act["value_source"] = None
                     parsed = _repair_action(parsed, allowed, page_state)
-                    print(f"returning {parsed}"); return parsed
+                    return parsed
                 raise Exception("Model returned invalid schema")
-            raise Exception(f"Model API error: {resp.status_code} {resp.text}")
+            raise Exception(f"Model API error: {resp.status_code}")
 
         except Exception as e:
-            print(f"[GPTOSS] Error in semantic reasoning: {e}")
+            logger.warning("Semantic reasoning failed (%s).", type(e).__name__)
             raise e
 
 gpt_oss_service = GPTOSSService()

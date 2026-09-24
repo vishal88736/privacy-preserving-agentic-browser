@@ -22,6 +22,7 @@ const SEMANTIC_PATTERNS = [
   { type: 'gender', regex: /\b(gender|sex)\b/i, weight: 1.0 },
   { type: 'newsletter', regex: /\b(newsletter|subscribe|opt.?in|updates|promotions)\b/i, weight: 0.9 },
   { type: 'comments', regex: /\b(comments?|remarks|notes|additional.?info|message)\b/i, weight: 0.9 },
+  { type: 'other', regex: /\b(other|custom\s+preference)\b/i, weight: 0.8 },
   { type: 'pan', regex: /\b(pan|pan.?number|pan.?card|permanent.?account.?number)\b/i, weight: 1.0 },
   { type: 'aadhaar', regex: /\b(aadhaar|aadhar|uidai)\b/i, weight: 1.0 },
   { type: 'terms', regex: /\b(terms|conditions|agree|accept)\b/i, weight: 1.0 }
@@ -60,6 +61,7 @@ export class FormAnalyzer {
       options: el.options || dom.options,
       semantic_type: el.semantic_type || dom.semantic_type || '',
       value: el.value !== undefined ? el.value : dom.value,
+      checked: el.checked !== undefined ? el.checked : dom.checked,
       _raw: el
     };
   }
@@ -96,21 +98,34 @@ export class FormAnalyzer {
         ambiguous: []
       };
 
+      const radioGroups = new Set();
+
       fields.forEach(field => {
         if (!this.isFillable(field)) return;
 
         const classification = this.classifyField(field);
         if (classification) {
+          const controlType = this.controlType(field);
+          const radioKey = controlType === 'RADIO' ? `${formId}:${field.name || field.id}` : null;
+          // A radio group is one semantic field. Its options carry the full
+          // group state, so planning each radio independently can duplicate
+          // contradictory work.
+          if (radioKey && radioGroups.has(radioKey)) return;
+          if (radioKey) radioGroups.add(radioKey);
           const valueSource = this.mapToValueSource(classification.semantic_type);
 
           if (valueSource) {
             const entry = {
               field_id: field.id,
               semantic_type: classification.semantic_type,
+              label: String(field.label || field.placeholder || field.name || classification.semantic_type).slice(0, 80),
+              control_type: controlType,
               value_source: valueSource,
               confidence: classification.confidence,
               element_type: field.tag,
               input_type: field.type,
+              current_state: this.currentState(field, controlType),
+              target_state: valueSource,
               options: field.options
             };
             const part = this.addressPartFor(classification.semantic_type);
@@ -120,9 +135,12 @@ export class FormAnalyzer {
             plan.ambiguous.push({
               field_id: field.id,
               semantic_type: classification.semantic_type,
+              control_type: controlType,
               confidence: classification.confidence,
               element_type: field.tag,
               input_type: field.type,
+              current_state: this.currentState(field, controlType),
+              options: field.options,
               label: String(field.label || field.placeholder || field.name || '').slice(0, 80),
               reason: `No saved value for "${classification.semantic_type}" — needs user clarification.`
             });
@@ -139,7 +157,7 @@ export class FormAnalyzer {
   }
 
   isFillable(field) {
-    const f = field && field._raw ? field : this._norm(field);
+    const f = this._norm(field);
     if (f.disabled) return false;
     const tag = String(f.tag || '').toLowerCase();
     const type = String(f.type || '').toLowerCase();
@@ -149,7 +167,7 @@ export class FormAnalyzer {
   }
 
   classifyField(field) {
-    const f = field && field._raw ? field : this._norm(field);
+    const f = this._norm(field);
     const evidence = [
       f.label,
       f.name,
@@ -216,7 +234,8 @@ export class FormAnalyzer {
       // Opt-in and free-text fields have no vault mapping: the planner must
       // ask the user (ASK_USER) instead of guessing. null = needs user.
       'newsletter': null,
-      'comments': null
+      'comments': null,
+      'other': null
     };
     // NOTE: null is a meaningful "needs user" signal (newsletter/comments),
     // so test key presence — ?? and || would both swallow it into
@@ -238,6 +257,32 @@ export class FormAnalyzer {
       'zip_code': 'zip'
     }[semanticType?.toLowerCase()];
     return part || null;
+  }
+
+  controlType(field) {
+    const f = this._norm(field);
+    const tag = String(f.tag || '').toLowerCase();
+    const type = String(f.type || '').toLowerCase();
+    if (tag === 'select') return 'SELECT';
+    if (tag === 'textarea') return 'TEXTAREA';
+    if (type === 'radio') return 'RADIO';
+    if (type === 'checkbox') return 'CHECKBOX';
+    if (type === 'email') return 'EMAIL';
+    if (type === 'tel') return 'PHONE';
+    if (type === 'number') return 'NUMBER';
+    if (type === 'date') return 'DATE';
+    return 'TEXT';
+  }
+
+  currentState(field, controlType = this.controlType(field)) {
+    const f = this._norm(field);
+    if (controlType === 'CHECKBOX') return f.checked ? 'CHECKED' : 'UNCHECKED';
+    if (controlType === 'RADIO') {
+      return (f.checked || (f.options || []).some((option) => option?.checked)) ? 'SELECTED' : 'UNSELECTED';
+    }
+    if (controlType === 'SELECT') return f.value ? 'SELECTED' : 'UNSELECTED';
+    const value = String(f.value ?? '').trim();
+    return value && value !== '[REDACTED]' && value !== '[NON_SENSITIVE_TEXT]' ? 'FILLED' : 'EMPTY';
   }
 }
 

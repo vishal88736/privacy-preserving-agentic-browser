@@ -34,6 +34,33 @@ export class ActionValidator {
     const availableElements = fusedObservation.elements || [];
     const formState = fusedObservation.form_state || { completion: { empty: 0 } };
 
+    if (action.action === ActionType.FILL_FORM_PLAN) {
+      const seen = new Set();
+      for (const field of action.value?.fields || []) {
+        const id = field?.field_id;
+        if (!id || seen.has(id)) {
+          return { valid: false, reason: 'Form plan contains a missing or duplicate field target.' };
+        }
+        seen.add(id);
+        const match = availableElements.find((element) => element.id === id);
+        if (!match) return { valid: false, reason: `Form field "${id}" is no longer present in the current observation.` };
+        if (match.dom?.disabled) return { valid: false, reason: `Form field "${id}" is disabled.` };
+        const domTag = String(match.dom?.tag || '').toLowerCase();
+        const domType = String(match.dom?.type || '').toLowerCase();
+        const expectedControl = domTag === 'select' ? 'SELECT'
+          : domTag === 'textarea' ? 'TEXTAREA'
+            : domType === 'radio' ? 'RADIO'
+              : domType === 'checkbox' ? 'CHECKBOX'
+                : domType === 'email' ? 'EMAIL'
+                  : domType === 'tel' ? 'PHONE'
+                    : domType === 'number' ? 'NUMBER'
+                      : domType === 'date' ? 'DATE' : 'TEXT';
+        if (field.control_type && field.control_type !== expectedControl) {
+          return { valid: false, reason: `Form field "${id}" changed control type after planning.` };
+        }
+      }
+    }
+
     // L4: Skip all target validation for actions that don't need targets
     if (TARGET_OPTIONAL_ACTIONS.has(action.action)) {
       return { valid: true };

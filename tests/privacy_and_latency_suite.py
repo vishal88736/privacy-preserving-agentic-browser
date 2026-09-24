@@ -127,10 +127,10 @@ def run_privacy_and_latency_audit():
         val_name = page.input_value("#full_name")
         val_aadhaar = page.input_value("#aadhaar_num")
         val_pan = page.input_value("#pan_num")
-        print(f"\n[Page Verification] Values injected into page DOM:")
-        print(f"  Full Name:      '{val_name}'")
-        print(f"  Aadhaar Number: '{val_aadhaar}'")
-        print(f"  PAN Number:     '{val_pan}'")
+        print("\n[Page Verification] Synthetic local profile values present:")
+        print(f"  Full name configured: {bool(val_name)}")
+        print(f"  Aadhaar configured:   {bool(val_aadhaar)}")
+        print(f"  PAN configured:       {bool(val_pan)}")
 
         context.close()
 
@@ -149,7 +149,7 @@ def run_privacy_and_latency_audit():
         # Assert zero plain secrets in request payload
         for secret in SENSITIVE_TEST_VALUES:
             if secret in body:
-                violations.append(f"LEAK DETECTED: Secret '{secret}' found in request to {url}!")
+                violations.append(f"Synthetic privacy sentinel matched in request to {url}!")
 
         # Verify screenshot is masked in /vision payload
         if "/vision" in url:
@@ -159,7 +159,7 @@ def run_privacy_and_latency_audit():
         # Verify reasoning payload uses symbolic references
         if "/reason" in url:
             # Check for symbolic tokens
-            has_symbolic = any(tok in body for tok in ["LOCAL_AADHAAR", "LOCAL_PAN", "LOCAL_FULL_NAME", "LOCAL_PASSWORD", "LOCAL_DOCUMENT"])
+            has_symbolic = any(tok in body for tok in ["LOCAL_AADHAAR", "LOCAL_PAN", "LOCAL_FULL_NAME", "LOCAL_PASSWORD"])
             if has_symbolic:
                 print("    ✔ Found symbolic vault reference in /reason payload (zero plaintext secrets)")
 

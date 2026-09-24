@@ -170,6 +170,13 @@ test('FormAnalyzer - mapToValueSource: first_name and last_name → LOCAL_FULL_N
   assert.equal(a.mapToValueSource('last_name'), SymbolicSecretSource.LOCAL_FULL_NAME);
 });
 
+test('FormAnalyzer - country, gender, and terms map to their local profile sources', () => {
+  const a = makeAnalyzer();
+  assert.equal(a.mapToValueSource('country'), SymbolicSecretSource.LOCAL_COUNTRY);
+  assert.equal(a.mapToValueSource('gender'), SymbolicSecretSource.LOCAL_GENDER);
+  assert.equal(a.mapToValueSource('terms'), SymbolicSecretSource.LOCAL_TERMS);
+});
+
 test('FormAnalyzer - mapToValueSource: unknown type → LOCAL_PROFILE fallback', () => {
   const a = makeAnalyzer();
   assert.equal(a.mapToValueSource('unknown_xyz'), SymbolicSecretSource.LOCAL_PROFILE);
@@ -245,6 +252,7 @@ test('FormAnalyzer - mapToValueSource: newsletter/comments return null (needs us
   const a = makeAnalyzer();
   assert.equal(a.mapToValueSource('newsletter'), null);
   assert.equal(a.mapToValueSource('comments'), null);
+  assert.equal(a.mapToValueSource('other'), null);
 });
 
 test('FormAnalyzer - analyzeForms: ambiguous fields surface instead of vanishing', () => {
