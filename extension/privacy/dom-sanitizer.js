@@ -80,6 +80,8 @@ export class DOMSanitizer {
     // L13: PAN regex is case-insensitive
     out = out.replace(/\b[A-Z]{5}[0-9]{4}[A-Z]{1}\b/gi, '[example]');
     out = out.replace(/\b[2-9]\d{3}[\s-]?\d{4}[\s-]?\d{4}\b/g, '[example]');
+    out = out.replace(/(?<!\d)(?:(?:\+|0{0,2})91[\s-]?)?[6-9]\d{9}(?!\d)/g, '[example]');
+    out = out.replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, '[example]');
     return out;
   }
 
@@ -113,6 +115,14 @@ export class DOMSanitizer {
     // Scrub IFSC codes (bank branch identifiers) so the outbound policy
     // engine never blocks benign banking pages.
     out = out.replace(/\b[A-Z]{4}0[A-Z0-9]{6}\b/g, `[${SymbolicSecretSource.LOCAL_PROFILE}]`);
+
+    // Common textual credential/identifier formats beyond the field-level
+    // detector. These are pattern coverage, not a claim to detect arbitrary
+    // private language or every national identifier.
+    out = out.replace(/\b(?:0[1-9]|[12][0-9]|3[01])[-/.](?:0[1-9]|1[012])[-/.](?:19|20)\d{2}\b/g, '[REDACTED_DOB]');
+    out = out.replace(/\b(?:sk|pk|api)[-_][A-Za-z0-9_-]{16,}\b/gi, '[REDACTED_API_KEY]');
+    out = out.replace(/\bBearer\s+[A-Za-z0-9._~+/-]{12,}={0,2}/gi, 'Bearer [REDACTED_TOKEN]');
+    out = out.replace(/\b(?:account|acct|bank\s*account)(?:\s*(?:number|no\.?|#))?\s*[:#-]?\s*[A-Z0-9 -]{6,24}\b/gi, '[REDACTED_ACCOUNT]');
 
     // Scrub Indian phone numbers only when they look like standalone phone
     // numbers (not timestamps/order IDs). Require a word boundary on both
@@ -207,7 +217,7 @@ export class DOMSanitizer {
       ...it,
       title: this.sanitizeUserPrompt(it.title || ''),
       text: this.sanitizeUserPrompt(String(it.text || '').slice(0, 360)),
-      price_text: it.price_text || null,
+      price_text: this.sanitizeUserPrompt(it.price_text || '') || null,
       price_value: it.price_value ?? null
     }));
   }
@@ -222,6 +232,27 @@ export class DOMSanitizer {
       result_items: this.sanitizeResultItems(rawDOM.result_items || []),
       scroll: rawDOM.scroll || null
     };
+  }
+
+  /**
+   * Returns true when known sensitive text has no reliable on-screen box.
+   * In that case callers must omit the original screenshot entirely.
+   */
+  hasUnlocatedSensitiveText(rawDOM = {}) {
+    const patterns = [
+      /\b[2-9]\d{3}[\s-]?\d{4}[\s-]?\d{4}\b/i,
+      /\b[A-Z]{5}\d{4}[A-Z]\b/i,
+      /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i,
+      /(?<!\d)(?:(?:\+|0{0,2})91[\s-]?)?[6-9]\d{9}(?!\d)/,
+      /\b(?:0[1-9]|[12]\d|3[01])[-/.](?:0[1-9]|1[0-2])[-/.](?:19|20)\d{2}\b/,
+      /\b(?:password|passcode|one.time.code|otp|account number|bank account|api key|access token)\s*[:#-]\s*\S+/i
+    ];
+    const texts = [rawDOM.visible_text, ...(rawDOM.headings || []).map((h) => h.text), ...(rawDOM.result_items || []).map((i) => i.text || i.title)];
+    // These text aggregates do not carry reliable pixel boxes. Even if some
+    // originating nodes had geometry, the screenshot redactor only receives
+    // interactive-element boxes, so any recognized match requires withholding
+    // the full image.
+    return texts.some((value) => typeof value === 'string' && patterns.some((pattern) => pattern.test(value)));
   }
 
   /**

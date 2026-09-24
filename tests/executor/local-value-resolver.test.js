@@ -13,8 +13,13 @@ import { ActionType, SymbolicSecretSource } from '../../extension/shared/constan
 
 function makeResolver(overrides = {}) {
   const vault = new LocalVault();
-  // Apply any overrides to the vault's memoryStore for test isolation
-  Object.assign(vault.memoryStore, overrides);
+  // Explicitly labeled synthetic fixtures keep tests independent of any
+  // production defaults (the real vault starts empty).
+  Object.assign(vault.memoryStore, {
+    LOCAL_AADHAAR: 'SYNTHETIC_AADHAAR_FIXTURE', LOCAL_PAN: 'SYNTHETIC_PAN_FIXTURE',
+    LOCAL_EMAIL: 'synthetic@example.invalid', LOCAL_FULL_NAME: 'Synthetic User',
+    LOCAL_ADDRESS: 'Synthetic Road, Example City, Example State - 000000'
+  }, overrides);
   return { resolver: new LocalValueResolver(vault), vault };
 }
 
@@ -40,7 +45,7 @@ test('LocalValueResolver - resolves LOCAL_AADHAAR from vault', () => {
     action: ActionType.TYPE,
     value_source: SymbolicSecretSource.LOCAL_AADHAAR
   });
-  assert.equal(result, '4821 7392 0184');
+  assert.equal(result, 'SYNTHETIC_AADHAAR_FIXTURE');
 });
 
 test('LocalValueResolver - resolves LOCAL_PAN from vault', () => {
@@ -49,7 +54,7 @@ test('LocalValueResolver - resolves LOCAL_PAN from vault', () => {
     action: ActionType.TYPE,
     value_source: SymbolicSecretSource.LOCAL_PAN
   });
-  assert.equal(result, 'ABCDE1234F');
+  assert.equal(result, 'SYNTHETIC_PAN_FIXTURE');
 });
 
 test('LocalValueResolver - resolves LOCAL_EMAIL from vault', () => {
@@ -58,17 +63,15 @@ test('LocalValueResolver - resolves LOCAL_EMAIL from vault', () => {
     action: ActionType.TYPE,
     value_source: SymbolicSecretSource.LOCAL_EMAIL
   });
-  assert.equal(result, 'vishal.agrawal@example.com');
+  assert.equal(result, 'synthetic@example.invalid');
 });
 
-test('LocalValueResolver - resolves LOCAL_DOCUMENT (object) from vault', () => {
+test('LocalValueResolver - rejects unsupported LOCAL_DOCUMENT handling', () => {
   const { resolver } = makeResolver();
-  const result = resolver.resolve({
+  assert.throws(() => resolver.resolve({
     action: ActionType.UPLOAD,
     value_source: SymbolicSecretSource.LOCAL_DOCUMENT
-  });
-  assert.ok(typeof result === 'object', 'Document should resolve to object');
-  assert.ok(result.name, 'Document object must have a name');
+  }), /not configured/);
 });
 
 test('LocalValueResolver - throws for missing strict source (LOCAL_AADHAAR not configured)', () => {
@@ -105,9 +108,9 @@ test('LocalValueResolver - bulk resolves FILL_FORM_PLAN fields with symbolic sou
   };
   const result = resolver.resolve(action);
   const byId = new Map(result.fields.map(f => [f.field_id, f]));
-  assert.equal(byId.get('el_name').value, 'Vishal Agrawal');
-  assert.equal(byId.get('el_email').value, 'vishal.agrawal@example.com');
-  assert.equal(byId.get('el_pan').value, 'ABCDE1234F');
+  assert.equal(byId.get('el_name').value, 'Synthetic User');
+  assert.equal(byId.get('el_email').value, 'synthetic@example.invalid');
+  assert.equal(byId.get('el_pan').value, 'SYNTHETIC_PAN_FIXTURE');
 });
 
 test('LocalValueResolver - FILL_FORM_PLAN: first_name semantic splits full name', () => {
@@ -123,8 +126,8 @@ test('LocalValueResolver - FILL_FORM_PLAN: first_name semantic splits full name'
   };
   const result = resolver.resolve(action);
   const byId = new Map(result.fields.map(f => [f.field_id, f]));
-  assert.equal(byId.get('el_first').value, 'Vishal');
-  assert.equal(byId.get('el_last').value, 'Agrawal');
+  assert.equal(byId.get('el_first').value, 'Synthetic');
+  assert.equal(byId.get('el_last').value, 'User');
 });
 
 test('LocalValueResolver - FILL_FORM_PLAN: strict source missing throws error', () => {

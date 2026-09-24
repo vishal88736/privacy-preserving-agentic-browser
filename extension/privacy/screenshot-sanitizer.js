@@ -17,44 +17,37 @@ export class ScreenshotSanitizer {
    * @param {{ width: number, height: number }} viewport - Viewport dimensions
    * @returns {Promise<string>} Redacted screenshot as base64 data URL
    */
-  async redactScreenshot(screenshotDataUrl, elements, viewport) {
-    if (!screenshotDataUrl || !Array.isArray(elements) || elements.length === 0) {
-      return screenshotDataUrl;
-    }
-
-    const sensitiveElements = elements.filter(el => el.sensitive && el.bbox && el.bbox.length === 4);
-    if (sensitiveElements.length === 0) {
-      return screenshotDataUrl;
-    }
-
-    // Fail closed: if redaction is impossible, never return the unredacted
-    // image. Return a neutral placeholder so the VLM still receives layout
-    // signal without any sensitive pixels.
-    const failClosedPlaceholder = async () => {
+  async redactScreenshot(screenshotDataUrl, elements, viewport, privacyAudit = {}) {
+    const failClosedPlaceholder = async (maskedCount = 0) => {
       try {
         const w = 640; const h = 360;
         if (typeof OffscreenCanvas !== 'undefined') {
           const c = new OffscreenCanvas(w, h);
           const ctx = c.getContext('2d');
           ctx.fillStyle = '#111827'; ctx.fillRect(0, 0, w, h);
-          ctx.fillStyle = '#ffffff'; ctx.font = 'bold 20px sans-serif';
-          ctx.fillText(`Privacy-redacted layout (${sensitiveElements.length} masked regions)`, 20, h / 2);
-          if (c.convertToBlob) {
-            const blob = await c.convertToBlob({ type: 'image/webp', quality: 0.8 });
-            return await this._blobToDataURL(blob);
-          }
-        } else if (typeof document !== 'undefined' && document.createElement) {
-          const c = document.createElement('canvas');
-          c.width = 640; c.height = 360;
-          const ctx = c.getContext('2d');
-          ctx.fillStyle = '#111827'; ctx.fillRect(0, 0, 640, 360);
+          ctx.fillStyle = '#ffffff'; ctx.font = 'bold 18px sans-serif';
+          ctx.fillText(`Screenshot withheld (${maskedCount} masked regions)`, 20, h / 2);
+          if (c.convertToBlob) return await this._blobToDataURL(await c.convertToBlob({ type: 'image/webp', quality: 0.8 }));
           if (c.toDataURL) return c.toDataURL('image/webp', 0.8);
         }
-      } catch { /* fall through */ }
-      // 1x1 opaque pixel as last resort — never the raw screenshot.
+      } catch { /* use opaque pixel fallback */ }
       return 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
     };
 
+    // If text PII has no location, or a canvas/video may contain text without
+    // accessible DOM, the only safe image is a neutral placeholder.
+    if (privacyAudit.coverageEstablished !== true || privacyAudit.unlocatedSensitiveText || privacyAudit.opaqueVisualSurface) {
+      return failClosedPlaceholder(privacyAudit.maskedCount || 0);
+    }
+    if (!screenshotDataUrl || !Array.isArray(elements) || elements.length === 0) {
+      return failClosedPlaceholder(0);
+    }
+
+    const sensitiveElements = elements.filter(el => el.sensitive && el.bbox && el.bbox.length === 4);
+
+    // Fail closed: if redaction is impossible, never return the unredacted
+    // image. Return a neutral placeholder so the VLM still receives layout
+    // signal without any sensitive pixels.
     try {
       // In browser extension environment, create bitmap or image
       let imageBitmap;
@@ -63,9 +56,8 @@ export class ScreenshotSanitizer {
         const blob = await response.blob();
         imageBitmap = await createImageBitmap(blob);
       } else {
-        // Node/unit-test env without image decoding: never return the raw
-        // pixels. Return a redaction marker (no original bytes).
-        return `data:image/png;base64,UkVEQUNURUQ=#redacted_${sensitiveElements.length}_regions`;
+        // Node/unit-test env without image decoding: never return raw pixels.
+        return await failClosedPlaceholder(sensitiveElements.length);
       }
 
       const imgWidth = imageBitmap.width;

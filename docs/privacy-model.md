@@ -1,95 +1,61 @@
-# Privacy Model & Data Boundary Specification
+# Privacy Model and Data Boundary
 
-## 1. Core Principle: Zero Knowledge of Secrets by Remote Models
+## What this prototype does
 
-Existing commercial browser agents send raw web session data, unredacted full-page screenshots, and full HTML markup to remote LLMs. When users execute tasks like:
-- "Fill my passport or Aadhaar application"
-- "Pay for my flight tickets"
-- "Upload my tax returns or identity PDF"
+The extension extracts a bounded set of interactive controls, headings, result cards, and visible text. Before model requests, it redacts fields classified by input type, labels, attributes, known identifier patterns, and configured vault values. The outbound policy checks a finite set of common identifier and token patterns. These controls reduce accidental disclosure; they do not prove that arbitrary private data is absent.
 
-they inadvertently transmit government IDs, financial credentials, full addresses, session cookies, and private documents to third-party model servers.
+The expected request path is:
 
-The **Privacy-Preserving Agentic Browser Extension** reverses this paradigm:
-> **"Remote AI models provide perception and reasoning; the local browser extension owns, safeguards, and executes secrets."**
-
----
-
-## 2. Classification Matrix: What Stays Local vs. What Leaves the Browser
-
-| Data Category | Specific Items | Storage & Processing Location | Transmitted to Remote AI? |
-| :--- | :--- | :--- | :--- |
-| **Government Identifiers** | Aadhaar numbers, PAN cards, Voter ID, Passport numbers | Local In-Memory Vault | ❌ **NEVER** |
-| **Authentication Credentials** | Passwords, OTPs, PINs, 2FA tokens, session cookies | Local In-Memory Vault | ❌ **NEVER** |
-| **Financial Data** | Credit/Debit Card numbers, CVVs, Expiry dates, Bank accounts | Local In-Memory Vault | ❌ **NEVER** |
-| **Identity Documents** | Aadhaar PDF, PAN scans, tax certificates, utility bills | Local File System | ❌ **NEVER** |
-| **Personal Contact Info** | Full address, private phone numbers, personal email | Local Vault | ❌ **NEVER** (Replaced by `LOCAL_PROFILE`) |
-| **Visual Form Values** | Rendered input text on webpage screenshots | Redacted locally on Canvas (`████`) | ❌ **NEVER** (Masked prior to transmission) |
-| **Page Layout & Geometry** | Element bounding boxes, dimensions, positions | Processed into semantic schema | ✅ **YES** (Sanitized geometry only) |
-| **Semantic Labels & Roles** | "Aadhaar Number", "Submit", "Flight Origin", "textbox" | Processed into semantic schema | ✅ **YES** (Labels needed for semantic reasoning) |
-| **Redacted Screenshot** | Layout image with sensitive input fields blacked out | Offscreen Canvas export | ✅ **YES** (Required for spatial VLM grounding) |
-| **User Task Intent** | "Fill this form using my profile", "Find flights" | User input prompt | ✅ **YES** (Required for goal decomposition) |
-
----
-
-## 3. The Local Privacy Pipeline
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor User
-    participant Browser as Browser Tab (DOM & Viewport)
-    participant Privacy as Local Privacy Engine
-    participant Vault as Local Secret Vault
-    participant Server as Remote VLM & GPT-OSS
-
-    User->>Browser: Submit task: "Fill Aadhaar application"
-    Browser->>Privacy: Capture Raw DOM + Viewport Screenshot
-    Note over Privacy: 1. PII Regex & Semantic Scan<br/>2. Identify sensitive input elements<br/>3. Redact screenshot with solid black bars<br/>4. Replace DOM values with [REDACTED] & LOCAL_AADHAAR
-    Privacy->>Server: Send Sanitized DOM + Redacted Screenshot
-    Note over Server: VLM & LLM see page structure,<br/>labels, and buttons, but ZERO secrets.
-    Server-->>Privacy: Action: TYPE { target: "el_02", value_source: "LOCAL_AADHAAR" }
-    Privacy->>Vault: Resolve "LOCAL_AADHAAR"
-    Vault-->>Privacy: "1234 5678 9012"
-    Privacy->>Browser: Inject value locally via synthetic DOM events
-    Note over Browser: Webpage receives input directly inside user browser
+```text
+Untrusted page
+  -> extension content script extracts bounded DOM evidence
+  -> local DOM sanitizer and pattern checks
+  -> local screenshot masking / screenshot withholding
+  -> outbound policy engine
+  -> extension-origin backend endpoint
+  -> VLM/LLM provider (if configured)
 ```
 
----
+The backend-driven `/agent` browser automation path is retired. The backend accepts model API requests only from a Chrome extension origin and binds to loopback by default. This limits browser-page access; it is not protection against another local process or a compromised extension.
 
-## 4. Local Secret Vault & Symbolic Token Lifecycle
+## Detection coverage
 
-1. **Vault Storage**:
-   - Stored in sandboxed extension storage (`chrome.storage.local` with optional AES-GCM encryption key derived from a user master PIN).
-   - In-memory cache cleared when the extension closes or after inactivity timeout.
-2. **Symbolic Tokens**:
-   - `LOCAL_AADHAAR`
-   - `LOCAL_PAN`
-   - `LOCAL_FULL_NAME`
-   - `LOCAL_DOB`
-   - `LOCAL_PHONE`
-   - `LOCAL_EMAIL`
-   - `LOCAL_ADDRESS`
-   - `LOCAL_PASSWORD`
-   - `LOCAL_DOCUMENT`
-3. **Strict Resolution Boundary**:
-   - No symbolic token is ever resolved outside the `local-value-resolver.js` module.
-   - Symbolic tokens are mapped to actual values *immediately* prior to DOM input dispatch.
-   - Logs generated by the extension replace the value with `[RESOLVED_LOCAL_VALUE]` or log only the token name (`Resolved: LOCAL_AADHAAR`).
+| Data | Coverage | Limit |
+|---|---|---|
+| Password fields, labeled Aadhaar/PAN/card/phone/email/DOB/name/address fields | Partially supported | A deceptive or unlabeled field can evade semantic detection. |
+| Aadhaar, PAN, common card, email, Indian phone, date-like DOB, common API/bearer token patterns | Pattern detected | Formats vary; false negatives and false positives are possible. |
+| Configured vault strings | Exact/normalized matching for strings of useful length | Values not configured in the vault and transformed/encoded variants may not match. |
+| Names, addresses, account numbers, financial details | Partially detected from field labels and common account wording | Arbitrary names/addresses/account formats cannot be recognized reliably. |
+| Arbitrary sensitive text | Not reliably detectable | Requires user review or a broader local classifier. |
+| PII in canvas/video or text embedded in images | Not detected | Screenshot is withheld when canvas/video exists; image content can still be present in ordinary screenshots. |
 
----
+Text recognized in the aggregate page excerpt is locally pattern-sanitized. If known sensitive text is found there without a reliable location, the screenshot is replaced by a neutral placeholder. Known sensitive form controls with bounding boxes are blacked out. Unknown visual text can remain visible; the project does not claim OCR-complete screenshot privacy.
 
-## 5. Screenshot Redaction Mechanism
+## Vault and documents
 
-When `chrome.tabs.captureVisibleTab` captures the current viewport:
-1. The DOM perception engine identifies all elements tagged as `sensitive: true`.
-2. Their viewport-relative bounding boxes `[x, y, width, height]` are calculated via `getBoundingClientRect()`.
-3. An `OffscreenCanvas` (or hidden canvas element) draws the viewport image.
-4. For each sensitive bounding box:
-   - The bounding box region is padded by 4px on each side.
-   - A solid `#000000` (black) rectangle is rendered over the box.
-   - A subtle contrasting text indicator `[REDACTED]` is overlaid for VLM interpretability.
-5. The resulting redacted image is exported as a lightweight compressed WebP data URL.
-6. The remote VLM is able to observe:
-   - "There is an input box labeled 'Aadhaar Number' at coordinates [120, 240, 300, 36]."
-   - "The input box has already been filled (or is empty)."
-   - But the VLM **cannot read the numbers or characters**.
+Vault values are user-configured and stored in `chrome.storage.local`. This module does not encrypt them at rest, derive a key from a PIN, or guarantee memory erasure. Do not store high-value credentials unless you accept Chrome profile storage protections and their limits. The vault starts empty and rejects unsupported keys and non-text values.
+
+Real local-document selection is not implemented. A `LOCAL_DOCUMENT` action fails closed. A user can select a file directly on the website; that file is handled by the website and is outside this extension's document-privacy guarantee. The old backend `/agent` file/screenshot route is removed.
+
+## Visual provenance
+
+Each observation reports one of:
+
+- `DOM_ONLY`: no remote visual analysis was used, or the VLM request failed.
+- `DOM_PLUS_HEURISTIC`: the backend derived a layout summary from sanitized DOM; this is not visual perception.
+- `DOM_PLUS_REAL_VLM`: a configured remote vision model returned a result.
+
+The VLM receives an image produced by the extension sanitizer and sanitized DOM through the normal extension route. This guarantee assumes the installed extension is trusted and unmodified. The backend cannot independently prove that an image has been visually redacted; arbitrary local callers and compromised extensions are outside this boundary.
+
+## Claim status
+
+| Claim | Status |
+|---|---|
+| Sensitive data never leaves the device | **NOT SUPPORTED** as an absolute claim. Known patterns and fields are redacted; unknown PII can escape. |
+| VLM receives only sanitized screenshots | **PARTIALLY SUPPORTED** for the normal trusted-extension route; there is no server-side OCR proof. |
+| Webpages cannot approve actions or change settings | **SUPPORTED** for router messages: only the exact side-panel document is authorized. |
+| Vault values are encrypted | **NOT SUPPORTED**. Values are stored in extension-scoped Chrome storage without encryption by this code. |
+| Dual perception is mandatory | **NOT SUPPORTED**. Provenance can be DOM-only, heuristic, or actual VLM. |
+| Zero plaintext transmission | **NOT SUPPORTED** as an absolute guarantee. |
+| Real local document handling | **NOT SUPPORTED** by the extension. |
+| PII remains local | **PARTIALLY SUPPORTED** for recognized patterns/fields; arbitrary PII cannot be guaranteed local. |

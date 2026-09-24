@@ -79,7 +79,7 @@ export class PolicyEngine {
     if (rawAadhaarMatch && !rawAadhaarMatch[0].includes('REDACTED')) {
       throw new OutboundPolicyViolationError(
         'Outbound policy blocked payload: Unmasked 12-digit Aadhaar pattern found in request body',
-        { match: rawAadhaarMatch[0] }
+        { category: 'AADHAAR' }
       );
     }
 
@@ -88,7 +88,7 @@ export class PolicyEngine {
     if (rawPANMatch) {
       throw new OutboundPolicyViolationError(
         'Outbound policy blocked payload: Unmasked PAN pattern found in request body',
-        { match: rawPANMatch[0] }
+        { category: 'PAN' }
       );
     }
 
@@ -103,9 +103,8 @@ export class PolicyEngine {
         if (/timestamp["']?\s*:\s*$/i.test(precedingText)) continue;
 
         if (validateLuhn(cleanNumber)) {
-          console.error(`[PolicyEngine] MATCHED CARD: ${match[0]}`);
           throw new OutboundPolicyViolationError(
-            `Outbound policy blocked payload: Unmasked credit/debit card number (Luhn-valid) found in request body. Matched string: ${match[0]}`,
+            'Outbound policy blocked payload: Unmasked credit/debit card number (Luhn-valid) found in request body.',
             { match: cleanNumber.slice(0, 4) + '****' }
           );
         }
@@ -115,15 +114,11 @@ export class PolicyEngine {
     // L8: 5. Scan for unmasked email addresses
     const emailMatch = scannable.match(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/);
     if (emailMatch) {
-      // Only flag if it's not in a known-safe context (like a domain reference)
       const emailStr = emailMatch[0];
-      const isSafe = /example\.com|test\.com|localhost|placeholder/i.test(emailStr);
-      if (!isSafe) {
-        throw new OutboundPolicyViolationError(
-          'Outbound policy blocked payload: Unmasked email address found in request body',
-          { match: emailStr.replace(/(.{3}).*(@.*)/, '$1***$2') }
-        );
-      }
+      throw new OutboundPolicyViolationError(
+        'Outbound policy blocked payload: Unmasked email address found in request body',
+        { match: emailStr.replace(/(.{3}).*(@.*)/, '$1***$2') }
+      );
     }
 
     // L8: 6. Scan for unmasked Indian phone numbers (standalone 10 digits
@@ -146,8 +141,22 @@ export class PolicyEngine {
     if (ifscMatch) {
       throw new OutboundPolicyViolationError(
         'Outbound policy blocked payload: Unmasked IFSC code found in request body',
-        { match: ifscMatch[0] }
+        { category: 'IFSC' }
       );
+    }
+
+    // Common textual tokens detectable without semantic page context.
+    const dobMatch = scannable.match(/\b(?:0[1-9]|[12]\d|3[01])[-/.](?:0[1-9]|1[0-2])[-/.](?:19|20)\d{2}\b/);
+    if (dobMatch) {
+      throw new OutboundPolicyViolationError('Outbound policy blocked payload: Date-like personal data found.', { category: 'DOB' });
+    }
+    const apiKeyMatch = scannable.match(/\b(?:sk|pk|api)[-_][A-Za-z0-9_-]{16,}\b/i);
+    if (apiKeyMatch) {
+      throw new OutboundPolicyViolationError('Outbound policy blocked payload: API-key-like token found.', { category: 'API_KEY' });
+    }
+    const bearerMatch = scannable.match(/\bBearer\s+[A-Za-z0-9._~+/-]{12,}={0,2}/i);
+    if (bearerMatch) {
+      throw new OutboundPolicyViolationError('Outbound policy blocked payload: Bearer token found.', { category: 'TOKEN' });
     }
 
     return true;

@@ -10,12 +10,12 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Dict, Any, List, Optional
+import re
 import uvicorn
 
 from vlm_service import vlm_service
 from gpt_oss_service import gpt_oss_service
 from config import settings
-from agent_bridge import router as agent_router
 
 app = FastAPI(
     title="Privacy-Preserving Browser Agent Backend",
@@ -23,16 +23,29 @@ app = FastAPI(
     description="VLM Perception & GPT-OSS 120B Reasoning API + Agentic Browsing"
 )
 
-# Mount the agent router for /agent/* endpoints
-app.include_router(agent_router)
+# The legacy backend-driven browser loop is intentionally not mounted. It
+# captured raw screenshots and auto-proceeded through high-risk actions, so it
+# cannot share the extension's local privacy and confirmation boundary.
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[],
+    allow_origin_regex=r"^chrome-extension://[a-p]{32}$",
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def require_extension_origin(request, call_next):
+    # CORS alone does not reject simple cross-origin requests. Explicitly
+    # reject webpage-originated calls to model endpoints as well.
+    if request.url.path in {"/vision", "/reason", "/interpret"}:
+        origin = request.headers.get("origin", "")
+        if not re.fullmatch(r"chrome-extension://[a-p]{32}", origin):
+            from starlette.responses import JSONResponse
+            return JSONResponse({"detail": "Extension origin required."}, status_code=403)
+    return await call_next(request)
 
 class VisionRequest(BaseModel):
     task_id: str

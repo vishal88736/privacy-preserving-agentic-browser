@@ -18,18 +18,30 @@ class VLMService:
         self.pan_regex = re.compile(r"\b[A-Z]{5}[0-9]{4}[A-Z]{1}\b", re.IGNORECASE)
 
     def process_visuals(self, task_id: str, sanitized_screenshot: str, sanitized_dom: Dict[str, Any], metadata: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(sanitized_screenshot, str) or not sanitized_screenshot.startswith("data:image/"):
+            raise ValueError("Security rejection: screenshot must be a sanitized image data URL")
+        if not isinstance(sanitized_dom, dict) or not isinstance(sanitized_dom.get("elements", []), list):
+            raise ValueError("Security rejection: malformed sanitized DOM")
         dom_str = str(sanitized_dom)
-        if self.aadhaar_regex.search(dom_str):
-            raise ValueError("Security rejection: Outgoing payload contains unmasked Aadhaar number")
-        if self.pan_regex.search(dom_str):
-            raise ValueError("Security rejection: Outgoing payload contains unmasked PAN number")
+        forbidden_patterns = [
+            self.aadhaar_regex, self.pan_regex,
+            re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
+            re.compile(r"(?<!\d)(?:(?:\+|0{0,2})91[\s-]?)?[6-9]\d{9}(?!\d)"),
+            re.compile(r"\b(?:0[1-9]|[12]\d|3[01])[-/.](?:0[1-9]|1[0-2])[-/.](?:19|20)\d{2}\b"),
+            re.compile(r"\b(?:sk|pk|api)[-_][A-Za-z0-9_-]{16,}\b", re.I),
+            re.compile(r"\bBearer\s+[A-Za-z0-9._~+/-]{12,}={0,2}", re.I),
+        ]
+        if any(pattern.search(dom_str) for pattern in forbidden_patterns):
+            raise ValueError("Security rejection: outbound DOM contains an unredacted sensitive pattern")
 
         heuristic = self._from_dom(sanitized_dom, metadata)
         heuristic["grounding_source"] = "dom_heuristic"
+        heuristic["provenance"] = "DOM_PLUS_HEURISTIC"
         vision = self._try_real_vlm(sanitized_screenshot, heuristic, metadata)
         if vision:
             heuristic.update(vision)
             heuristic["grounding_source"] = "vision_model"
+            heuristic["provenance"] = "DOM_PLUS_REAL_VLM"
         return heuristic
 
     def _try_real_vlm(self, screenshot: str, heuristic: Dict[str, Any], metadata: Dict[str, Any]) -> Optional[Dict[str, Any]]:

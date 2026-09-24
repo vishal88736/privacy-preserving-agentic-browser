@@ -54,9 +54,9 @@ test('PolicyEngine - real Aadhaar in text is still blocked beside a screenshot',
 test('PolicyEngine - raw vault secret in text is still blocked beside a screenshot', () => {
   const engine = new PolicyEngine();
   const shot = fakeScreenshotDataUrl();
+  engine.vault.memoryStore.LOCAL_PROFILE = 'synthetic-vault-secret-fixture';
   const secrets = engine.vault.getAllSecretsForUI();
-  const firstKey = Object.keys(secrets).find((k) => typeof secrets[k] === 'string' && secrets[k].length >= 4);
-  assert.ok(firstKey, 'vault must hold a string secret for this test');
+  const firstKey = 'LOCAL_PROFILE';
   assert.throws(
     () => engine.enforceOutboundSafety(visionPayload(shot, { text: `leak ${secrets[firstKey]} end` })),
     /raw value/

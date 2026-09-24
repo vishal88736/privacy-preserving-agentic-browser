@@ -18,6 +18,9 @@ export class BrowserExecutor {
     let targetElement = null;
     if (target?.element_id) {
       targetElement = registry.getElement(target.element_id);
+      if (targetElement && !targetElement.isConnected) {
+        throw new Error('Target element became stale after observation. Re-observe the page before acting.');
+      }
     }
 
     // If target has coordinates, or element_id was not matched, use elementFromPoint
@@ -210,9 +213,12 @@ export class BrowserExecutor {
   async _executeUpload(element, docData) {
     if (!element) throw new Error('Upload target element not found');
 
-    const fileName = docData?.name || 'document.pdf';
-    const mimeType = docData?.type || 'application/pdf';
-    const fileContent = docData?.content || 'Dummy PDF content';
+    if (docData?.demo !== true || docData?.content !== 'SYNTHETIC DEMO FILE — NO PERSONAL DATA') {
+      throw new Error('Real document upload is not supported. Choose the file directly on the webpage.');
+    }
+    const fileName = 'synthetic-demo.txt';
+    const mimeType = 'text/plain';
+    const fileContent = docData.content;
 
     // Create synthetic file attachment
     const blob = new Blob([fileContent], { type: mimeType });

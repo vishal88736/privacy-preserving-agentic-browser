@@ -68,7 +68,6 @@ test('VLMClient - processVisuals fastPath skips remote server call', async () =>
 
   // With fastPath: true, it should resolve immediately via local inference without network error
   const res = await client.processVisuals('task_123', 'data:image/png;base64,...', sanitizedDom, {}, { fastPath: true });
-  assert.strictEqual(res._source, 'local-fast-path');
-  assert.strictEqual(res.detected_elements.length, 2);
-  assert.strictEqual(res.detected_elements[0].label, 'Search query');
+  assert.strictEqual(res._source, 'DOM_ONLY');
+  assert.deepEqual(res.detected_elements, []);
 });

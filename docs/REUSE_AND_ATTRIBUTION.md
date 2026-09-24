@@ -47,15 +47,15 @@ This document details the licensing, attribution, conceptual reuse, clean-room r
 | **Local PII Detector** | **Novel SIH Contribution** | Written from scratch | 100% Local (Regex + Contextual) |
 | **DOM Sanitizer** | **Novel SIH Contribution** | Written from scratch | Replaces secrets with `LOCAL_*` |
 | **Screenshot Redaction** | **Novel SIH Contribution** | Written from scratch | Canvas blackout before remote VLM |
-| **Local Secret Vault** | **Novel SIH Contribution** | Written from scratch | Plain values never touch server |
+| **Local Secret Vault** | **Novel SIH Contribution** | Written from scratch | Values stored locally; outbound checks are best-effort |
 | **Local Safety Risk Gate** | **Novel SIH Contribution** | Written from scratch | Blocks exfiltration & prompt injection |
-| **Dual DOM+VLM Fusion** | **Novel SIH Contribution** | Written from scratch | Mandatory dual perception on every turn |
+| **DOM/VLM Observation Fusion** | **Novel SIH Contribution** | Written from scratch | Optional vision with explicit DOM-only/heuristic/VLM provenance |
 | **MV3 Side Panel UI** | **Novel SIH Contribution** | Written from scratch | Real-time privacy & step dashboard |
 
 ---
 
-## 3. Strict Clean-Room & Privacy Guarantees
+## 3. Clean-Room Work & Privacy Limits
 
 1. **No Proprietary or Leaked Code**: All implementation files in this extension are written specifically for Chrome Manifest V3 using modern standard Web APIs.
-2. **Zero Plaintext Secret Transmission**: The remote reasoning and VLM endpoints never receive Aadhaar numbers, PAN numbers, passwords, OTPs, financial card data, or private document bytes.
+2. **Pattern-based privacy controls**: The extension redacts recognized PII and checks outbound requests; this does not guarantee zero plaintext transmission for arbitrary or undetected data.
 3. **Symbolic Resolution**: The reasoning model only produces symbolic references (e.g., `LOCAL_AADHAAR`), which are resolved strictly within the browser extension's local sandboxed execution context.

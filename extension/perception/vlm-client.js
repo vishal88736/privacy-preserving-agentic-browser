@@ -19,8 +19,8 @@ export class VLMClient {
    */
   async processVisuals(taskId, sanitizedScreenshot, sanitizedDom, metadata = {}, options = {}) {
     if (options.fastPath) {
-      const fastResult = this._localVisualInferenceFallback(sanitizedDom);
-      fastResult._source = 'local-fast-path';
+      const fastResult = this._domOnlyObservation(sanitizedDom);
+      fastResult._source = 'DOM_ONLY';
       return fastResult;
     }
 
@@ -56,12 +56,12 @@ export class VLMClient {
       // Provenance honesty: the server falls back to a DOM-echo heuristic
       // when no vision model responds. Never label that "remote-vlm" —
       // downstream fusion must know it is not visual proof.
-      obs._source = obs?.grounding_source === 'vision_model' ? 'remote-vlm' : 'remote-vlm-heuristic';
+      obs._source = obs?.provenance || (obs?.grounding_source === 'vision_model' ? 'DOM_PLUS_REAL_VLM' : 'DOM_PLUS_HEURISTIC');
       return obs;
     } catch (err) {
       console.warn(`[VLMClient] Remote VLM request failed (${err.message}). Using local visual inference.`);
-      const fallback = this._localVisualInferenceFallback(sanitizedDom);
-      fallback._source = 'local-fallback';
+      const fallback = this._domOnlyObservation(sanitizedDom);
+      fallback._source = 'DOM_ONLY';
       fallback._error = String(err?.message || err).slice(0, 200);
       return fallback;
     }
@@ -71,19 +71,8 @@ export class VLMClient {
    * Deterministic local fallback when remote VLM endpoint is not reachable
    * Generates visual annotations directly from sanitized DOM coordinates.
    */
-  _localVisualInferenceFallback(sanitizedDom) {
+  _domOnlyObservation(sanitizedDom) {
     const elements = sanitizedDom?.elements || [];
-    const visualElements = elements.map((el, idx) => ({
-      visual_id: `vis_${idx + 1}`,
-      role: el.tag === 'input' ? 'input_field' : (el.tag === 'button' ? 'button' : el.tag),
-      label: el.label || el.placeholder || el.name || `Element ${idx + 1}`,
-      bbox: el.bbox || [0, 0, 100, 30],
-      confidence: 0.95,
-      visual_description: el.sensitive 
-        ? `Redacted sensitive ${el.semantic_type || 'field'}` 
-        : `Interactive ${el.tag} with label "${el.label || el.placeholder || ''}"`
-    }));
-
     const formElements = elements.filter(e => e.tag === 'input' || e.tag === 'select');
     const buttons = elements.filter(e => e.tag === 'button' || e.type === 'submit');
     const cards = sanitizedDom?.result_items?.length || 0;
@@ -100,11 +89,12 @@ export class VLMClient {
     else if (formElements.length === 0 && buttons.length > 0) page_type = 'dashboard';
 
     return {
-      detected_elements: visualElements,
+      detected_elements: [],
+      provenance: 'DOM_ONLY',
       page_type,
-      page_purpose: `Likely a ${page_type.replace(/_/g, ' ')} page (local layout fallback).`,
-      spatial_layout: `Structured layout containing ${formElements.length} form inputs and ${buttons.length} action buttons.`,
-      visual_state: `Page loaded. ${elements.filter(e => e.sensitive).length} sensitive fields visually masked.`
+      page_purpose: `DOM classification only: likely a ${page_type.replace(/_/g, ' ')} page.`,
+      spatial_layout: null,
+      visual_state: null
     };
   }
 }

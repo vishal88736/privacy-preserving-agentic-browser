@@ -271,6 +271,9 @@
         headings: this.extractHeadings(),
         result_items: this.extractResultItems(extracted),
         visible_text,
+        // Canvas/video pixels have no reliable text-node geometry for local
+        // redaction. The background therefore withholds the screenshot.
+        opaqueVisualSurface: Boolean(document.querySelector('canvas, video')),
         elements: extracted
       };
     }
@@ -427,6 +430,9 @@
       let targetElement = null;
       if (target?.element_id) {
         targetElement = registry.getElement(target.element_id);
+        if (targetElement && !targetElement.isConnected) {
+          throw new Error('Target element became stale after observation. Re-observe the page before acting.');
+        }
       }
 
       if (!targetElement && coordinates && coordinates.length === 2) {
@@ -634,9 +640,12 @@
     async _executeUpload(element, docData) {
       if (!element) throw new Error('Target upload element not found');
 
-      const fileName = docData?.name || 'Aadhaar_Card.pdf';
-      const mimeType = docData?.type || 'application/pdf';
-      const fileContent = docData?.content || 'Dummy PDF content';
+      if (docData?.demo !== true || docData?.content !== 'SYNTHETIC DEMO FILE — NO PERSONAL DATA') {
+        throw new Error('Real document upload is not supported. Choose the file directly on the webpage.');
+      }
+      const fileName = 'synthetic-demo.txt';
+      const mimeType = 'text/plain';
+      const fileContent = docData.content;
 
       const blob = new Blob([fileContent], { type: mimeType });
       const file = new File([blob], fileName, { type: mimeType });
@@ -792,6 +801,13 @@
   // 6. Runtime Message Listener
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const { type, payload } = message;
+
+    const trustedBackground = sender?.id === chrome.runtime.id &&
+      sender?.url === chrome.runtime.getURL('background/service-worker.js');
+    if (!trustedBackground) {
+      sendResponse({ success: false, error: 'Untrusted extension message sender.' });
+      return false;
+    }
 
     switch (type) {
       case MessageType.EXTRACT_DOM:

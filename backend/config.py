@@ -28,7 +28,7 @@ def load_env():
 load_env()
 
 class Settings:
-    HOST: str = os.getenv("HOST", "0.0.0.0")
+    HOST: str = os.getenv("HOST", "127.0.0.1")
     PORT: int = int(os.getenv("PORT", 8000))
 
     # Supports AI_API_KEY, OPENROUTER_API_KEY, NVIDIA_API_KEY, GROK_API_KEY, XAI_API_KEY, GROQ_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY
@@ -65,4 +65,3 @@ class Settings:
     AGENT_MAX_ITERATIONS: int = int(os.getenv("AGENT_MAX_ITERATIONS", "30"))
 
 settings = Settings()
-

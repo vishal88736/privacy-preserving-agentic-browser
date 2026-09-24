@@ -34,21 +34,21 @@ test('PolicyEngine - allows string payloads without PII', () => {
 
 test('PolicyEngine - allows email from safe test.com / example.com domains', () => {
   const engine = makeEngine();
-  assert.doesNotThrow(() => engine.enforceOutboundSafety({ note: 'developer@test.com' }));
-  assert.doesNotThrow(() => engine.enforceOutboundSafety({ note: 'user@example.com' }));
+  assert.throws(() => engine.enforceOutboundSafety({ note: 'developer@test.com' }), OutboundPolicyViolationError);
+  assert.throws(() => engine.enforceOutboundSafety({ note: 'user@example.com' }), OutboundPolicyViolationError);
 });
 
 // ── Vault secret leak detection ────────────────────────────────────────────
 
 test('PolicyEngine - blocks payload containing raw vault Aadhaar value', () => {
   const engine = makeEngine();
-  const leaked = { value: '4821 7392 0184' }; // exact vault Aadhaar
+  const leaked = { value: '4821 7392 0184' }; // synthetic Aadhaar-shaped test fixture
   assert.throws(() => engine.enforceOutboundSafety(leaked), OutboundPolicyViolationError);
 });
 
 test('PolicyEngine - blocks payload containing raw vault PAN value', () => {
   const engine = makeEngine();
-  const leaked = { pan: 'ABCDE1234F' };
+  const leaked = { pan: 'ABCDE1234F' }; // synthetic PAN-shaped test fixture
   assert.throws(() => engine.enforceOutboundSafety(leaked), OutboundPolicyViolationError);
 });
 

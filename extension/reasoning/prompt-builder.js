@@ -100,7 +100,7 @@ export class PromptBuilder {
   }
 
   buildPlanningPrompt(userTask, unifiedObservation, taskHistory = [], taskState = null, pageState = null) {
-    const allowedActions = Object.values(ActionType).join(', ');
+    const allowedActions = Object.values(ActionType).filter(action => action !== ActionType.UPLOAD).join(', ');
     const allowedSecretSources = Object.values(SymbolicSecretSource).join(', ');
     const compact = this.compactObservation(unifiedObservation, pageState);
     const allowedIds = compact.elements.map((e) => e.id);
@@ -123,7 +123,7 @@ RULES:
 
 ### SYMBOLIC TOKEN REFERENCE (L21):
 When you see these tokens in the task or task state, they refer to locally-stored secrets:
-- LOCAL_AADHAAR → User's Aadhaar number (resolved locally, never transmitted)
+- LOCAL_AADHAAR → User-configured Aadhaar value, resolved in the browser; outbound privacy checks are best-effort
 - LOCAL_PAN → User's PAN card number
 - LOCAL_FULL_NAME → User's full legal name
 - LOCAL_DOB → User's date of birth
@@ -131,7 +131,7 @@ When you see these tokens in the task or task state, they refer to locally-store
 - LOCAL_EMAIL → User's email address
 - LOCAL_ADDRESS → User's residential address
 - LOCAL_PASSWORD → User's password/PIN
-- LOCAL_DOCUMENT → User's uploaded identity document (PDF)
+- LOCAL_DOCUMENT → Unsupported by this prototype. Do not propose document uploads.
 - LOCAL_CREDIT_CARD → User's credit/debit card number
 - LOCAL_CVV → User's card CVV/CVC
 - LOCAL_PROFILE → General profile data

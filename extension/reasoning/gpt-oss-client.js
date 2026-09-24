@@ -206,12 +206,11 @@ export class GPTOSSClient {
       };
     };
 
-    // 1. Upload intent: attach local document to an upload control.
+    // 1. Extension-managed local file selection is unsupported. Tell the user
+    // to choose the file directly on the site, keeping file bytes out of the
+    // extension and model path.
     if (/upload|attach/i.test(lowerTask)) {
-      const up = elements.find((e) => isUploadable(e) && !doneTargets.has(`UPLOAD::${e.id}::${SymbolicSecretSource.LOCAL_DOCUMENT}`));
-      if (up) {
-        return mk(ActionType.UPLOAD, up.id, { value_source: SymbolicSecretSource.LOCAL_DOCUMENT, risk: RiskLevel.HIGH, requires_confirmation: true, thought: `Attach local document to ${up.id}` });
-      }
+      return mk(ActionType.ASK_USER, null, { value: { prompt: 'Choose the file directly in the webpage file picker. The extension does not read or upload local documents.' }, thought: 'Local document selection is unsupported by the extension.' });
     }
 
     // 2. Fill empty typeable fields (form-filling) using FormAnalyzer

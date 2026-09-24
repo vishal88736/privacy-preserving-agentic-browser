@@ -43,7 +43,7 @@ test('Integration - Multi-step Aadhaar form filling scenario', async () => {
   assert.strictEqual(submitStep.action.requires_confirmation, true);
 });
 
-test('Integration - Document Upload scenario', async () => {
+test('Integration - unsupported local document upload asks user to choose directly on the site', async () => {
   const client = new GPTOSSClient('http://127.0.0.1:9999');
   const fusedObservation = {
     elements: [
@@ -52,10 +52,9 @@ test('Integration - Document Upload scenario', async () => {
   };
 
   const uploadStep = await client.planNextStep('Upload my Aadhaar PDF', fusedObservation, []);
-  assert.strictEqual(uploadStep.action.action, ActionType.UPLOAD);
-  assert.strictEqual(uploadStep.action.target.element_id, 'el_upload');
-  assert.strictEqual(uploadStep.action.value_source, SymbolicSecretSource.LOCAL_DOCUMENT);
-  assert.strictEqual(uploadStep.action.requires_confirmation, true);
+  assert.strictEqual(uploadStep.action.action, ActionType.ASK_USER);
+  assert.match(uploadStep.action.value.prompt, /Choose the file directly/i);
+  assert.equal(uploadStep.action.value_source, undefined);
 });
 
 test('Integration - Flight Search comparison scenario', async () => {

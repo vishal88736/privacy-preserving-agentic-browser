@@ -317,7 +317,13 @@ export class AgentController {
     const redactedScreenshot = await defaultScreenshotSanitizer.redactScreenshot(
       screenshotResponse.dataUrl,
       sanitizedElements,
-      rawDOM.viewport
+      rawDOM.viewport,
+      {
+        coverageEstablished: Array.isArray(rawDOM.elements),
+        unlocatedSensitiveText: defaultDOMSanitizer.hasUnlocatedSensitiveText(rawDOM),
+        opaqueVisualSurface: Boolean(rawDOM.opaqueVisualSurface),
+        maskedCount: sensitiveCount
+      }
     );
 
     taskManager.updatePrivacyMetrics({
@@ -378,7 +384,7 @@ export class AgentController {
       { fastPath: useFastPath }
     );
 
-    if (visualObservation._source !== 'local-fast-path') {
+    if (visualObservation._source !== 'DOM_ONLY') {
       taskManager.updatePrivacyMetrics({ serverCallsCount: 1 });
     }
 

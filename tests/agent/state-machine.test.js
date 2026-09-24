@@ -71,6 +71,7 @@ test('ActionParser - Parses clean JSON and strips markdown fences', () => {
 
 test('LocalValueResolver - Safely maps symbolic tokens to vault secrets locally', () => {
   const vault = new LocalVault();
+  vault.memoryStore.LOCAL_AADHAAR = 'SYNTHETIC_AADHAAR_FIXTURE';
   const resolver = new LocalValueResolver(vault);
 
   // Resolving symbolic Aadhaar
@@ -81,7 +82,7 @@ test('LocalValueResolver - Safely maps symbolic tokens to vault secrets locally'
   };
 
   const resolvedAadhaar = resolver.resolve(aadhaarAction);
-  assert.strictEqual(resolvedAadhaar, '4821 7392 0184', 'Must resolve to vault Aadhaar value');
+  assert.strictEqual(resolvedAadhaar, 'SYNTHETIC_AADHAAR_FIXTURE', 'Must resolve explicitly configured test fixture');
 
   // Non-sensitive action passes through regular value
   const searchAction = {

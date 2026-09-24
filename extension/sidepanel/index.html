@@ -182,7 +182,7 @@
             <span class="mini-tag">Dual-Perception</span>
             <span class="mini-tag">Safety Gate</span>
           </div>
-          <p class="empty-mini-note">Sensitive values (Aadhaar, PAN, passwords) remain inside your local browser vault and are never sent to remote AI.</p>
+          <p class="empty-mini-note">Known sensitive values are redacted locally before model requests. Detection is incomplete; review the privacy limits before using real data.</p>
         </div>
       </section>
 
@@ -307,7 +307,7 @@
           </div>
           <span id="llm-calls" class="card-meta-text">0 AI calls</span>
         </div>
-        <p class="llm-sub">Every AI call carries <strong>only sanitized data</strong>. Vault values, passwords and document bytes never leave this device — the model only sees symbolic tokens.</p>
+        <p class="llm-sub">AI calls carry sanitized page data where recognized patterns are detected. Privacy filtering is best-effort and cannot identify every sensitive value or image.</p>
 
         <div class="privacy-cols">
           <div class="privacy-col">
@@ -329,11 +329,11 @@
               <p class="privacy-col-title ok">Never sent</p>
             </div>
             <ul class="privacy-list">
-              <li><span class="tick">✓</span><span class="llm-never">Aadhaar / PAN / passwords / OTPs</span></li>
-              <li><span class="tick">✓</span><span class="llm-never">Vault plaintext values</span></li>
-              <li><span class="tick">✓</span><span class="llm-never">Document file bytes</span></li>
-              <li><span class="tick">✓</span><span class="llm-never">Full URLs with sensitive queries</span></li>
-              <li><span class="tick">✓</span><span class="llm-never">Unredacted screenshots</span></li>
+              <li><span class="tick">✓</span><span class="llm-never">Recognized Aadhaar / PAN / password patterns</span></li>
+              <li><span class="tick">✓</span><span class="llm-never">Known vault values (outbound checks)</span></li>
+              <li><span class="tick">✓</span><span class="llm-never">No real document upload is supported by this prototype</span></li>
+              <li><span class="tick">✓</span><span class="llm-never">Recognized URL patterns are filtered</span></li>
+              <li><span class="tick">✓</span><span class="llm-never">Known DOM sensitive regions are masked; arbitrary image text may remain</span></li>
             </ul>
           </div>
         </div>
@@ -423,7 +423,7 @@
         </div>
         <div class="disclosure-row">
           <dt>Remote AI</dt>
-          <dd class="ok-dd">Sanitized layout only · 0 plaintext secrets</dd>
+          <dd class="ok-dd">Sanitized layout where recognized · detection is incomplete</dd>
         </div>
       </dl>
 
@@ -473,7 +473,7 @@
 
       <div class="confirm-note">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
-        <span>Entered values stay local on your device and are never sent to remote AI.</span>
+        <span>Known configured values are filtered from outbound requests; detection is best-effort.</span>
       </div>
 
       <div class="modal-actions">
@@ -489,7 +489,7 @@
       <div class="modal-head">
         <div>
           <h3 id="privacy-sheet-title" class="modal-title">Privacy Architecture</h3>
-          <p class="modal-sub">Zero-plaintext leakage guarantee</p>
+          <p class="modal-sub">Best-effort filtering of recognized sensitive data</p>
         </div>
         <button id="close-privacy-btn" class="icon-btn" aria-label="Close privacy dialog">✕</button>
       </div>
@@ -517,7 +517,7 @@
       </div>
 
       <p class="muted small modal-explainer">
-        Sensitive values are referenced symbolically (e.g. <code>LOCAL_AADHAAR</code>) and resolved strictly inside this browser. All outbound payloads are inspected by a local policy engine before network transmission.
+        Sensitive values may be referenced symbolically (e.g. <code>LOCAL_AADHAAR</code>) and resolved in this browser. Outbound payloads are inspected by local policy checks, which cannot detect every form of sensitive data.
       </p>
 
       <div class="modal-actions">
@@ -538,7 +538,7 @@
             </svg>
             <h3 id="vault-title" class="modal-title">Local Vault</h3>
           </div>
-          <p class="modal-sub">Encrypted in this browser · Never sent to remote AI</p>
+          <p class="modal-sub">Stored in this browser profile · Not encrypted by this prototype</p>
         </div>
         <button id="close-vault-btn" class="icon-btn" aria-label="Close vault dialog">✕</button>
       </div>
