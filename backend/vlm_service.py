@@ -145,8 +145,27 @@ class VLMService:
             "spatial_layout (one sentence), visual_state (one sentence), "
             "page_type, notable_visible_text (array of short strings). "
             "Do not transcribe any numbers that look like IDs or secrets. "
+            "Black regions in the screenshot are local privacy masks: do not infer, reconstruct, or describe masked contents. "
             f"Known DOM summary: {heuristic.get('spatial_layout')}"
         )
+        redactions = metadata.get("privacy_redaction_summary") or {}
+        if redactions:
+            prompt += (
+                " Local privacy pass completed before upload; "
+                f"{int(redactions.get('dom_regions') or 0)} DOM regions, "
+                f"{int(redactions.get('ocr_regions') or 0)} OCR regions, and "
+                f"{int(redactions.get('people_regions') or 0)} person regions were masked."
+            )
+            if redactions.get("screenshot_withheld"):
+                prompt += " The full screenshot was withheld as a neutral placeholder; use sanitized DOM for page-specific facts."
+        local_vision = sanitized_dom.get("local_vision_context") or {}
+        object_labels = [
+            str(item.get("label") or "")[:48]
+            for item in local_vision.get("detected_objects", [])[:20]
+            if isinstance(item, dict) and item.get("label")
+        ] if isinstance(local_vision, dict) else []
+        if object_labels:
+            prompt += " Browser-local object labels (not text OCR and not verified UI controls): " + ", ".join(object_labels) + "."
         for candidate in candidates:
             model = str(candidate["model"] or "").lower()
             text_only_markers = ("gpt-oss", "deepseek-chat", "llama-3.3-70b-versatile", "whisper", "tts-", "embed")
@@ -275,6 +294,11 @@ class VLMService:
             f"{len(inputs)} inputs ({len(sensitive_inputs)} masked), {len(buttons)} buttons, "
             f"{len(result_items)} result cards ({len(priced)} with prices)."
         )
+        local_vision = sanitized_dom.get("local_vision_context") or {}
+        if isinstance(local_vision, dict) and local_vision:
+            people_masked = max(0, int(local_vision.get("people_masked") or 0))
+            pii_masked = max(0, int(local_vision.get("pii_regions_masked") or 0))
+            spatial_layout += f" Local browser vision masked {people_masked} detected people and {pii_masked} OCR-identified sensitive regions."
         if heading_txt:
             spatial_layout += f" Headings: {heading_txt}."
         if card_txt:

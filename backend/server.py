@@ -30,7 +30,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[],
-    allow_origin_regex=r"^chrome-extension://[a-p]{32}$",
+    allow_origin_regex=r"^(?:chrome-extension://[a-p]{32}|moz-extension://[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$",
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -42,7 +42,11 @@ async def require_extension_origin(request, call_next):
     # reject webpage-originated calls to model endpoints as well.
     if request.url.path in {"/vision", "/reason", "/interpret"}:
         origin = request.headers.get("origin", "")
-        if not re.fullmatch(r"chrome-extension://[a-p]{32}", origin):
+        allowed_extension_origin = re.fullmatch(
+            r"(?:chrome-extension://[a-p]{32}|moz-extension://[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+            origin,
+        )
+        if not allowed_extension_origin:
             from starlette.responses import JSONResponse
             return JSONResponse({"detail": "Extension origin required."}, status_code=403)
     return await call_next(request)

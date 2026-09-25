@@ -1,5 +1,6 @@
 # Dependencies
 node_modules/
+dist/
 __pycache__/
 *.pyc
 
@@ -17,4 +18,3 @@ tests/qa_screenshots/
 browser_agent-main/
 
 references/
-

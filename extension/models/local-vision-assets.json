@@ -1,0 +1,58 @@
+{
+  "object_detection_model": "Xenova/yolos-tiny",
+  "revision": "e2f9c7673f0fa61849efe2b56a0d7774779ebb9d",
+  "quantization": "q4",
+  "ocr_language": "eng",
+  "runtime_downloads": false,
+  "total_bytes": 32438315,
+  "files": [
+    {
+      "path": "Xenova/yolos-tiny/config.json",
+      "bytes": 4145
+    },
+    {
+      "path": "Xenova/yolos-tiny/onnx/model_q4.onnx",
+      "bytes": 7809003
+    },
+    {
+      "path": "Xenova/yolos-tiny/preprocessor_config.json",
+      "bytes": 457
+    },
+    {
+      "path": "Xenova/yolos-tiny/quantize_config.json",
+      "bytes": 887
+    },
+    {
+      "path": "lang/eng.traineddata.gz",
+      "bytes": 2952873
+    },
+    {
+      "path": "onnxruntime-web/ort-wasm-simd-threaded.mjs",
+      "bytes": 24381
+    },
+    {
+      "path": "onnxruntime-web/ort-wasm-simd-threaded.wasm",
+      "bytes": 14264838
+    },
+    {
+      "path": "tesseract/tesseract-core-simd-lstm.wasm",
+      "bytes": 2857601
+    },
+    {
+      "path": "tesseract/tesseract-core-simd-lstm.wasm.js",
+      "bytes": 3899472
+    },
+    {
+      "path": "tesseract/tesseract.esm.min.js",
+      "bytes": 63220
+    },
+    {
+      "path": "tesseract/worker.min.js",
+      "bytes": 111307
+    },
+    {
+      "path": "transformers/transformers.web.min.js",
+      "bytes": 450131
+    }
+  ]
+}

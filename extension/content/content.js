@@ -855,8 +855,9 @@
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const { type, payload } = message;
 
-    const trustedBackground = sender?.id === chrome.runtime.id &&
-      sender?.url === chrome.runtime.getURL('background/service-worker.js');
+    const senderUrl = (() => { try { return new URL(sender?.url || ''); } catch { return null; } })();
+    const trustedBackground = sender?.id === chrome.runtime.id && !sender?.tab &&
+      (!senderUrl || ['chrome-extension:', 'moz-extension:'].includes(senderUrl.protocol));
     if (!trustedBackground) {
       sendResponse({ success: false, error: 'Untrusted extension message sender.' });
       return false;

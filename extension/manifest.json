@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Privacy-Preserving Agentic Browser (SIH)",
   "version": "1.0.0",
-  "description": "Autonomous browser agent combining DOM + VLM perception with strict client-side PII redaction and local secret resolution.",
+  "description": "Browser agent with local OCR and object detection, client-side visual PII masking, and VLM reasoning over sanitized screenshots.",
   "permissions": [
     "sidePanel",
     "activeTab",
@@ -21,6 +21,9 @@
   "background": {
     "service_worker": "background/service-worker.js",
     "type": "module"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   },
   "side_panel": {
     "default_path": "sidepanel/index.html"

@@ -6,10 +6,16 @@ import { setupMessageRouter } from './message-router.js';
 
 console.log('[PrivacyAgent] Background service worker initializing...');
 
-// Configure side panel to open upon extension icon click
+// Configure Chrome's side panel; Firefox opens the equivalent sidebar from
+// the browser's sidebar controls using the manifest's sidebar_action entry.
 if (chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true })
     .catch((error) => console.error('Failed to set side panel behavior:', error));
+}
+if (!chrome.sidePanel && chrome.sidebarAction?.open && chrome.action?.onClicked) {
+  chrome.action.onClicked.addListener(() => {
+    chrome.sidebarAction.open().catch((error) => console.error('Failed to open Firefox sidebar:', error));
+  });
 }
 
 setupMessageRouter();

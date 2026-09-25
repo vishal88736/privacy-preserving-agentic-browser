@@ -1,7 +1,8 @@
 /**
  * Local Screenshot Sanitizer
- * Renders solid blackout masking bars over sensitive coordinates
- * on an OffscreenCanvas before the image leaves the client environment.
+ * Renders solid masking bars over DOM/OCR/person boxes on canvas. It returns
+ * only after the local vision pass has completed and fails closed to a neutral
+ * placeholder whenever coverage or redaction cannot be established.
  */
 
 export class ScreenshotSanitizer {
@@ -14,7 +15,7 @@ export class ScreenshotSanitizer {
   /**
    * Redacts sensitive regions from a screenshot data URL.
    * @param {string} screenshotDataUrl - Base64 PNG/WebP data URL
-   * @param {Array<{ bbox: number[], sensitive: boolean, semantic_type?: string }>} elements - DOM elements with coordinates
+   * @param {Array<{ bbox: number[], sensitive: boolean, semantic_type?: string }>} elements - DOM and local-vision regions
    * @param {{ width: number, height: number }} viewport - Viewport dimensions
    * @returns {Promise<string>} Redacted screenshot as base64 data URL
    */
@@ -39,10 +40,11 @@ export class ScreenshotSanitizer {
 
     // If text PII has no location, or a canvas/video may contain text without
     // accessible DOM, the only safe image is a neutral placeholder.
-    if (privacyAudit.coverageEstablished !== true || privacyAudit.unlocatedSensitiveText || privacyAudit.opaqueVisualSurface) {
+    if (privacyAudit.coverageEstablished !== true || privacyAudit.localVisionCompleted !== true ||
+        privacyAudit.forceWithhold || privacyAudit.unlocatedSensitiveText || privacyAudit.opaqueVisualSurface) {
       return failClosedPlaceholder(privacyAudit.maskedCount || 0);
     }
-    if (!screenshotDataUrl || !Array.isArray(elements) || elements.length === 0) {
+    if (!screenshotDataUrl || !Array.isArray(elements)) {
       return failClosedPlaceholder(0);
     }
 

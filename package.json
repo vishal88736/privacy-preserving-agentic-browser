@@ -1,7 +1,7 @@
 {
   "name": "privacy-preserving-agentic-browser",
   "version": "1.0.0",
-  "description": "Privacy-Preserving Agentic Browser Extension - Unit & Integration Tests",
+  "description": "Privacy-preserving browser agent with local screenshot analysis and redaction",
   "type": "module",
   "scripts": {
     "test": "node --test tests/**/*.test.js extension/perception/task-grounding.test.js",
@@ -12,8 +12,25 @@
     "test:perception": "node --test tests/perception/*.test.js extension/perception/task-grounding.test.js",
     "test:agent": "node --test tests/agent/*.test.js",
     "test:schemas": "node --test tests/shared/*.test.js",
-    "test:all": "node --test 'tests/**/*.test.js' 'extension/perception/task-grounding.test.js'"
+    "test:all": "node --test 'tests/**/*.test.js' 'extension/perception/task-grounding.test.js'",
+    "prepare:local-vision-assets": "node scripts/prepare-local-vision-assets.mjs",
+    "build:chrome": "node scripts/package-extension.mjs chrome",
+    "build:firefox": "node scripts/package-extension.mjs firefox",
+    "build:extensions": "npm run build:chrome && npm run build:firefox",
+    "evaluate:vision": "python3 scripts/evaluate_vision.py"
   },
-  "keywords": ["browser-extension", "privacy", "agentic", "testing"],
-  "license": "ISC"
+  "keywords": [
+    "browser-extension",
+    "privacy",
+    "agentic",
+    "testing"
+  ],
+  "license": "ISC",
+  "dependencies": {
+    "@huggingface/transformers": "^4.3.0",
+    "tesseract.js": "^7.0.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  }
 }

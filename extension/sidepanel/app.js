@@ -6,6 +6,7 @@
 
 import { MessageType } from '../shared/messages.js';
 import { AgentState } from '../shared/constants.js';
+import { setupLocalVisionMessageHandler } from '../perception/local-vision.js';
 
 const FRIENDLY_STATE = {
   [AgentState.IDLE]: { label: 'Ready', detail: 'Tell me what to do on this page.', band: 'idle', dot: 'idle' },
@@ -113,6 +114,7 @@ class SidePanelApp {
   $(id) { return document.getElementById(id); }
 
   init() {
+    setupLocalVisionMessageHandler();
     this.cache();
     this.applyTheme();
     this.bind();
@@ -267,7 +269,7 @@ class SidePanelApp {
       const allTabs = await chrome.tabs.query({});
       const anyAllWeb = allTabs.find(t => /^(https?:\/\/)/i.test(String(t.url || '')));
       if (anyAllWeb) return anyAllWeb.id;
-      const nonExt = tabs.find(t => !String(t.url || '').startsWith('chrome-extension://'));
+      const nonExt = tabs.find(t => !/^(?:chrome|moz)-extension:\/\//i.test(String(t.url || '')));
       if (nonExt) return nonExt.id;
       let [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (!tab) [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
@@ -517,6 +519,12 @@ class SidePanelApp {
     lines.push(`elements_sent: ${payload ? payload.elementsSent : 0} (roles + redacted labels only)`);
     lines.push(`sensitive fields redacted: ${payload ? payload.redactedCount : redacted}`);
     lines.push(`screenshot: ${payload ? payload.screenshot : 'sanitized before upload'}`);
+    if (payload?.localVision) {
+      const local = payload.localVision;
+      lines.push(`local_vision: ${local.model} completed in ${local.analysisMs} ms (load ${local.modelLoadMs} ms, inference ${local.inferenceMs} ms)`);
+      lines.push(`local_masks: ${local.peopleMasked} people, ${local.ocrRegionsMasked} OCR PII regions (${(local.ocrCategoriesMasked || []).join(', ') || 'none'})`);
+      lines.push(`client_assets: ${local.modelAssetBytes ? `${(local.modelAssetBytes / 1048576).toFixed(1)} MiB` : 'size unavailable'}; heap ${local.heapUsedBytes ? `${(local.heapUsedBytes / 1048576).toFixed(1)} MiB` : 'not exposed by browser'}`);
+    }
     lines.push(`tokens: ${(payload?.tokens || [...tokenSet]).join(', ') || 'none'} (resolved locally)`);
     lines.push('policy: outbound payload checked for known sensitive patterns; unknown PII may be missed');
     if (payload?.sampleElements?.length) {
@@ -919,6 +927,9 @@ class SidePanelApp {
       ['step', `${t.currentStep ?? 0}/${t.maxSteps ?? 25}`],
       ['tab id', String(t.tabId ?? '—')],
       ['server calls', String(t.privacyMetrics?.serverCallsCount ?? 0)],
+      ['local vision time', `${t.privacyMetrics?.localVisionLatencyMs ?? 0} ms total`],
+      ['OCR regions masked', String(t.privacyMetrics?.localOcrPiiRegions ?? 0)],
+      ['people masked', String(t.privacyMetrics?.localPeopleMasked ?? 0)],
       ['sensitive fields', String(t.privacyMetrics?.sensitiveFieldsDetected ?? 0)],
       ['pending confirm', t.pendingConfirmation ? 'yes' : 'no']
     ];
@@ -928,6 +939,35 @@ class SidePanelApp {
       row.appendChild(el('span', null, v));
       this.debugBody.appendChild(row);
     }
+    const exportButton = el('button', 'btn btn-secondary', 'Download local vision labels');
+    exportButton.type = 'button';
+    exportButton.disabled = !(t.visionSamples || []).length;
+    exportButton.addEventListener('click', () => this.downloadVisionEvaluation());
+    this.debugBody.appendChild(exportButton);
+  }
+
+  downloadVisionEvaluation() {
+    const task = this.task;
+    if (!task?.visionSamples?.length) return;
+    const taskLatency = Number.isFinite(task.endTime) ? task.endTime - task.startTime : null;
+    const lines = task.visionSamples.map((sample, index) => JSON.stringify({
+      sample_id: `${task.id || 'task'}-${sample.step}`,
+      truth_required: true,
+      objects: { truth: [], predicted: sample.objects || [] },
+      pii: { truth: [], predicted: sample.pii || [] },
+      redactions: { truth: [], predicted: sample.redactions || [] },
+      end_to_end_latency_ms: index === task.visionSamples.length - 1 ? taskLatency : null,
+      client_heap_bytes: sample.clientHeapBytes,
+      client_asset_bytes: sample.clientAssetBytes,
+      local_vision_latency_ms: sample.localVisionLatencyMs
+    }));
+    const blob = new Blob([`${lines.join('\n')}\n`], { type: 'application/x-ndjson' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `${task.id || 'privacy-agent'}-vision-evaluation.jsonl`;
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 }
 

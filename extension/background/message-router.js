@@ -10,14 +10,17 @@ import { agentController } from './agent-controller.js';
 import { taskManager } from './task-manager.js';
 import { defaultLocalVault } from '../privacy/local-vault.js';
 
-/** Classify sender using Chrome supplied identity and document URL. */
+/** Classify sender using WebExtension identity and its extension document URL. */
 export function classifySenderContext(sender, runtimeId) {
   if (!sender) return 'unknown';
   if (sender.id !== runtimeId) return 'foreign-extension';
-  const expectedOrigin = `chrome-extension://${runtimeId}`;
   let url;
   try { url = new URL(sender.url || ''); } catch { return 'unknown'; }
-  if (url.protocol !== 'chrome-extension:' || url.hostname !== runtimeId || `${url.protocol}//${url.hostname}` !== expectedOrigin) return sender.tab ? 'webpage-content-script' : 'unknown';
+  const chromeExtensionUrl = url.protocol === 'chrome-extension:' && url.hostname === runtimeId;
+  // Firefox's moz-extension host is a browser-generated UUID, while sender.id
+  // remains the declared add-on ID checked above.
+  const firefoxExtensionUrl = url.protocol === 'moz-extension:' && Boolean(url.hostname);
+  if (!chromeExtensionUrl && !firefoxExtensionUrl) return sender.tab ? 'webpage-content-script' : 'unknown';
   if (sender.frameId !== undefined && sender.frameId !== 0) return 'extension-subframe';
   if (url.pathname === '/background/service-worker.js') return 'service-worker';
   if (url.pathname === '/sidepanel/index.html') return 'side-panel';
@@ -35,6 +38,12 @@ export function setupMessageRouter(chromeApi = chrome, deps = {}) {
   const vault = deps.localVault || defaultLocalVault;
   chromeApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const { type, payload } = message || {};
+
+    // Background initiated local inference is answered by the open side panel.
+    // Ignore it here so this control-only router cannot race that response.
+    if (type === MessageType.LOCAL_VISION_ANALYZE && sender?.id === chromeApi.runtime.id && !sender.tab) {
+      return false;
+    }
 
     // All messages handled here are user controls or disclose extension state.
     // Webpage content scripts share the extension ID, so ID-only checks are

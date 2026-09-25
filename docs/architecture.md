@@ -4,35 +4,38 @@
 
 ```mermaid
 flowchart TD
-  Page[Untrusted webpage] --> Extract[Extension content script: bounded DOM extraction]
+  Page[Untrusted webpage] --> Extract[Content script: bounded DOM extraction]
   Extract --> Sanitize[Local DOM sanitizer and pattern detection]
-  Capture[Visible tab screenshot] --> ImageGate[Mask known sensitive boxes or withhold image]
+  Capture[Visible tab screenshot] --> LocalVision[Side panel: local YOLOS-Tiny ONNX + English Tesseract OCR]
+  LocalVision --> ImageGate[Mask OCR PII, detected people, and DOM-sensitive boxes; withhold if uncertain]
   Sanitize --> Policy[Outbound policy checks]
   ImageGate --> Policy
   Policy --> Backend[Loopback backend; extension-origin requests]
-  Backend --> Vision[VLM or DOM heuristic with explicit provenance]
+  Backend --> Vision[Server VLM or labeled DOM heuristic]
   Backend --> Reason[Reasoning model]
   Reason --> Validate[Action validation and local risk gate]
   Validate --> Confirm{User confirmation required?}
   Confirm -->|Yes| Panel[Trusted side panel]
-  Confirm -->|No / approved| Execute[Extension service worker and content executor]
+  Confirm -->|No / approved| Execute[Extension background and content executor]
 ```
 
-The server-driven `/agent` loop has been removed. It previously captured a raw screenshot and could continue after logging a high-risk action. The supported browser-control messages enter through `extension/background/message-router.js`; only the exact extension side-panel page may issue user controls, vault reads/writes, or settings changes. Content-script and webpage-originated messages are rejected.
+The server-driven `/agent` loop has been removed. It previously captured raw screenshots and could continue after logging a high-risk action. The side panel is the only UI allowed to issue user controls, vault reads/writes, or settings changes. The same panel runs the local screenshot analysis request from the extension background; webpage content scripts and page-originated messages cannot invoke it.
 
 ## Privacy processing
 
-The content script extracts interactive controls and selected page text. The extension sanitizes known sensitive values and fields, applies the outbound policy to model payloads, then submits the resulting representation to the backend. Screenshot redaction masks known sensitive element boxes. Known sensitive text without a location and canvas/video surfaces cause screenshot withholding. This is not OCR; the extension cannot guarantee detection of arbitrary text in normal page content or images.
+The content script extracts interactive controls and selected page text. The background passes each screenshot to the open extension side panel, where a packaged YOLOS-Tiny object detector and Tesseract OCR run locally. OCR plaintext is used transiently for local pattern matching and discarded before the panel replies. The local result retains object labels, PII categories, counts, confidences, timings, and boxes. The sanitizer masks sensitive DOM controls, OCR-matched text, and detected people using full person boxes.
 
-The backend binds to loopback by default and accepts model API requests only with a Chrome extension origin. It rejects common unredacted patterns in DOM payloads. These checks are defense in depth, not cryptographic proof that an arbitrary image is sanitized. The privacy boundary assumes the installed extension is trusted and unmodified.
+If local analysis fails, the task stops before any screenshot is sent to the server. If OCR cannot locate a recognized sensitive value, its count does not match the DOM text audit, or a canvas/video surface is present, the server receives a neutral placeholder instead of the screenshot. These controls reduce exposure but cannot detect every arbitrary secret or visual PII value.
+
+The backend binds to loopback by default and accepts model requests only from Chrome or Firefox extension origins. It rejects common unredacted patterns in DOM payloads. Those checks are defense in depth, not proof that an arbitrary image is sanitized. The boundary assumes the installed extension is trusted and unmodified.
 
 ## Perception provenance
 
-- `DOM_ONLY`: the extension could not reach the VLM endpoint and used local DOM classification.
-- `DOM_PLUS_HEURISTIC`: backend layout inference from DOM; no visual-model detections are claimed.
-- `DOM_PLUS_REAL_VLM`: a configured vision model returned visual analysis.
+- `DOM_ONLY`: the server VLM request failed. Local object/OCR annotations still ran, but no server VLM result is claimed.
+- `DOM_PLUS_HEURISTIC`: the backend produced a DOM-derived layout summary without a server VLM result.
+- `DOM_PLUS_REAL_VLM`: a configured server vision model returned visual analysis.
 
-The controller captures and sanitizes a screenshot on every observation and requests the VLM endpoint. The client never creates synthetic visual detections for DOM-only execution. The backend labels its DOM-derived response as a heuristic. Actual VLM availability depends on backend configuration and provider response.
+The controller captures, locally analyzes, and sanitizes a screenshot on every observation before requesting the VLM endpoint. YOLOS-Tiny provides general COCO object labels, not face or UI-control detections. The backend labels its DOM-derived response as a heuristic. Server VLM availability depends on backend configuration and provider response.
 
 ## Local values and uploads
 
@@ -40,4 +43,4 @@ Symbolic values are resolved in the extension immediately before DOM input. Vaul
 
 ## Limits
 
-Pattern detection covers common Aadhaar, PAN, card, email, phone, DOB, and token forms, plus semantic field labels and configured vault strings. Name/address/account recognition is heuristic. Arbitrary sensitive prose and text rendered inside images cannot be reliably detected. See [privacy-model.md](privacy-model.md) for claim status and coverage.
+Pattern detection covers common Aadhaar, PAN, card, email, phone, DOB, IFSC, account, and credential forms, plus semantic field labels and configured vault strings. OCR is English-only. Name/address/account recognition is heuristic. YOLOS masks people with their full detected box; it is not a face detector. Arbitrary sensitive prose and text in images may be missed. See [privacy-model.md](privacy-model.md) for claim status and coverage.

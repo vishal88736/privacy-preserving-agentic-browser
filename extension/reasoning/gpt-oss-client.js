@@ -24,11 +24,21 @@ export class GPTOSSClient {
     // Diagnostic output may identify the route and schema keys, never the
     // task, page text, local values, or request body.
     console.debug(`[gpt-oss-client] POST ${endpoint}; fields=${Object.keys(data || {}).join(',')}`);
-    return fetch(`${this.baseUrl}${endpoint}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data)
-    });
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 25000);
+    try {
+      const resp = await fetch(`${this.baseUrl}${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+        signal: ac.signal
+      });
+      clearTimeout(timer);
+      return resp;
+    } catch (err) {
+      clearTimeout(timer);
+      throw err;
+    }
   }
 
   async interpretTask(taskPrompt) {

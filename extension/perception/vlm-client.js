@@ -35,11 +35,15 @@ export class VLMClient {
     this.policyEngine.enforceOutboundSafety(payload);
 
     try {
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), 20000);
       const response = await fetch(`${this.baseUrl}${ServerDefaults.VISION_ENDPOINT}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
+        signal: ac.signal
       });
+      clearTimeout(timer);
 
       if (!response.ok) {
         throw new Error(`VLM server responded with status: ${response.status} ${response.statusText}`);

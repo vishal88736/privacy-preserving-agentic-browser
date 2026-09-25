@@ -2,38 +2,44 @@
 
 ## What this prototype does
 
-The extension extracts a bounded set of interactive controls, headings, result cards, and visible text. Before model requests, it redacts fields classified by input type, labels, attributes, known identifier patterns, and configured vault values. The outbound policy checks a finite set of common identifier and token patterns. These controls reduce accidental disclosure; they do not prove that arbitrary private data is absent.
+The extension extracts a bounded set of interactive controls, headings, result cards, and visible text. Before model requests, it redacts fields classified by input type, labels, attributes, known identifier patterns, and configured vault values. A packaged object detector and OCR engine also analyze each current screenshot inside the extension. The outbound policy checks a finite set of common identifier and token patterns. These controls reduce accidental disclosure; they do not prove that arbitrary private data is absent.
 
 The expected request path is:
 
 ```text
 Untrusted page
   -> extension content script extracts bounded DOM evidence
-  -> local DOM sanitizer and pattern checks
+  -> local DOM sanitizer and value-free sensitive-text audit
+  -> screenshot sent to the open extension side panel
+  -> local YOLOS-Tiny object detection and English OCR
   -> local screenshot masking / screenshot withholding
   -> outbound policy engine
   -> extension-origin backend endpoint
   -> VLM/LLM provider (if configured)
 ```
 
-The backend-driven `/agent` browser automation path is retired. The backend accepts model API requests only from a Chrome extension origin and binds to loopback by default. This limits browser-page access; it is not protection against another local process or a compromised extension.
+OCR text is used transiently for local pattern matching and is discarded before the side panel sends analysis results back to the background. Only object labels, categories, counts, confidences, boxes, and performance measurements are retained. The server receives the sanitized screenshot plus sanitized DOM. A model or OCR initialization failure stops the task before a screenshot request is made.
+
+The backend-driven `/agent` browser automation path is retired. The backend accepts model API requests only from Chrome/Firefox extension origins and binds to loopback by default. This limits browser-page access; it is not protection against another local process or a compromised extension.
 
 ## Detection coverage
 
 | Data | Coverage | Limit |
 |---|---|---|
 | Password fields, labeled Aadhaar/PAN/card/phone/email/DOB/name/address fields | Partially supported | A deceptive or unlabeled field can evade semantic detection. |
-| Aadhaar, PAN, common card, email, Indian phone, date-like DOB, common API/bearer token patterns | Pattern detected | Formats vary; false negatives and false positives are possible. |
+| Aadhaar, PAN, common card, email, Indian phone, date-like DOB, IFSC, common account and credential patterns | Pattern detected in DOM/OCR text | Formats vary; OCR and regex false negatives/positives are possible. |
 | Configured vault strings | Exact/normalized matching for strings of useful length | Values not configured in the vault and transformed/encoded variants may not match. |
 | Names, addresses, account numbers, financial details | Partially detected from field labels and common account wording | Arbitrary names/addresses/account formats cannot be recognized reliably. |
 | Arbitrary sensitive text | Not reliably detectable | Requires user review or a broader local classifier. |
-| PII in canvas/video or text embedded in images | Not detected | Screenshot is withheld when canvas/video exists; image content can still be present in ordinary screenshots. |
+| Text PII in ordinary screenshots | Scanned best-effort by local English OCR | OCR can miss text; unknown visual text can remain visible. |
+| PII in canvas/video | Not analyzed for upload | A canvas/video surface causes screenshot withholding. |
+| Faces/people | People may be detected as COCO `person` objects | The full detected person box is blacked out; YOLOS-Tiny is not a face detector and can miss people. |
 
-Text recognized in the aggregate page excerpt is locally pattern-sanitized. If known sensitive text is found there without a reliable location—including Luhn-valid card numbers, IFSC codes, and common bearer/API-key patterns—the screenshot is replaced by a neutral placeholder. Known sensitive form controls with bounding boxes are blacked out. Unknown visual text can remain visible; the project does not claim OCR-complete screenshot privacy.
+The background sends each captured screenshot to the open extension side panel for local analysis. The DOM sanitizer supplies category counts, not values, for recognized PII in page text. If OCR does not return enough matching boxes for those categories, or a recognized OCR value has no usable box, the screenshot is replaced with a neutral placeholder. Known sensitive form controls with bounding boxes and detected people are blacked out. This is not a guarantee that every sensitive pixel was found or masked. Closing the side panel or failing to load the packaged assets stops the task before image upload.
 
 ## Vault and documents
 
-Vault values are user-configured and stored in `chrome.storage.local`. This module does not encrypt them at rest, derive a key from a PIN, or guarantee memory erasure. Do not store high-value credentials unless you accept Chrome profile storage protections and their limits. The vault starts empty and rejects unsupported keys and non-text values.
+Vault values are user-configured and stored in `chrome.storage.local`. This module does not encrypt them at rest, derive a key from a PIN, or guarantee memory erasure. The vault starts empty and rejects unsupported keys and non-text values.
 
 Real local-document selection is not implemented. A `LOCAL_DOCUMENT` action fails closed. A user can select a file directly on the website; that file is handled by the website and is outside this extension's document-privacy guarantee. The old backend `/agent` file/screenshot route is removed.
 
@@ -41,20 +47,20 @@ Real local-document selection is not implemented. A `LOCAL_DOCUMENT` action fail
 
 Each observation reports one of:
 
-- `DOM_ONLY`: the VLM request failed and the extension fell back to local DOM classification.
-- `DOM_PLUS_HEURISTIC`: the backend derived a layout summary from sanitized DOM; this is not visual perception.
+- `DOM_ONLY`: the server VLM request failed; local object/OCR checks still ran, with no server VLM result claimed.
+- `DOM_PLUS_HEURISTIC`: the backend derived a layout summary from sanitized DOM without server VLM detections.
 - `DOM_PLUS_REAL_VLM`: a configured remote vision model returned a result.
 
-The controller captures a screenshot on every observation and sends the sanitizer output and sanitized DOM through the normal extension route to the VLM endpoint. A DOM heuristic fallback may be used when no vision model responds. This guarantee assumes the installed extension is trusted and unmodified. The backend cannot independently prove that an image has been visually redacted; arbitrary local callers and compromised extensions are outside this boundary.
+The controller captures a screenshot on every observation, requires the local vision pass to finish, and sends only sanitizer output and sanitized DOM through the normal extension route to the VLM endpoint. A DOM heuristic fallback may be used when no server vision model responds. This guarantee assumes the installed extension is trusted and unmodified. The backend cannot independently prove that an image has been visually redacted; arbitrary local callers and compromised extensions are outside this boundary.
 
 ## Claim status
 
 | Claim | Status |
 |---|---|
 | Sensitive data never leaves the device | **NOT SUPPORTED** as an absolute claim. Known patterns and fields are redacted; unknown PII can escape. |
-| VLM receives only sanitized screenshots | **PARTIALLY SUPPORTED** for the normal trusted-extension route; there is no server-side OCR proof. |
-| Webpages cannot approve actions or change settings | **SUPPORTED** for router messages: only the exact side-panel document is authorized. |
-| Vault values are encrypted | **NOT SUPPORTED**. Values are stored in extension-scoped Chrome storage without encryption by this code. |
+| VLM receives only sanitized screenshots | **PARTIALLY SUPPORTED** for the normal trusted-extension route; detection is best-effort and there is no server-side visual proof. |
+| Webpages cannot approve actions or change settings | **SUPPORTED** for router messages: only the extension side panel is authorized. |
+| Vault values are encrypted | **NOT SUPPORTED**. Values are stored in extension-scoped storage without encryption by this code. |
 | The VLM endpoint is requested on every observation | **SUPPORTED** by the normal controller path; backend/provider failures can return an explicitly labeled DOM fallback. |
 | Zero plaintext transmission | **NOT SUPPORTED** as an absolute guarantee. |
 | Real local document handling | **NOT SUPPORTED** by the extension. |

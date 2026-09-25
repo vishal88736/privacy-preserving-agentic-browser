@@ -44,6 +44,13 @@ const MAX_IDENTICAL_ACTIONS = 3;
 const NAV_VERIFY_TIMEOUT_MS = 12000;
 const NAV_VERIFY_POLL_MS = 500;
 
+class LocalVisionRequiredError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'LocalVisionRequiredError';
+  }
+}
+
 // L12: Expanded injection patterns — covers more social engineering attacks
 const INJECTION_PATTERNS = [
   /ignore\s+(all\s+)?previous\s+instructions/i,
@@ -143,6 +150,36 @@ export class AgentController {
     });
   }
 
+  async _analyzeScreenshotLocally(screenshot, viewport, expectedSensitiveCounts) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (callback, value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        callback(value);
+      };
+      const timeout = setTimeout(() => finish(reject, new LocalVisionRequiredError('Local visual analysis timed out.')), 120000);
+      try {
+        chrome.runtime.sendMessage({
+          type: MessageType.LOCAL_VISION_ANALYZE,
+          payload: { screenshot, viewport, expectedSensitiveCounts }
+        }, (response) => {
+          const runtimeError = chrome.runtime.lastError;
+          if (runtimeError) {
+            finish(reject, new LocalVisionRequiredError('Open the agent side panel to run local screenshot analysis.'));
+          } else if (!response?.success || response.analysis?.completed !== true) {
+            finish(reject, new LocalVisionRequiredError('Local screenshot analysis did not complete.'));
+          } else {
+            finish(resolve, response.analysis);
+          }
+        });
+      } catch {
+        finish(reject, new LocalVisionRequiredError('The extension could not start local screenshot analysis.'));
+      }
+    });
+  }
+
   async runLoop(token) {
     const task = taskManager.getTask();
 
@@ -194,6 +231,12 @@ export class AgentController {
           taskManager.failTask(stepErr.message);
           this.clearOverlays(task.tabId);
           this.notify('TASK_FAILED', { error: task.error, hint: task.hint });
+          break;
+        }
+        if (stepErr && stepErr.name === 'LocalVisionRequiredError') {
+          taskManager.failTask('Local screenshot analysis is unavailable. No screenshot was sent to the server.');
+          this.clearOverlays(task.tabId);
+          this.notify('TASK_FAILED', { error: task.error, hint: 'Open the agent side panel and reload the extension so its local vision assets can initialize, then retry.' });
           break;
         }
         // Fail fast on restricted URLs
@@ -274,9 +317,9 @@ export class AgentController {
       (async () => {
         try {
           const tab = await chrome.tabs.get(task.tabId);
-          return defaultScreenshotService.captureTab(tab?.windowId ?? null);
+          return defaultScreenshotService.captureTab(tab?.windowId ?? null, task.tabId);
         } catch {
-          return defaultScreenshotService.captureTab();
+          return defaultScreenshotService.captureTab(null, task.tabId);
         }
       })()
     ]);
@@ -285,7 +328,17 @@ export class AgentController {
       throw new Error(`Failed to observe tab: ${domResponse?.error || 'Target page not responding'}. If on a new tab, navigate to a website first.`);
     }
 
+    if (screenshotResponse?.captured === false || !screenshotResponse?.dataUrl) {
+      throw new LocalVisionRequiredError('The current tab screenshot could not be captured.');
+    }
+
     const rawDOM = domResponse.data;
+    const expectedSensitiveCounts = defaultDOMSanitizer.getUnlocatedSensitiveCounts(rawDOM);
+
+    // Screenshot pixels are sent only to the extension side panel for local
+    // object detection and OCR. The server request is reached only after this
+    // analysis has completed successfully.
+    const localVision = await this._analyzeScreenshotLocally(screenshotResponse.dataUrl, rawDOM.viewport, expectedSensitiveCounts);
 
     // STEP 2: LOCAL PRIVACY SANITIZATION (Client-Side Boundary)
     taskManager.updateState(AgentState.SANITIZING, 'Redacting sensitive fields locally…');
@@ -297,34 +350,86 @@ export class AgentController {
     const extras = defaultDOMSanitizer.sanitizePageExtras(rawDOM);
     const screenshotPrivacyAudit = {
       coverageEstablished: Array.isArray(rawDOM.elements),
-      unlocatedSensitiveText: defaultDOMSanitizer.hasUnlocatedSensitiveText(rawDOM),
+      // Local OCR compares category counts with the DOM's value-free audit
+      // counts. Any unmatched occurrence sets forceWithhold below.
+      unlocatedSensitiveText: false,
       opaqueVisualSurface: Boolean(rawDOM.opaqueVisualSurface),
-      maskedCount: sensitiveCount
+      maskedCount: sensitiveCount + localVision.piiRegions.length + localVision.people.length,
+      localVisionCompleted: localVision.completed === true,
+      forceWithhold: localVision.safeToTransmitAfterRedaction !== true
     };
 
     const sanitizedDOM = {
       ...rawDOM,
+      // Keep current-page context useful while stripping query values and
+      // pattern-shaped PII from URL/title fields before any server request.
+      url: defaultDOMSanitizer.sanitizeUrl(rawDOM.url),
+      title: defaultDOMSanitizer.sanitizeUserPrompt(rawDOM.title || ''),
       elements: sanitizedElements,
       headings: extras.headings,
       result_items: extras.result_items,
       visible_text: extras.visible_text,
-      scroll: extras.scroll
+      scroll: extras.scroll,
+      // This contains labels, counts, confidence and geometry only. OCR text is
+      // intentionally discarded by the local engine and never reaches IPC.
+      local_vision_context: {
+        model: localVision.model,
+        model_revision: localVision.modelRevision,
+        people_masked: localVision.people.length,
+        pii_regions_masked: localVision.piiRegions.length,
+        pii_categories_masked: localVision.piiCategories,
+        unresolved_sensitive_categories: localVision.unlocatedSensitiveCategories,
+        detected_objects: localVision.objectDetections.slice(0, 30),
+        person_regions: localVision.people.map((person) => ({ bbox: person.bbox, confidence: person.confidence })),
+        analysis_ms: localVision.totalMs,
+        model_load_ms: localVision.modelLoadMs,
+        inference_ms: localVision.inferenceMs,
+        asset_bytes: localVision.assetBytes
+      }
     };
+
+    const localMaskElements = [
+      ...sanitizedElements,
+      ...localVision.piiRegions.map((region) => ({ bbox: region.bbox, sensitive: true, semantic_type: region.category })),
+      ...localVision.people.map((person) => ({ bbox: person.bbox, sensitive: true, semantic_type: 'PERSON' }))
+    ];
 
     // Every observation includes a locally sanitized screenshot for VLM
     // grounding. Capture runs in parallel with DOM extraction above.
     const redactedScreenshot = await defaultScreenshotSanitizer.redactScreenshot(
       screenshotResponse.dataUrl,
-      sanitizedElements,
+      localMaskElements,
       rawDOM.viewport,
       screenshotPrivacyAudit
     );
 
+    task.visionSamples ||= [];
+    task.visionSamples.push({
+      step: task.currentStep + 1,
+      objects: localVision.objectDetections,
+      pii: localVision.piiRegions.map(({ bbox, category }) => ({ bbox, category })),
+      redactions: localMaskElements.filter((region) => region.sensitive && Array.isArray(region.bbox)).map((region) => ({
+        bbox: region.bbox,
+        category: region.semantic_type || 'SENSITIVE'
+      })),
+      localVisionLatencyMs: localVision.totalMs,
+      clientHeapBytes: localVision.heapUsedBytes,
+      clientAssetBytes: localVision.assetBytes
+    });
+
     taskManager.updatePrivacyMetrics({
       sensitiveFieldsDetected: sensitiveCount,
       secretsKeptLocal: sensitiveCount,
-      redactedRegionsCount: sensitiveCount,
-      detectedCategories
+      redactedRegionsCount: sensitiveCount + localVision.piiRegions.length + localVision.people.length,
+      localVisionLatencyMs: localVision.totalMs,
+      localModelAssetBytes: localVision.assetBytes,
+      localOcrPiiRegions: localVision.piiRegions.length,
+      localPeopleMasked: localVision.people.length,
+      detectedCategories: [...new Set([
+        ...detectedCategories,
+        ...localVision.piiCategories,
+        ...(localVision.people.length ? ['PERSON'] : [])
+      ])]
     });
     // Transparency: record exactly what leaves the device for the "What is
     // sent to the AI" panel. Never includes vault plaintext — only counts,
@@ -346,6 +451,17 @@ export class AgentController {
         elementsSent: (sanitizedElements || []).length,
         redactedCount: sensitiveCount,
         detectedCategories: detectedCategories || [],
+        localVision: {
+          model: localVision.model,
+          analysisMs: localVision.totalMs,
+          modelLoadMs: localVision.modelLoadMs,
+          inferenceMs: localVision.inferenceMs,
+          modelAssetBytes: localVision.assetBytes,
+          peopleMasked: localVision.people.length,
+          ocrRegionsMasked: localVision.piiRegions.length,
+          ocrCategoriesMasked: localVision.piiCategories,
+          heapUsedBytes: localVision.heapUsedBytes
+        },
         tokens,
         screenshotStatus,
         screenshot: screenshotStatus === 'withheld'
@@ -369,12 +485,28 @@ export class AgentController {
       task.id,
       redactedScreenshot,
       sanitizedDOM,
-      { viewport: rawDOM.viewport, title: rawDOM.title, url: defaultDOMSanitizer.sanitizeUrl(rawDOM.url) }
+      {
+        viewport: rawDOM.viewport,
+        title: rawDOM.title,
+        url: defaultDOMSanitizer.sanitizeUrl(rawDOM.url),
+        privacy_redaction_summary: {
+          dom_regions: sensitiveCount,
+          ocr_regions: localVision.piiRegions.length,
+          people_regions: localVision.people.length,
+          screenshot_withheld: defaultScreenshotSanitizer.lastRedactionStatus === 'withheld',
+          unresolved_sensitive_categories: localVision.unlocatedSensitiveCategories
+        }
+      }
     );
 
     if (visualObservation._source !== 'DOM_ONLY') {
       taskManager.updatePrivacyMetrics({ serverCallsCount: 1 });
     }
+
+    const objectSummary = localVision.objectDetections.slice(0, 12).map((item) => item.label).join(', ');
+    const localVisionNote = `Local ${localVision.model} and OCR checks completed in ${localVision.totalMs} ms; detected objects: ${objectSummary || 'none'}. Masked ${localVision.people.length} people and ${localVision.piiRegions.length} OCR-identified sensitive regions. OCR text was discarded locally.`;
+    visualObservation.spatial_layout = [visualObservation.spatial_layout, localVisionNote].filter(Boolean).join(' ');
+    visualObservation.visual_state = [visualObservation.visual_state, localVisionNote].filter(Boolean).join(' ');
 
     // STEP 4: OBSERVATION FUSION + injection quarantine
     const fusedObservation = defaultObservationFusion.fuse(
@@ -388,7 +520,8 @@ export class AgentController {
         scroll: extras.scroll,
         headings: extras.headings,
         result_items: extras.result_items,
-        visible_text: extras.visible_text
+        visible_text: extras.visible_text,
+        local_vision_context: sanitizedDOM.local_vision_context
       }
     );
     this.quarantineInjectedElements(fusedObservation);
@@ -1049,7 +1182,7 @@ export class AgentController {
       await new Promise((resolve) => {
         let settled = false;
         const done = () => { if (!settled) { settled = true; clearTimeout(timer); resolve(); } };
-        const timer = setTimeout(done, 1200);
+        const timer = setTimeout(done, 800);
         chrome.tabs.sendMessage(
           tabId,
           { type: MessageType.CHECK_PAGE_STABILITY, payload: { quietMs: 120 } },
@@ -1070,18 +1203,18 @@ export class AgentController {
   _getPostActionWait(actionType) {
     switch (actionType) {
       case ActionType.NAVIGATE:
-        return 700;
+        return 500;
       case ActionType.CLICK:
       case ActionType.SUBMIT:
-        return 250;
-      case ActionType.TYPE:
-        return 100;
-      case ActionType.SELECT:
         return 150;
+      case ActionType.TYPE:
+        return 60;
+      case ActionType.SELECT:
+        return 80;
       case ActionType.SCROLL:
-        return 200;
+        return 120;
       default:
-        return 100;
+        return 60;
     }
   }
 

@@ -25,11 +25,11 @@ test('screenshot sanitizer draws an opaque blackout over the detected DOM boundi
   try {
     const raw = 'data:image/png;base64,UElJ';
     const sanitizer = new ScreenshotSanitizer();
-    const safe = await sanitizer.redactScreenshot(raw, [{ sensitive: true, bbox: [10, 20, 30, 15], semantic_type: 'PAN' }], { width: 100, height: 100 }, { coverageEstablished: true });
+    const safe = await sanitizer.redactScreenshot(raw, [{ sensitive: true, bbox: [10, 20, 30, 15], semantic_type: 'PAN' }], { width: 100, height: 100 }, { coverageEstablished: true, localVisionCompleted: true });
     assert.equal(safe, 'data:image/webp;base64,REENCODED');
     assert.equal(sanitizer.lastRedactionStatus, 'masked');
     assert.ok(fills.some(x => x.style === '#000000' && x.args[0] <= 10 && x.args[1] <= 20 && x.args[2] >= 30 && x.args[3] >= 15));
-    const checked = await sanitizer.redactScreenshot(raw, [{ sensitive: false, bbox: [0, 0, 10, 10] }], { width: 100, height: 100 }, { coverageEstablished: true });
+    const checked = await sanitizer.redactScreenshot(raw, [{ sensitive: false, bbox: [0, 0, 10, 10] }], { width: 100, height: 100 }, { coverageEstablished: true, localVisionCompleted: true });
     assert.equal(checked, 'data:image/webp;base64,REENCODED');
     assert.equal(sanitizer.lastRedactionStatus, 'checked');
   } finally {

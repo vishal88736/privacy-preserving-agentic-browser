@@ -34,6 +34,20 @@ This document details the licensing, attribution, conceptual reuse, clean-room r
   - Critical Privacy Anti-Pattern: AI Browser Agent sent raw HTML (`${html}`) and target values directly into external OpenAI API prompts without sanitization, leaking all form values, PII, and credentials.
 - **Implementation Mechanism**: Clean-room implementation targeting Chrome Extension APIs (`chrome.tabs`, `chrome.scripting`, `chrome.sidePanel`) with zero Electron dependencies.
 
+### Packaged local-vision assets
+
+The extension build includes these upstream assets so screenshot analysis does not fetch executable code or model files at runtime:
+
+| Asset | Source and pinned version | Upstream license |
+| :--- | :--- | :--- |
+| Transformers.js browser runtime | [`@huggingface/transformers` 4.3.0](https://github.com/huggingface/transformers.js) | Apache-2.0 |
+| YOLOS-Tiny quantized ONNX weights | [`Xenova/yolos-tiny`, pinned revision in `extension/models/local-vision-assets.json`](https://huggingface.co/Xenova/yolos-tiny) | Review the upstream model card and repository terms before redistribution. |
+| Tesseract.js and OCR core | [`tesseract.js` / `tesseract.js-core` 7.0.0](https://github.com/naptha/tesseract.js) | Apache-2.0 |
+| ONNX Runtime Web | `onnxruntime-web`, exact package version pinned in `package-lock.json` | MIT |
+| English OCR language data | `@tesseract.js-data/eng` best-int language data | See the upstream data package terms. |
+
+`npm run prepare:local-vision-assets` copies the pinned npm package assets and downloads the pinned model revision plus English language data. The YOLOS ONNX file is checked against its SHA-256 before it is written. `extension/vendor/` and `extension/models/` are generated distributable assets, not original model/runtime implementations.
+
 ---
 
 ## 2. Summary of Architectural Lineage
@@ -44,18 +58,18 @@ This document details the licensing, attribution, conceptual reuse, clean-room r
 | **Task State Machine** | AI Browser Agent & Magnitude | Re-architected as 14-state FSM | Strict state-transition guards |
 | **DOM Element Grounding** | Magnitude (`renderMinimalAccessibilityTree`) | Re-implemented for Content Script | Enforces PII attribute scrubbing |
 | **Visual Grounding** | Magnitude (`webActions.ts`) | Re-implemented with Bounding Box IoU | Local coordinate safety gate |
-| **Local PII Detector** | **Novel SIH Contribution** | Written from scratch | 100% Local (Regex + Contextual) |
+| **Local PII Detector** | Project implementation | Regex + contextual rules | Runs locally; pattern coverage is incomplete |
 | **DOM Sanitizer** | **Novel SIH Contribution** | Written from scratch | Replaces secrets with `LOCAL_*` |
-| **Screenshot Redaction** | **Novel SIH Contribution** | Written from scratch | Canvas blackout before remote VLM |
+| **Screenshot Redaction** | Project implementation using upstream OCR/object detection | OCR boxes + object boxes + DOM boxes | Canvas masking before remote VLM |
 | **Local Secret Vault** | **Novel SIH Contribution** | Written from scratch | Values stored locally; outbound checks are best-effort |
 | **Local Safety Risk Gate** | **Novel SIH Contribution** | Written from scratch | Blocks exfiltration & prompt injection |
-| **DOM/VLM Observation Fusion** | **Novel SIH Contribution** | Written from scratch | Optional vision with explicit DOM-only/heuristic/VLM provenance |
+| **DOM/local-vision/VLM fusion** | Project implementation | DOM grounding, packaged local model, remote VLM | Heuristic and VLM provenance reported explicitly |
 | **MV3 Side Panel UI** | **Novel SIH Contribution** | Written from scratch | Real-time privacy & step dashboard |
 
 ---
 
 ## 3. Clean-Room Work & Privacy Limits
 
-1. **No Proprietary or Leaked Code**: All implementation files in this extension are written specifically for Chrome Manifest V3 using modern standard Web APIs.
+1. **No Proprietary or Leaked Code**: The project's agent integration is written for WebExtensions using modern standard APIs. The extension package also contains third-party open-source runtimes and model/data assets listed above.
 2. **Pattern-based privacy controls**: The extension redacts recognized PII and checks outbound requests; this does not guarantee zero plaintext transmission for arbitrary or undetected data.
 3. **Symbolic Resolution**: The reasoning model only produces symbolic references (e.g., `LOCAL_AADHAAR`), which are resolved strictly within the browser extension's local sandboxed execution context.

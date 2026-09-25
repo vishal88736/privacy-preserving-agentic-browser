@@ -2,11 +2,11 @@
 
 [![SIH Prototype](https://img.shields.io/badge/SIH-Smart%20India%20Hackathon-blue.svg)](https://www.sih.gov.in/)
 [![Manifest V3](https://img.shields.io/badge/Chrome%20Extension-Manifest%20V3-success.svg)](https://developer.chrome.com/docs/extensions/mv3/)
-[![DOM + VLM](https://img.shields.io/badge/Perception-DOM%20%2B%20VLM-indigo.svg)](#architecture)
+[![Local Vision](https://img.shields.io/badge/Perception-Local%20OCR%20%2B%20ONNX-indigo.svg)](#architecture)
 [![Local Privacy](https://img.shields.io/badge/Privacy-Best%20Effort%20Filtering-emerald.svg)](#privacy-protections)
 [![License](https://img.shields.io/badge/License-Apache%202.0%20%2F%20MIT%20Attribution-lightgrey.svg)](docs/REUSE_AND_ATTRIBUTION.md)
 
-A prototype browser agent developed for the **Smart India Hackathon (SIH)**. It combines local DOM extraction, pattern-based sanitization, a sanitized screenshot sent for VLM grounding on every observation, symbolic vault values, and an action confirmation gate. If the VLM is unavailable, the backend reports a DOM heuristic fallback; privacy protection remains best-effort and cannot guarantee that arbitrary personal data will stay local. Real local-document selection is not implemented.
+A prototype browser agent developed for the **Smart India Hackathon (SIH)**. It analyzes each captured screenshot in the browser with a packaged ONNX object detector and OCR, masks recognized PII and detected person boxes locally, and then sends the sanitized image plus sanitized DOM to a server VLM. It also uses symbolic vault values and an action confirmation gate. The filters are best-effort: models can miss people, OCR can miss text, and arbitrary PII is not guaranteed to be detected. Real local-document selection is not implemented.
 
 ---
 
@@ -25,15 +25,15 @@ they inadvertently expose sensitive personal identifiers, session tokens, passwo
 
 ## 💡 The Solution: Local Privacy Filters + Per-Observation VLM Grounding
 
-This project places a **Local Privacy Layer** before model requests. Visual analysis may use a real VLM, a DOM heuristic, or DOM only; provenance is reported explicitly:
+This project places local screenshot analysis and redaction before model requests. The server VLM captures page semantics from the already-sanitized screenshot; a DOM heuristic is reported explicitly if no server vision provider responds:
 
 ```
 Browser Viewport & DOM (every observation)
        │
        ▼
-[ LOCAL PRIVACY ENGINE ]  ──►  1. Scans DOM & Text for PII (Aadhaar, PAN, Passwords, etc.)
-       │                        2. Replaces secret DOM values with [REDACTED] & symbolic tokens
-       │                        3. OffscreenCanvas blacks out sensitive regions on Screenshot (████)
+[ LOCAL PRIVACY ENGINE ]  ──►  1. Runs YOLOS-Tiny ONNX object detection + Tesseract OCR locally
+       │                        2. Matches recognized text against local PII patterns; discards OCR text
+       │                        3. Replaces secret DOM values and masks PII/person boxes on canvas (████)
        ▼
 Sanitized DOM + Locally Sanitized Image
        │
@@ -65,7 +65,7 @@ Browser DOM Mutation
 
 1. **Pattern-based redaction**: Recognized identifiers, configured vault values, and structurally sensitive fields are redacted before model requests. Detection is incomplete; names, addresses, unknown account formats, and arbitrary secrets may be missed.
 2. **Symbolic Resolution**: The AI outputs symbolic intent (`value_source: "LOCAL_AADHAAR"`). The local extension executor injects the actual value directly into the page DOM from the local vault.
-3. **Screenshot handling**: Known sensitive control boxes are masked. When recognized sensitive text has no location or canvas/video content is present, the screenshot is replaced with a neutral placeholder. This is not OCR and cannot detect arbitrary text or content inside images.
+3. **Screenshot handling**: Before upload, local Tesseract OCR locates recognized PII patterns and YOLOS-Tiny detects general COCO objects. Detected people are masked using their full object box (this is not face detection). If a local model fails, a sensitive OCR match has no usable box, or canvas/video surfaces prevent coverage, the screenshot is withheld as a neutral placeholder. Detection is best-effort and cannot guarantee all PII is found.
 4. **Outbound checks**: A local policy engine blocks several known identifier and token formats and configured vault values. It cannot prove a payload contains no PII.
 
 ### Security and privacy limits
@@ -75,14 +75,16 @@ Browser DOM Mutation
 - The backend-driven `/agent` browser loop is removed because it bypassed screenshot sanitization and confirmation.
 - Real local document upload is unsupported. The executor rejects document tokens; users may choose files directly on a webpage themselves.
 - VLM provenance is one of `DOM_ONLY`, `DOM_PLUS_HEURISTIC`, or `DOM_PLUS_REAL_VLM`. A heuristic is never described as visual-model output.
+- OCR runs locally in English. Only categories, counts, confidence values, and boxes are retained; recognized text is discarded before IPC. The locally packaged YOLOS-Tiny model is a general object detector, not a face detector or UI-control detector.
 
 ---
 
 ## 🏛️ System Architecture
 
-### 1. DOM and VLM Perception
+### 1. DOM, Local Vision, and VLM Perception
 - **DOM Perception**: Extracts accessible labels, semantic roles, input types, bounding boxes, and states.
-- **VLM Perception**: Sends the locally sanitized screenshot and DOM to the configured VLM on every observation to capture spatial layout, visual button hierarchy, canvas controls, and page state. If no vision model responds, the backend labels its DOM-derived fallback explicitly.
+- **Local Vision**: Runs YOLOS-Tiny object detection and Tesseract OCR in the extension side panel using locally packaged ONNX/WASM and language data. PII patterns receive OCR boxes for redaction; detected people are conservatively masked by object box. OCR text stays local.
+- **Server VLM Perception**: Receives only the locally sanitized screenshot and sanitized DOM on every observation to interpret page state and visual hierarchy. If no vision model responds, the backend labels its DOM-derived fallback explicitly. If local screenshot analysis fails, the screenshot is never sent and the task stops.
 - **Observation Fusion**: Matches DOM elements with visual bounding boxes using Intersection-over-Union (IoU) and semantic matching.
 
 ### 2. Autonomous Agent Loop
@@ -101,14 +103,17 @@ $$\text{OBSERVE} \longrightarrow \text{SANITIZE} \longrightarrow \text{VISUAL AN
 ```
 .
 ├── extension/                  # Chromium Manifest V3 Browser Extension
-│   ├── manifest.json           # MV3 extension manifest
+│   ├── manifest.json           # Chrome MV3 source manifest
+│   ├── manifest.firefox.json   # Firefox MV3 sidebar manifest used by the build
 │   ├── background/             # Service worker, agent controller & task manager
 │   ├── content/                # Content scripts, DOM extractor & browser executor
 │   ├── privacy/                # Local PII detector, DOM sanitizer & screenshot redaction
-│   ├── perception/             # Screenshot service, VLM client & observation fusion
+│   ├── perception/             # Local vision, screenshot service, VLM client & fusion
 │   ├── reasoning/              # Prompt builder, GPT-OSS 120B client & action parser
 │   ├── executor/               # Local value resolver, risk gate & action validator
 │   ├── sidepanel/              # Modern dark-glassmorphic side panel UI
+│   ├── vendor/                 # Locally packaged OCR, ONNX runtime, and WASM (generated)
+│   ├── models/                 # Pinned model weights/language data (generated)
 │   └── icons/                  # Extension icons
 ├── backend/                    # Server VLM & GPT-OSS 120B service cluster
 │   ├── server.py               # FastAPI server (/vision, /reason, /health)
@@ -122,11 +127,8 @@ $$\text{OBSERVE} \longrightarrow \text{SANITIZE} \longrightarrow \text{VISUAL AN
 │   ├── privacy/                # Tests for Aadhaar, PAN, Luhn cards, DOM sanitization, policy engine
 │   ├── executor/               # Tests for risk gates and exfiltration blocking
 │   └── agent/                  # Tests for observation fusion, parser, and multi-step workflows
-└── docs/                       # Comprehensive architectural & compliance specifications
-    ├── REUSE_AND_ATTRIBUTION.md# Audit of Magnitude & AI Browser Agent (Apache 2.0 & MIT)
-    ├── architecture.md         # Detailed system design
-    ├── privacy-model.md        # Formal data boundary specification
-    └── threat-model.md         # Adversarial threat analysis and prompt injection defenses
+├── docs/                       # Architecture, privacy, threat, and provider documentation
+└── scripts/                    # Local asset preparation, browser packaging, metric evaluation
 ```
 
 ---
@@ -134,9 +136,9 @@ $$\text{OBSERVE} \longrightarrow \text{SANITIZE} \longrightarrow \text{VISUAL AN
 ## 🚀 Getting Started
 
 ### Prerequisites
-- Node.js v18+ (tested on Node v24)
+- Node.js v18+ (needed to prepare local model assets)
 - Python 3.10+ (tested on Python 3.14)
-- Google Chrome or Chromium-based browser (v114+ supporting Side Panel API)
+- Google Chrome/Chromium v114+ or Firefox v121+
 
 ### Step 1: Start the AI Backend Cluster
 ```bash
@@ -158,12 +160,32 @@ python3 test-server/app.py
 # Server running at http://localhost:5000
 ```
 
-### Step 3: Load the Browser Extension in Chrome
-1. Open Google Chrome and navigate to `chrome://extensions/`.
-2. Toggle on **Developer mode** in the top-right corner.
-3. Click **Load unpacked**.
-4. Select the `extension/` directory inside this repository.
-5. Click the extension icon to open the **PrivAgent Side Panel**.
+### Step 3: Prepare and package the browser extensions
+Install the pinned dependencies and download the model and OCR data once during setup. At runtime, inference uses only packaged local assets.
+
+```bash
+npm ci
+npm run prepare:local-vision-assets
+npm run build:extensions
+```
+
+Load Chrome by opening `chrome://extensions/` and selecting `dist/chrome/` with **Load unpacked**. For Firefox, open `about:debugging#/runtime/this-firefox` and use **Load Temporary Add-on**, selecting `dist/firefox/manifest.json`. Firefox opens the agent in its sidebar. Keep the side panel/sidebar open during a task because it hosts local screenshot analysis.
+
+When local vision assets change, rerun the preparation and packaging commands. The manifest pins the YOLOS-Tiny revision and verifies its ONNX weight checksum before writing it.
+
+### Evaluation metrics
+
+The extension records local analysis time, model asset bytes, heap usage where the browser exposes it, OCR redaction counts, and detected person counts. In **Developer diagnostics**, select **Download local vision labels** to export predictions and empty `truth` arrays (the export contains no screenshot pixels or OCR text). Fill those arrays using manually labeled screen samples, then run:
+
+```bash
+npm run evaluate:vision -- annotations.jsonl --iou 0.5
+```
+
+Each row can contain `objects`, `pii`, and `redactions` objects with `truth` and `predicted` arrays (`label` or `category`, plus `[x, y, width, height]` boxes), along with `end_to_end_latency_ms`, `client_heap_bytes`, and `client_asset_bytes`. The evaluator reports micro precision/recall, latency median/p95, and peak client resource values. It needs human-labeled screenshots to produce project accuracy numbers; no scores are claimed without that dataset.
+
+### Browser API notes
+
+Chrome is built from `extension/manifest.json`; Firefox is built from `extension/manifest.firefox.json`, which selects Firefox's `background.scripts` and `sidebar_action`. The Firefox package declares `websiteContent` data collection because sanitized page context is sent to the configured server VLM.
 
 ---
 
@@ -222,6 +244,6 @@ Navigate your browser to `http://localhost:5000` to access the benchmark suite:
 
 ## 📜 Attribution & Open-Source Lineage
 
-This project builds upon architectural concepts audited from **Magnitude** (Apache License 2.0) and **AI Browser Agent** (MIT License). All extension code, the local privacy layer, client-side PII detector, screenshot canvas sanitizer, symbolic resolution engine, and dual DOM+VLM fusion are novel SIH clean-room contributions. 
+This project builds upon architectural concepts audited from **Magnitude** (Apache License 2.0) and **AI Browser Agent** (MIT License). The browser agent and privacy integration are authored for this project. Packaged third-party runtimes, ONNX weights, and OCR data retain their upstream licenses and are listed in [docs/REUSE_AND_ATTRIBUTION.md](docs/REUSE_AND_ATTRIBUTION.md).
 
 See [docs/REUSE_AND_ATTRIBUTION.md](docs/REUSE_AND_ATTRIBUTION.md) for complete licensing notices and component mapping.

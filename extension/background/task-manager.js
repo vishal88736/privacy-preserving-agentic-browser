@@ -124,12 +124,17 @@ export class TaskManager {
       stateDetail: '',
       startTime: Date.now(),
       steps: [],
+      visionSamples: [],
       privacyMetrics: {
         sensitiveFieldsDetected: 0,
         sensitiveFieldsCurrent: 0,
         secretsKeptLocal: 0,
         redactedRegionsCount: 0,
         serverCallsCount: 0,
+        localVisionLatencyMs: 0,
+        localModelAssetBytes: null,
+        localOcrPiiRegions: 0,
+        localPeopleMasked: 0,
         detectedCategories: []
       },
       currentStep: 0,
@@ -183,6 +188,10 @@ export class TaskManager {
       if (metricsUpdate.secretsKeptLocal) pm.secretsKeptLocal += metricsUpdate.secretsKeptLocal;
       if (metricsUpdate.redactedRegionsCount) pm.redactedRegionsCount += metricsUpdate.redactedRegionsCount;
       if (metricsUpdate.serverCallsCount) pm.serverCallsCount += metricsUpdate.serverCallsCount;
+      if (typeof metricsUpdate.localVisionLatencyMs === 'number') pm.localVisionLatencyMs += metricsUpdate.localVisionLatencyMs;
+      if (typeof metricsUpdate.localModelAssetBytes === 'number') pm.localModelAssetBytes = metricsUpdate.localModelAssetBytes;
+      if (typeof metricsUpdate.localOcrPiiRegions === 'number') pm.localOcrPiiRegions += metricsUpdate.localOcrPiiRegions;
+      if (typeof metricsUpdate.localPeopleMasked === 'number') pm.localPeopleMasked += metricsUpdate.localPeopleMasked;
       if (metricsUpdate.detectedCategories) {
         const set = new Set([...pm.detectedCategories, ...metricsUpdate.detectedCategories]);
         pm.detectedCategories = Array.from(set);
@@ -264,6 +273,7 @@ export class TaskManager {
             pendingUserInput: t.pendingUserInput || null,
             privacyMetrics: t.privacyMetrics,
             lastLLMPayload: t.lastLLMPayload || null,
+            visionSamples: (t.visionSamples || []).slice(-40),
             steps: (t.steps || []).slice(-20)
           }
         }).catch(() => {});

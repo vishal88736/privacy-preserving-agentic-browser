@@ -48,7 +48,7 @@ test('agent sends a locally sanitized screenshot to the VLM on every observation
     assert.ok(elements.some((element) => element.sensitive));
     assert.deepEqual(viewport, { width: 1280, height: 800 });
     assert.equal(audit.coverageEstablished, true);
-    assert.equal(audit.maskedCount, 1);
+    assert.equal(audit.maskedCount, 2);
     return safeScreenshot;
   }));
   restore.push(replaceMethod(defaultVLMClient, 'processVisuals', async (...args) => {
@@ -67,6 +67,25 @@ test('agent sends a locally sanitized screenshot to the VLM on every observation
   controller.clearOverlays = () => {};
   controller._waitForPageStability = async () => {};
   controller._maybeHandleNavigationBootstrap = async () => ({ handled: false });
+  controller._analyzeScreenshotLocally = async () => ({
+    completed: true,
+    safeToTransmitAfterRedaction: true,
+    unlocatedSensitiveCategories: [],
+    objectDetections: [],
+    people: [],
+    piiRegions: [{ bbox: [10, 90, 200, 30], category: 'PASSWORD' }],
+    piiCategories: ['PASSWORD'],
+    unableToLocateSensitiveText: false,
+    imageWidth: 1280,
+    imageHeight: 800,
+    model: 'Xenova/yolos-tiny',
+    modelRevision: 'test',
+    modelLoadMs: 10,
+    inferenceMs: 20,
+    totalMs: 30,
+    assetBytes: 5000000,
+    heapUsedBytes: null
+  });
   controller._extractDOM = async () => ({
     success: true,
     data: {

@@ -197,6 +197,7 @@ export class DOMSanitizer {
       sanitized.placeholder = this.scrubPlaceholderText(sanitized.placeholder);
       if (sanitized.label) sanitized.label = this.scrubPlaceholderText(sanitized.label);
       if (sanitized.context) sanitized.context = this.sanitizeUserPrompt(sanitized.context);
+      if (sanitized.href) sanitized.href = this.sanitizeLink(sanitized.href);
       if (Array.isArray(sanitized.options)) {
         sanitized.options = sanitized.options.map((o) => this.sanitizeUserPrompt(o));
       }
@@ -240,31 +241,55 @@ export class DOMSanitizer {
    * In that case callers must omit the original screenshot entirely.
    */
   hasUnlocatedSensitiveText(rawDOM = {}) {
+    return Object.values(this.getUnlocatedSensitiveCounts(rawDOM)).some((count) => count > 0);
+  }
+
+  /** Count known sensitive text without returning any of its values. */
+  getUnlocatedSensitiveCounts(rawDOM = {}) {
     const patterns = [
-      /\b[2-9]\d{3}[\s-]?\d{4}[\s-]?\d{4}\b/i,
-      /\b[A-Z]{5}\d{4}[A-Z]\b/i,
-      /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i,
-      /(?<!\d)(?:(?:\+|0{0,2})91[\s-]?)?[6-9]\d{9}(?!\d)/,
-      /\b(?:0[1-9]|[12]\d|3[01])[-/.](?:0[1-9]|1[0-2])[-/.](?:19|20)\d{2}\b/,
-      /\b(?:password|passcode|one.time.code|otp|account number|bank account|api key|access token)\s*[:#-]\s*\S+/i,
-      /\b(?:sk|pk|api)[-_][A-Za-z0-9_-]{16,}\b/i,
-      /\bBearer\s+[A-Za-z0-9._~+/-]{12,}={0,2}/i,
-      /\b[A-Z]{4}0[A-Z0-9]{6}\b/i
+      ['AADHAAR', /\b[2-9]\d{3}[\s-]?\d{4}[\s-]?\d{4}\b/gi],
+      ['PAN', /\b[A-Z]{5}\d{4}[A-Z]\b/gi],
+      ['EMAIL', /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi],
+      ['PHONE', /(?<!\d)(?:(?:\+|0{0,2})91[\s-]?)?[6-9]\d{9}(?!\d)/g],
+      ['DOB', /\b(?:0[1-9]|[12]\d|3[01])[-/.](?:0[1-9]|1[0-2])[-/.](?:19|20)\d{2}\b/g],
+      ['CREDENTIAL', /\b(?:password|passcode|one[ .-]?time(?:[ .-]code|[ .-]password)?|otp|account number|bank account|api key|access token)\s*[:#-]\s*\S+/gi],
+      ['CREDENTIAL', /\b(?:sk|pk|api)[-_][A-Za-z0-9_-]{16,}\b/gi],
+      ['CREDENTIAL', /\bBearer\s+[A-Za-z0-9._~+/-]{12,}={0,2}/gi],
+      ['IFSC', /\b[A-Z]{4}0[A-Z0-9]{6}\b/gi]
     ];
-    const texts = [rawDOM.visible_text, ...(rawDOM.headings || []).map((h) => h.text), ...(rawDOM.result_items || []).map((i) => i.text || i.title)];
-    // These text aggregates do not carry reliable pixel boxes. Even if some
-    // originating nodes had geometry, the screenshot redactor only receives
-    // interactive-element boxes, so any recognized match requires withholding
-    // the full image.
-    return texts.some((value) => {
-      if (typeof value !== 'string') return false;
-      if (patterns.some((pattern) => pattern.test(value))) return true;
-      const cardNumbers = value.match(/(?<!\d)(?:\d[ -]?){13,19}(?!\d)/g) || [];
-      return cardNumbers.some((candidate) => {
-        const digits = candidate.replace(/[ -]/g, '');
-        return digits.length >= 13 && digits.length <= 19 && validateLuhn(digits);
-      });
-    });
+    const aggregateTexts = typeof rawDOM.visible_text === 'string' && rawDOM.visible_text
+      ? [rawDOM.visible_text]
+      : [...(rawDOM.headings || []).map((h) => h.text), ...(rawDOM.result_items || []).map((i) => i.text || i.title)];
+    const observed = {};
+    for (const value of new Set(aggregateTexts.filter((item) => typeof item === 'string' && item))) {
+      const spansByCategory = new Map();
+      const addSpan = (category, start, end) => {
+        if (!spansByCategory.has(category)) spansByCategory.set(category, []);
+        spansByCategory.get(category).push({ start, end });
+      };
+      for (const [category, pattern] of patterns) {
+        pattern.lastIndex = 0;
+        for (const match of value.matchAll(pattern)) addSpan(category, match.index, match.index + match[0].length);
+      }
+      const cardPattern = /(?<!\d)(?:\d[ -]?){13,19}(?!\d)/g;
+      for (const match of value.matchAll(cardPattern)) {
+        const digits = match[0].replace(/[ -]/g, '');
+        if (digits.length >= 13 && digits.length <= 19 && validateLuhn(digits)) {
+          addSpan('CREDIT_CARD', match.index, match.index + match[0].length);
+        }
+      }
+      for (const [category, spans] of spansByCategory) {
+        spans.sort((a, b) => a.start - b.start || a.end - b.end);
+        let count = 0;
+        let end = -1;
+        for (const span of spans) {
+          if (span.start >= end) count++;
+          end = Math.max(end, span.end);
+        }
+        observed[category] = (observed[category] || 0) + count;
+      }
+    }
+    return observed;
   }
 
   /**
@@ -274,38 +299,27 @@ export class DOMSanitizer {
   sanitizeUrl(url) {
     try {
       const parsed = new URL(url);
-      // L9: Comprehensive sensitive query parameter list
-      const sensitiveParams = [
-        'token', 'auth', 'code', 'key', 'password', 'pass', 'session',
-        'id_token', 'access_token', 'refresh_token',
-        // L9: Additional sensitive parameters
-        'api_key', 'apikey', 'api-key',
-        'secret', 'client_secret',
-        'jwt', 'bearer',
-        'state', 'nonce',
-        'sid', 'session_id', 'sessionid',
-        'csrf', 'csrf_token', '_csrf',
-        'otp', 'verification_code',
-        'private_key', 'privatekey',
-        'ssn', 'aadhaar', 'pan',
-        'credit_card', 'card_number',
-        'user_token', 'auth_token', 'authorization'
-      ];
-      for (const param of sensitiveParams) {
-        if (parsed.searchParams.has(param)) {
-          parsed.searchParams.set(param, '[REDACTED]');
-        }
-      }
-      // Also redact any param whose name contains sensitive keywords
-      for (const [pKey] of parsed.searchParams.entries()) {
-        const pLower = pKey.toLowerCase();
-        if (/token|secret|key|pass|auth|session|jwt|cred|private/i.test(pLower)) {
-          parsed.searchParams.set(pKey, '[REDACTED]');
-        }
-      }
+      parsed.username = '';
+      parsed.password = '';
+      for (const key of new Set(parsed.searchParams.keys())) parsed.searchParams.set(key, '[REDACTED]');
+      parsed.hash = '';
+      parsed.pathname = this.sanitizeUserPrompt(decodeURIComponent(parsed.pathname));
       return parsed.toString();
     } catch {
       return 'https://[REDACTED_OR_LOCAL]';
+    }
+  }
+
+  /** Keep link destination context without sending query values or fragments. */
+  sanitizeLink(href) {
+    if (typeof href !== 'string' || !href.trim()) return '';
+    try {
+      const absolute = /^[a-z][a-z\d+.-]*:/i.test(href);
+      const parsed = new URL(href, 'https://local.invalid');
+      const path = this.sanitizeUserPrompt(decodeURIComponent(parsed.pathname));
+      return absolute ? `${parsed.origin}${path}` : path;
+    } catch {
+      return '[LINK]';
     }
   }
 }

@@ -17,6 +17,7 @@ export const MessageType = Object.freeze({
   UPDATE_VAULT: 'UPDATE_VAULT',
   GET_VAULT: 'GET_VAULT',
   UPDATE_SETTINGS: 'UPDATE_SETTINGS',
+  LOCAL_VISION_ANALYZE: 'LOCAL_VISION_ANALYZE',
 
   // Background <-> Content Script
   EXTRACT_DOM: 'EXTRACT_DOM',
