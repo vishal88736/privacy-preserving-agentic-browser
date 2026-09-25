@@ -54,6 +54,10 @@ await Promise.all([
   copy(npm('@huggingface/transformers/dist/transformers.web.min.js'), path.join(transformerDir, 'transformers.web.min.js')),
   copy(npm('onnxruntime-web/dist/ort-wasm-simd-threaded.mjs'), path.join(ortDir, 'ort-wasm-simd-threaded.mjs')),
   copy(npm('onnxruntime-web/dist/ort-wasm-simd-threaded.wasm'), path.join(ortDir, 'ort-wasm-simd-threaded.wasm')),
+  copy(npm('onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.mjs'), path.join(ortDir, 'ort-wasm-simd-threaded.jsep.mjs')),
+  copy(npm('onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.wasm'), path.join(ortDir, 'ort-wasm-simd-threaded.jsep.wasm')),
+  copy(npm('onnxruntime-web/dist/ort.all.bundle.min.mjs'), path.join(ortDir, 'ort.all.bundle.min.mjs')),
+  copy(npm('onnxruntime-web/dist/ort.all.bundle.min.mjs'), path.join(ortDir, 'ort.min.mjs')),
   copy(npm('tesseract.js/dist/tesseract.esm.min.js'), path.join(tesseractDir, 'tesseract.esm.min.js')),
   copy(npm('tesseract.js/dist/worker.min.js'), path.join(tesseractDir, 'worker.min.js')),
   copy(npm('tesseract.js-core/tesseract-core-simd-lstm.wasm.js'), path.join(tesseractDir, 'tesseract-core-simd-lstm.wasm.js')),
@@ -61,11 +65,14 @@ await Promise.all([
 ]);
 
 const tfBundle = path.join(transformerDir, 'transformers.web.min.js');
-const tfContent = await readFile(tfBundle, 'utf8');
+let tfContent = await readFile(tfBundle, 'utf8');
 const targetToken = 'Mistral' + '3ForConditionalGeneration';
 if (tfContent.includes(targetToken)) {
-  await writeFile(tfBundle, tfContent.replaceAll(targetToken, 'Mistral3_ForConditionalGeneration'), 'utf8');
+  tfContent = tfContent.replaceAll(targetToken, 'Mistral3_ForConditionalGeneration');
 }
+tfContent = tfContent.replaceAll('from"onnxruntime-web/webgpu"', 'from"../onnxruntime-web/ort.all.bundle.min.mjs"');
+tfContent = tfContent.replaceAll('from"onnxruntime-common"', 'from"../onnxruntime-web/ort.all.bundle.min.mjs"');
+await writeFile(tfBundle, tfContent, 'utf8');
 
 const hf = (file) => `https://huggingface.co/Xenova/yolos-tiny/resolve/${revision}/${file}?download=true`;
 for (const filename of ['config.json', 'preprocessor_config.json', 'quantize_config.json']) {

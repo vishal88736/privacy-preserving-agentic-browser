@@ -4,7 +4,7 @@
   "quantization": "q4",
   "ocr_language": "eng",
   "runtime_downloads": false,
-  "total_bytes": 32438315,
+  "total_bytes": 62568918,
   "files": [
     {
       "path": "Xenova/yolos-tiny/config.json",
@@ -27,12 +27,28 @@
       "bytes": 2952873
     },
     {
+      "path": "onnxruntime-web/ort-wasm-simd-threaded.jsep.mjs",
+      "bytes": 46851
+    },
+    {
+      "path": "onnxruntime-web/ort-wasm-simd-threaded.jsep.wasm",
+      "bytes": 28352885
+    },
+    {
       "path": "onnxruntime-web/ort-wasm-simd-threaded.mjs",
       "bytes": 24381
     },
     {
       "path": "onnxruntime-web/ort-wasm-simd-threaded.wasm",
       "bytes": 14264838
+    },
+    {
+      "path": "onnxruntime-web/ort.all.bundle.min.mjs",
+      "bytes": 865411
+    },
+    {
+      "path": "onnxruntime-web/ort.min.mjs",
+      "bytes": 865411
     },
     {
       "path": "tesseract/tesseract-core-simd-lstm.wasm",
@@ -52,7 +68,7 @@
     },
     {
       "path": "transformers/transformers.web.min.js",
-      "bytes": 450131
+      "bytes": 450176
     }
   ]
 }

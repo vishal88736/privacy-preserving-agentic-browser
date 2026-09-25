@@ -907,7 +907,7 @@ export class AgentController {
         currentUrl === 'about:blank';
       const intent = task.taskState?.intent;
 
-      if (!home && isNewTabOrBlank && (intent === 'SEARCH' || /search|find|flight|cheap|compare/i.test(task.prompt))) {
+      if (!home && isNewTabOrBlank) {
         home = 'https://www.google.com/';
       }
 

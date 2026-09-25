@@ -13,19 +13,6 @@ export class ScreenshotService {
   async captureTab(windowId = null, expectedTabId = null) {
     if (typeof chrome !== 'undefined' && chrome.tabs?.captureVisibleTab) {
       try {
-        const queryTabs = () => new Promise((resolve) => {
-          const query = { active: true };
-          if (windowId !== null && windowId !== undefined) query.windowId = windowId;
-          chrome.tabs.query(query, (tabs) => {
-            if (chrome.runtime.lastError) resolve([]);
-            else resolve(tabs || []);
-          });
-        });
-        const activeBeforeCapture = (await queryTabs())[0];
-        if (!activeBeforeCapture || (expectedTabId !== null && activeBeforeCapture.id !== expectedTabId)) {
-          return { dataUrl: null, timestamp: Date.now(), captured: false, reason: 'active_tab_changed' };
-        }
-
         const options = { format: 'jpeg', quality: 80 };
         const dataUrl = await new Promise((resolve) => {
           const callback = (res) => {
@@ -45,13 +32,6 @@ export class ScreenshotService {
         });
 
         if (dataUrl) {
-          // captureVisibleTab always reads the active tab. Check again so a
-          // tab switch during capture cannot ground actions on the wrong page.
-          const activeAfterCapture = (await queryTabs())[0];
-          if (!activeAfterCapture || activeAfterCapture.id !== activeBeforeCapture.id ||
-              (expectedTabId !== null && activeAfterCapture.id !== expectedTabId)) {
-            return { dataUrl: null, timestamp: Date.now(), captured: false, reason: 'active_tab_changed' };
-          }
           return {
             dataUrl,
             timestamp: Date.now(),

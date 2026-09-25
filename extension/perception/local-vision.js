@@ -156,14 +156,26 @@ export class LocalVisionEngine {
         env.allowLocalModels = true;
         env.localModelPath = this.api.runtime.getURL('models/');
         env.useBrowserCache = false;
-        env.backends.onnx.wasm.wasmPaths = this.api.runtime.getURL('vendor/onnxruntime-web/');
+        env.backends = env.backends || {};
+        env.backends.onnx = env.backends.onnx || {};
+        env.backends.onnx.wasm = env.backends.onnx.wasm || {};
+        env.backends.onnx.wasm.numThreads = 1;
+        env.backends.onnx.wasm.proxy = false;
+        // Do not set wasmPaths as a directory string because ort.all.bundle.min.mjs bundles
+        // the wasm loader directly and automatically resolves ort-wasm-simd-threaded.jsep.wasm
+        // via import.meta.url. Setting a string wasmPaths triggers dynamic import of the external
+        // ort-wasm-simd-threaded.jsep.mjs file which fails in extension contexts.
+        delete env.backends.onnx.wasm.wasmPaths;
         return pipeline('object-detection', MODEL_ID, {
           device: 'wasm',
           dtype: 'q4',
           revision: MODEL_REVISION,
           progress_callback: () => {}
         });
-      })();
+      })().catch((err) => {
+        this.detectorPromise = null;
+        throw err;
+      });
     }
     return this.detectorPromise;
   }
@@ -171,7 +183,8 @@ export class LocalVisionEngine {
   async _loadOcr() {
     if (!this.ocrPromise) {
       this.ocrPromise = (async () => {
-        const { createWorker } = await import('../vendor/tesseract/tesseract.esm.min.js');
+        const tesseractModule = await import('../vendor/tesseract/tesseract.esm.min.js');
+        const createWorker = tesseractModule.default?.createWorker || tesseractModule.createWorker;
         const base = this.api.runtime.getURL('vendor/tesseract/');
         const worker = await createWorker('eng', 1, {
           workerPath: `${base}worker.min.js`,
@@ -182,7 +195,10 @@ export class LocalVisionEngine {
           logger: () => {}
         });
         return worker;
-      })();
+      })().catch((err) => {
+        this.ocrPromise = null;
+        throw err;
+      });
     }
     return this.ocrPromise;
   }
@@ -287,7 +303,7 @@ export function setupLocalVisionMessageHandler(api = extensionApi(), engine = lo
     }
     engine.analyzeScreenshot(message.payload?.screenshot, message.payload?.viewport, message.payload?.expectedSensitiveCounts)
       .then((analysis) => sendResponse({ success: true, analysis }))
-      .catch((error) => sendResponse({ success: false, error: String(error?.message || 'Local visual analysis failed.').slice(0, 200) }));
+      .catch((error) => sendResponse({ success: false, error: String(error?.message || 'Local visual analysis failed.').slice(0, 1000) }));
     return true;
   });
 }
