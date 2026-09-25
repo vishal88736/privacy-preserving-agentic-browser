@@ -169,7 +169,8 @@ export class AgentController {
           if (runtimeError) {
             finish(reject, new LocalVisionRequiredError('Open the agent side panel to run local screenshot analysis.'));
           } else if (!response?.success || response.analysis?.completed !== true) {
-            finish(reject, new LocalVisionRequiredError('Local screenshot analysis did not complete.'));
+            console.error('[AgentController] Local vision failed:', response?.error);
+            finish(reject, new LocalVisionRequiredError(response?.error ? `Local vision failed: ${response.error}` : 'Local screenshot analysis did not complete.'));
           } else {
             finish(resolve, response.analysis);
           }
@@ -236,7 +237,7 @@ export class AgentController {
         if (stepErr && stepErr.name === 'LocalVisionRequiredError') {
           taskManager.failTask('Local screenshot analysis is unavailable. No screenshot was sent to the server.');
           this.clearOverlays(task.tabId);
-          this.notify('TASK_FAILED', { error: task.error, hint: 'Open the agent side panel and reload the extension so its local vision assets can initialize, then retry.' });
+          this.notify('TASK_FAILED', { error: task.error, hint: stepErr.message });
           break;
         }
         // Fail fast on restricted URLs
