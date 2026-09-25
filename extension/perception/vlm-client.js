@@ -15,15 +15,9 @@ export class VLMClient {
   }
 
   /**
-   * Calls the server VLM endpoint with sanitized data (or resolves via fast-path)
+   * Calls the server VLM endpoint with sanitized data for visual grounding.
    */
-  async processVisuals(taskId, sanitizedScreenshot, sanitizedDom, metadata = {}, options = {}) {
-    if (options.fastPath) {
-      const fastResult = this._domOnlyObservation(sanitizedDom);
-      fastResult._source = 'DOM_ONLY';
-      return fastResult;
-    }
-
+  async processVisuals(taskId, sanitizedScreenshot, sanitizedDom, metadata = {}) {
     const payload = {
       task_id: taskId,
       sanitized_screenshot: sanitizedScreenshot,

@@ -8,6 +8,7 @@ export class ScreenshotSanitizer {
   constructor() {
     this.maskColor = '#000000';
     this.badgeColor = '#ef4444';
+    this.lastRedactionStatus = 'unknown';
   }
 
   /**
@@ -18,7 +19,9 @@ export class ScreenshotSanitizer {
    * @returns {Promise<string>} Redacted screenshot as base64 data URL
    */
   async redactScreenshot(screenshotDataUrl, elements, viewport, privacyAudit = {}) {
+    this.lastRedactionStatus = 'unknown';
     const failClosedPlaceholder = async (maskedCount = 0) => {
+      this.lastRedactionStatus = 'withheld';
       try {
         const w = 640; const h = 360;
         if (typeof OffscreenCanvas !== 'undefined') {
@@ -110,8 +113,10 @@ export class ScreenshotSanitizer {
       // Export redacted image as compressed WebP or JPEG
       if (canvas.convertToBlob) {
         const blob = await canvas.convertToBlob({ type: 'image/webp', quality: 0.8 });
+        this.lastRedactionStatus = sensitiveElements.length > 0 ? 'masked' : 'checked';
         return await this._blobToDataURL(blob);
       } else if (canvas.toDataURL) {
+        this.lastRedactionStatus = sensitiveElements.length > 0 ? 'masked' : 'checked';
         return canvas.toDataURL('image/webp', 0.8);
       }
 

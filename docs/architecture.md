@@ -28,11 +28,11 @@ The backend binds to loopback by default and accepts model API requests only wit
 
 ## Perception provenance
 
-- `DOM_ONLY`: no image analysis; used by the fast path or when remote visual analysis fails.
+- `DOM_ONLY`: the extension could not reach the VLM endpoint and used local DOM classification.
 - `DOM_PLUS_HEURISTIC`: backend layout inference from DOM; no visual-model detections are claimed.
 - `DOM_PLUS_REAL_VLM`: a configured vision model returned visual analysis.
 
-The client never creates synthetic visual detections for DOM-only execution. The backend labels its DOM-derived response as a heuristic. Actual VLM availability depends on backend configuration and provider response.
+The controller captures and sanitizes a screenshot on every observation and requests the VLM endpoint. The client never creates synthetic visual detections for DOM-only execution. The backend labels its DOM-derived response as a heuristic. Actual VLM availability depends on backend configuration and provider response.
 
 ## Local values and uploads
 

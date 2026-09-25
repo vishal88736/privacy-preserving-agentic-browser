@@ -4,6 +4,8 @@
 
 The VLM runs from the backend. Its credentials stay in the backend environment and are never sent to the extension. Configure comma-separated key lists with `OPENROUTER_API_KEYS`, `HUGGINGFACE_API_KEYS`, and `GROQ_API_KEYS`. The existing single-key variables (`OPENROUTER_API_KEY`, `HUGGINGFACE_API_KEY` / `HF_TOKEN`, and `GROQ_API_KEY`) also work.
 
+The extension captures and locally sanitizes a screenshot for every observation before sending it with sanitized DOM to the VLM endpoint. If no configured vision model responds, the backend returns an explicitly labeled DOM heuristic fallback.
+
 Each vision request starts with the next configured provider/key pair in `VLM_PROVIDER_ORDER`. On an HTTP error, the backend tries up to `VLM_MAX_ATTEMPTS` pairs, then uses the local DOM heuristic. A timed-out provider returns to the heuristic immediately; the next request starts with the next credential/provider. Configure a provider-specific model with `VLM_OPENROUTER_MODEL`, `VLM_HUGGINGFACE_MODEL`, or `VLM_GROQ_MODEL`; if it is blank, `VLM_MODEL` is used. Set models that accept image inputs at the provider endpoint.
 
 The defaults cap each VLM provider request at four seconds and try at most two credentials/providers. Override them with `VLM_REQUEST_TIMEOUT_SECONDS` and `VLM_MAX_ATTEMPTS`. The provider endpoints are OpenRouter `/api/v1/chat/completions`, Hugging Face `router.huggingface.co/v1/chat/completions`, and Groq `/openai/v1/chat/completions`.

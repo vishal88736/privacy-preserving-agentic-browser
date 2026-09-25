@@ -438,19 +438,19 @@ class SidePanelApp {
     const cats = m.detectedCategories || [];
     this.privacyCats.textContent = cats.length ? `Detected this task: ${cats.join(', ')}` : '';
     this.$('privacy-pill-text').textContent = current > 0
-      ? `${current} field${current === 1 ? '' : 's'} local`
-      : 'Protected';
+      ? `${current} value${current === 1 ? '' : 's'} kept local`
+      : 'Filters active';
 
     const headlineEl = this.$('privacy-detected-headline');
     if (headlineEl) {
       headlineEl.textContent = current > 0
         ? `${current} sensitive field${current === 1 ? '' : 's'} detected`
-        : 'Privacy Protected';
+        : 'No recognized sensitive fields detected';
     }
 
     const statusTextEl = this.$('privacy-status-text');
     if (statusTextEl) {
-      statusTextEl.textContent = current > 0 ? 'Protected' : 'Clean DOM';
+      statusTextEl.textContent = 'Best-effort filters active';
     }
 
     const listEl = this.$('privacy-detected-list');
@@ -462,7 +462,7 @@ class SidePanelApp {
           const row = el('div', 'privacy-cat-row');
           const name = el('span', 'privacy-cat-name', String(cat));
           const isCred = String(cat).toLowerCase().includes('password') || String(cat).toLowerCase().includes('otp');
-          const badge = el('span', isCred ? 'privacy-badge-local' : 'privacy-badge-protected', isCred ? 'Local only' : 'Protected');
+          const badge = el('span', isCred ? 'privacy-badge-local' : 'privacy-badge-protected', isCred ? 'Value kept local' : 'Filtered');
           row.appendChild(name);
           row.appendChild(badge);
           listEl.appendChild(row);
@@ -470,7 +470,7 @@ class SidePanelApp {
       } else {
         const row = el('div', 'privacy-cat-row');
         const name = el('span', 'privacy-cat-name', 'General form fields');
-        const badge = el('span', 'privacy-badge-protected', 'Protected');
+        const badge = el('span', 'privacy-badge-protected', 'Checked');
         row.appendChild(name);
         row.appendChild(badge);
         listEl.appendChild(row);
@@ -493,9 +493,9 @@ class SidePanelApp {
     if (this.llmElCount) this.llmElCount.textContent = payload ? String(payload.elementsSent ?? 0) : '0';
     if (this.llmRedacted) this.llmRedacted.textContent = String(payload ? (payload.redactedCount ?? redacted) : redacted);
     if (this.llmScreenshot) {
+      const screenshotLabels = { withheld: 'Withheld', masked: 'Masked', checked: 'Checked' };
       this.llmScreenshot.textContent = !payload ? '—'
-        : String(payload.screenshot || '').startsWith('not captured') ? 'Not captured'
-          : (payload.redactedCount > 0 ? 'Masked' : 'Clean');
+        : screenshotLabels[payload.screenshotStatus] || 'Unknown';
     }
     // Distinct symbolic tokens referenced across executed steps + current payload
     const tokenSet = new Set(payload?.tokens || []);

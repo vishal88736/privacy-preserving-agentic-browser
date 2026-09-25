@@ -18,7 +18,7 @@ function replaceMethod(target, name, value) {
   };
 }
 
-test('agent DOM fast path skips screenshot capture and redaction', async () => {
+test('agent sends a locally sanitized screenshot to the VLM on every observation', async () => {
   const previousChrome = globalThis.chrome;
   const previousTask = taskManager.currentTask;
   const previousSettings = taskManager.settings;
@@ -26,6 +26,8 @@ test('agent DOM fast path skips screenshot capture and redaction', async () => {
   let captureCalls = 0;
   let redactionCalls = 0;
   let visionArgs;
+  const rawScreenshot = 'data:image/png;base64,RAW';
+  const safeScreenshot = 'data:image/webp;base64,SAFE';
 
   globalThis.chrome = {
     tabs: { get: async () => ({ id: 7, url: 'https://example.test/', windowId: 3 }) }
@@ -35,20 +37,26 @@ test('agent DOM fast path skips screenshot capture and redaction', async () => {
   task.taskState = new TaskState(task.prompt);
   task.taskState.updateFromModel(localInterpretTask(task.prompt));
 
-  restore.push(replaceMethod(defaultScreenshotService, 'captureTab', async () => {
+  restore.push(replaceMethod(defaultScreenshotService, 'captureTab', async (windowId) => {
     captureCalls++;
-    throw new Error('screenshot capture should be skipped');
+    assert.equal(windowId, 3);
+    return { dataUrl: rawScreenshot, timestamp: 1 };
   }));
-  restore.push(replaceMethod(defaultScreenshotSanitizer, 'redactScreenshot', async () => {
+  restore.push(replaceMethod(defaultScreenshotSanitizer, 'redactScreenshot', async (image, elements, viewport, audit) => {
     redactionCalls++;
-    throw new Error('screenshot redaction should be skipped');
+    assert.equal(image, rawScreenshot);
+    assert.ok(elements.some((element) => element.sensitive));
+    assert.deepEqual(viewport, { width: 1280, height: 800 });
+    assert.equal(audit.coverageEstablished, true);
+    assert.equal(audit.maskedCount, 1);
+    return safeScreenshot;
   }));
   restore.push(replaceMethod(defaultVLMClient, 'processVisuals', async (...args) => {
     visionArgs = args;
-    return { _source: 'DOM_ONLY', detected_elements: [], page_type: 'unknown' };
+    return { _source: 'DOM_PLUS_REAL_VLM', detected_elements: [], page_type: 'search' };
   }));
   restore.push(replaceMethod(defaultGPTOSSClient, 'planNextStep', async () => ({
-    thought: 'Done for fast-path test',
+    thought: 'Done for mandatory VLM test',
     action: { action: 'DONE', risk: 'LOW', requires_confirmation: false },
     isTerminal: true,
     remoteCallMade: false
@@ -67,7 +75,8 @@ test('agent DOM fast path skips screenshot capture and redaction', async () => {
       viewport: { width: 1280, height: 800 },
       elements: [
         { id: 'el_1', tag: 'button', type: 'button', label: 'Search', value: '', bbox: [10, 10, 80, 30] },
-        { id: 'el_2', tag: 'input', type: 'search', label: 'Search field', value: '', bbox: [10, 50, 200, 30] }
+        { id: 'el_2', tag: 'input', type: 'search', label: 'Search field', value: '', bbox: [10, 50, 200, 30] },
+        { id: 'el_3', tag: 'input', type: 'password', label: 'Password', value: 'local-secret', bbox: [10, 90, 200, 30] }
       ],
       headings: [],
       result_items: [],
@@ -79,10 +88,11 @@ test('agent DOM fast path skips screenshot capture and redaction', async () => {
   try {
     const shouldContinue = await controller.runSingleStep(task);
     assert.equal(shouldContinue, false);
-    assert.equal(captureCalls, 0);
-    assert.equal(redactionCalls, 0);
-    assert.equal(visionArgs[1], null);
-    assert.equal(visionArgs[4].fastPath, true);
+    assert.equal(captureCalls, 1);
+    assert.equal(redactionCalls, 1);
+    assert.equal(visionArgs[1], safeScreenshot);
+    assert.equal(visionArgs[2].elements.some((element) => element.value === 'local-secret'), false);
+    assert.equal(visionArgs.length, 4);
   } finally {
     for (const undo of restore.reverse()) undo();
     taskManager.currentTask = previousTask;

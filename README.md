@@ -2,11 +2,11 @@
 
 [![SIH Prototype](https://img.shields.io/badge/SIH-Smart%20India%20Hackathon-blue.svg)](https://www.sih.gov.in/)
 [![Manifest V3](https://img.shields.io/badge/Chrome%20Extension-Manifest%20V3-success.svg)](https://developer.chrome.com/docs/extensions/mv3/)
-[![DOM + VLM](https://img.shields.io/badge/Perception-DOM%20%2B%20Optional%20VLM-indigo.svg)](#architecture)
+[![DOM + VLM](https://img.shields.io/badge/Perception-DOM%20%2B%20VLM-indigo.svg)](#architecture)
 [![Local Privacy](https://img.shields.io/badge/Privacy-Best%20Effort%20Filtering-emerald.svg)](#privacy-protections)
 [![License](https://img.shields.io/badge/License-Apache%202.0%20%2F%20MIT%20Attribution-lightgrey.svg)](docs/REUSE_AND_ATTRIBUTION.md)
 
-A prototype browser agent developed for the **Smart India Hackathon (SIH)**. It combines local DOM extraction, pattern-based sanitization, optional remote visual analysis, symbolic vault values, and an action confirmation gate. Privacy protection is best-effort and limited to recognized patterns and page structures; it is not a guarantee that arbitrary personal data cannot leave the device. Real local-document selection is not implemented.
+A prototype browser agent developed for the **Smart India Hackathon (SIH)**. It combines local DOM extraction, pattern-based sanitization, a sanitized screenshot sent for VLM grounding on every observation, symbolic vault values, and an action confirmation gate. If the VLM is unavailable, the backend reports a DOM heuristic fallback; privacy protection remains best-effort and cannot guarantee that arbitrary personal data will stay local. Real local-document selection is not implemented.
 
 ---
 
@@ -23,19 +23,19 @@ they inadvertently expose sensitive personal identifiers, session tokens, passwo
 
 ---
 
-## 💡 The Solution: Local Privacy Filters + Optional Visual Analysis
+## 💡 The Solution: Local Privacy Filters + Per-Observation VLM Grounding
 
 This project places a **Local Privacy Layer** before model requests. Visual analysis may use a real VLM, a DOM heuristic, or DOM only; provenance is reported explicitly:
 
 ```
-Browser Viewport & DOM
+Browser Viewport & DOM (every observation)
        │
        ▼
 [ LOCAL PRIVACY ENGINE ]  ──►  1. Scans DOM & Text for PII (Aadhaar, PAN, Passwords, etc.)
        │                        2. Replaces secret DOM values with [REDACTED] & symbolic tokens
        │                        3. OffscreenCanvas blacks out sensitive regions on Screenshot (████)
        ▼
-Sanitized DOM + Redacted Image
+Sanitized DOM + Locally Sanitized Image
        │
        ▼
 [ SERVER VLM (/vision) ]  ──►  Visual hierarchy, layout context, and spatial relationships
@@ -80,9 +80,9 @@ Browser DOM Mutation
 
 ## 🏛️ System Architecture
 
-### 1. DOM Perception with Optional Visual Analysis
+### 1. DOM and VLM Perception
 - **DOM Perception**: Extracts accessible labels, semantic roles, input types, bounding boxes, and states.
-- **VLM Perception**: Captures spatial layout, visual button hierarchy, canvas controls, and page state.
+- **VLM Perception**: Sends the locally sanitized screenshot and DOM to the configured VLM on every observation to capture spatial layout, visual button hierarchy, canvas controls, and page state. If no vision model responds, the backend labels its DOM-derived fallback explicitly.
 - **Observation Fusion**: Matches DOM elements with visual bounding boxes using Intersection-over-Union (IoU) and semantic matching.
 
 ### 2. Autonomous Agent Loop

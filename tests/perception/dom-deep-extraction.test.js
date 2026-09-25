@@ -56,8 +56,8 @@ test('PageStabilityObserver - default fast debounce and markAction', async () =>
   assert.ok(elapsed < 200, `Expected fast resolve under 200ms, took ${elapsed}ms`);
 });
 
-test('VLMClient - processVisuals fastPath skips remote server call', async () => {
-  const client = new VLMClient('http://127.0.0.1:9999'); // Non-existent remote server
+test('VLMClient - legacy fastPath option cannot skip the VLM request', async () => {
+  const client = new VLMClient('http://127.0.0.1:9999');
   const sanitizedDom = {
     title: 'Test Portal',
     elements: [
@@ -66,8 +66,28 @@ test('VLMClient - processVisuals fastPath skips remote server call', async () =>
     ]
   };
 
-  // With fastPath: true, it should resolve immediately via local inference without network error
-  const res = await client.processVisuals('task_123', 'data:image/png;base64,...', sanitizedDom, {}, { fastPath: true });
-  assert.strictEqual(res._source, 'DOM_ONLY');
-  assert.deepEqual(res.detected_elements, []);
+  const previousFetch = globalThis.fetch;
+  let requestBody;
+  globalThis.fetch = async (url, options) => {
+    assert.equal(url, 'http://127.0.0.1:9999/vision');
+    requestBody = JSON.parse(options.body);
+    return {
+      ok: true,
+      json: async () => ({ visual_observation: {
+        grounding_source: 'vision_model',
+        detected_elements: [],
+        page_type: 'search',
+        provenance: 'DOM_PLUS_REAL_VLM'
+      } })
+    };
+  };
+
+  try {
+    // A stale option from the removed shortcut must not bypass the backend.
+    const res = await client.processVisuals('task_123', 'data:image/png;base64,SAFE', sanitizedDom, {}, { fastPath: true });
+    assert.strictEqual(res._source, 'DOM_PLUS_REAL_VLM');
+    assert.equal(requestBody.sanitized_screenshot, 'data:image/png;base64,SAFE');
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
 });

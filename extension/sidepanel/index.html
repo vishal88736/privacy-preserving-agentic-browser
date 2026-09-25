@@ -29,12 +29,12 @@
         </div>
       </div>
       <div class="topbar-actions">
-        <button id="privacy-pill" class="privacy-pill" title="Show privacy status" aria-haspopup="dialog" aria-label="Privacy status: Protected">
+        <button id="privacy-pill" class="privacy-pill" title="Show privacy status" aria-haspopup="dialog" aria-label="Privacy filter status">
           <svg class="icon-svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
             <path d="m9 12 2 2 4-4"/>
           </svg>
-          <span id="privacy-pill-text">Protected</span>
+          <span id="privacy-pill-text">Filters active</span>
         </button>
         <button id="vault-btn" class="icon-btn" title="Local Vault (Stays on device)" aria-label="Open local vault">
           <svg class="icon-svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -246,14 +246,14 @@
         <div class="privacy-status-box" id="privacy-status-box">
           <div class="privacy-status-header">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-            <span id="privacy-detected-headline" class="privacy-detected-title">Privacy Protected</span>
+            <span id="privacy-detected-headline" class="privacy-detected-title">Privacy Filters Active</span>
           </div>
           <div id="privacy-detected-list" class="privacy-detected-table">
             <!-- Rendered dynamically or fallback -->
           </div>
           <div class="privacy-sanitized-notice">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
-            <span>Sanitized before AI processing · Plaintext secrets blocked</span>
+            <span>Known patterns checked before AI processing · Filtering is best-effort</span>
           </div>
         </div>
 
@@ -272,9 +272,9 @@
               <p class="privacy-col-title info">Shared with AI</p>
             </div>
             <ul class="privacy-list">
-              <li>Masked screenshot</li>
+              <li>Sanitized screenshot or neutral placeholder</li>
               <li>Sanitized element roles</li>
-              <li>Non-sensitive task goal</li>
+              <li>Task text after known-pattern filtering</li>
               <li>Symbolic tokens only</li>
             </ul>
           </div>
@@ -303,7 +303,7 @@
         <div class="card-head">
           <div class="privacy-head-group">
             <span class="card-label" id="llm-label">What is sent to the AI</span>
-            <span class="pill-ok">Privacy proof</span>
+            <span class="pill-ok">Privacy checks</span>
           </div>
           <span id="llm-calls" class="card-meta-text">0 AI calls</span>
         </div>
@@ -316,10 +316,10 @@
               <p class="privacy-col-title info">Sent to LLM</p>
             </div>
             <ul class="privacy-list">
-              <li><span class="tick">→</span><span>Sanitized task text (PII stripped)</span></li>
+              <li><span class="tick">→</span><span>Task text with recognized PII patterns filtered</span></li>
               <li><span class="tick">→</span><span>Element roles + labels with <code class="mono-token">[REDACTED]</code> values</span></li>
               <li><span class="tick">→</span><span>Layout: bboxes, headings, prices</span></li>
-              <li><span class="tick">→</span><span>Masked screenshot (black boxes)</span></li>
+              <li><span class="tick">→</span><span>Sanitized screenshot or neutral placeholder</span></li>
               <li><span class="tick">→</span><span>Symbolic tokens e.g. <code class="mono-token">LOCAL_AADHAAR</code></span></li>
             </ul>
           </div>

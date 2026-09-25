@@ -8,9 +8,11 @@ import { BrowserExecutor } from '../../extension/content/browser-executor.js';
 
 test('screenshot sanitizer masks known DOM region and never returns original bytes in non-canvas runtime', async () => {
   const raw = 'data:image/png;base64,U0VDUkVU';
-  const result = await new ScreenshotSanitizer().redactScreenshot(raw, [{ sensitive: true, bbox: [1,2,30,12], semantic_type: 'EMAIL' }], { width: 100, height: 100 }, { coverageEstablished: true });
+  const sanitizer = new ScreenshotSanitizer();
+  const result = await sanitizer.redactScreenshot(raw, [{ sensitive: true, bbox: [1,2,30,12], semantic_type: 'EMAIL' }], { width: 100, height: 100 }, { coverageEstablished: true });
   assert.notEqual(result, raw);
   assert.match(result, /^data:image\//);
+  assert.equal(sanitizer.lastRedactionStatus, 'withheld');
 });
 
 test('screenshot sanitizer draws an opaque blackout over the detected DOM bounding box', async () => {
@@ -22,9 +24,14 @@ test('screenshot sanitizer draws an opaque blackout over the detected DOM boundi
   globalThis.OffscreenCanvas = class { constructor() {} getContext() { return context; } toDataURL() { return 'data:image/webp;base64,REENCODED'; } };
   try {
     const raw = 'data:image/png;base64,UElJ';
-    const safe = await new ScreenshotSanitizer().redactScreenshot(raw, [{ sensitive: true, bbox: [10, 20, 30, 15], semantic_type: 'PAN' }], { width: 100, height: 100 }, { coverageEstablished: true });
+    const sanitizer = new ScreenshotSanitizer();
+    const safe = await sanitizer.redactScreenshot(raw, [{ sensitive: true, bbox: [10, 20, 30, 15], semantic_type: 'PAN' }], { width: 100, height: 100 }, { coverageEstablished: true });
     assert.equal(safe, 'data:image/webp;base64,REENCODED');
+    assert.equal(sanitizer.lastRedactionStatus, 'masked');
     assert.ok(fills.some(x => x.style === '#000000' && x.args[0] <= 10 && x.args[1] <= 20 && x.args[2] >= 30 && x.args[3] >= 15));
+    const checked = await sanitizer.redactScreenshot(raw, [{ sensitive: false, bbox: [0, 0, 10, 10] }], { width: 100, height: 100 }, { coverageEstablished: true });
+    assert.equal(checked, 'data:image/webp;base64,REENCODED');
+    assert.equal(sanitizer.lastRedactionStatus, 'checked');
   } finally {
     globalThis.fetch = originals.fetch;
     if (originals.bitmap === undefined) delete globalThis.createImageBitmap; else globalThis.createImageBitmap = originals.bitmap;

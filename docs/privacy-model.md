@@ -41,11 +41,11 @@ Real local-document selection is not implemented. A `LOCAL_DOCUMENT` action fail
 
 Each observation reports one of:
 
-- `DOM_ONLY`: no remote visual analysis was used, or the VLM request failed.
+- `DOM_ONLY`: the VLM request failed and the extension fell back to local DOM classification.
 - `DOM_PLUS_HEURISTIC`: the backend derived a layout summary from sanitized DOM; this is not visual perception.
 - `DOM_PLUS_REAL_VLM`: a configured remote vision model returned a result.
 
-The VLM receives an image produced by the extension sanitizer and sanitized DOM through the normal extension route. This guarantee assumes the installed extension is trusted and unmodified. The backend cannot independently prove that an image has been visually redacted; arbitrary local callers and compromised extensions are outside this boundary.
+The controller captures a screenshot on every observation and sends the sanitizer output and sanitized DOM through the normal extension route to the VLM endpoint. A DOM heuristic fallback may be used when no vision model responds. This guarantee assumes the installed extension is trusted and unmodified. The backend cannot independently prove that an image has been visually redacted; arbitrary local callers and compromised extensions are outside this boundary.
 
 ## Claim status
 
@@ -55,7 +55,7 @@ The VLM receives an image produced by the extension sanitizer and sanitized DOM 
 | VLM receives only sanitized screenshots | **PARTIALLY SUPPORTED** for the normal trusted-extension route; there is no server-side OCR proof. |
 | Webpages cannot approve actions or change settings | **SUPPORTED** for router messages: only the exact side-panel document is authorized. |
 | Vault values are encrypted | **NOT SUPPORTED**. Values are stored in extension-scoped Chrome storage without encryption by this code. |
-| Dual perception is mandatory | **NOT SUPPORTED**. Provenance can be DOM-only, heuristic, or actual VLM. |
+| The VLM endpoint is requested on every observation | **SUPPORTED** by the normal controller path; backend/provider failures can return an explicitly labeled DOM fallback. |
 | Zero plaintext transmission | **NOT SUPPORTED** as an absolute guarantee. |
 | Real local document handling | **NOT SUPPORTED** by the extension. |
 | PII remains local | **PARTIALLY SUPPORTED** for recognized patterns/fields; arbitrary PII cannot be guaranteed local. |

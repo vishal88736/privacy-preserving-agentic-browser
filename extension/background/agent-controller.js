@@ -269,7 +269,17 @@ export class AgentController {
     taskManager.updateState(AgentState.OBSERVING, 'Reading page structure and layout…');
     this.notify('STATE_CHANGED', { state: AgentState.OBSERVING, step: task.currentStep + 1 });
 
-    const domResponse = await this._extractDOM(task.tabId);
+    const [domResponse, screenshotResponse] = await Promise.all([
+      this._extractDOM(task.tabId),
+      (async () => {
+        try {
+          const tab = await chrome.tabs.get(task.tabId);
+          return defaultScreenshotService.captureTab(tab?.windowId ?? null);
+        } catch {
+          return defaultScreenshotService.captureTab();
+        }
+      })()
+    ]);
 
     if (!domResponse?.success) {
       throw new Error(`Failed to observe tab: ${domResponse?.error || 'Target page not responding'}. If on a new tab, navigate to a website first.`);
@@ -285,6 +295,12 @@ export class AgentController {
       defaultDOMSanitizer.sanitizeElements(rawDOM.elements);
 
     const extras = defaultDOMSanitizer.sanitizePageExtras(rawDOM);
+    const screenshotPrivacyAudit = {
+      coverageEstablished: Array.isArray(rawDOM.elements),
+      unlocatedSensitiveText: defaultDOMSanitizer.hasUnlocatedSensitiveText(rawDOM),
+      opaqueVisualSurface: Boolean(rawDOM.opaqueVisualSurface),
+      maskedCount: sensitiveCount
+    };
 
     const sanitizedDOM = {
       ...rawDOM,
@@ -295,45 +311,19 @@ export class AgentController {
       scroll: extras.scroll
     };
 
-    // When the DOM is sufficient, don't capture a screenshot that will never
-    // be sent. This saves capture/redaction work and avoids handling pixels on
-    // the common local fast path.
-    const useFastPath = Boolean(
-      taskManager.settings?.fastMode ||
-      (taskManager.settings?.fastPath !== false &&
-       !taskManager.settings?.alwaysRemoteVision &&
-       sanitizedElements &&
-       sanitizedElements.length >= 2 &&
-       (task.consecutiveFailures || 0) === 0 &&
-       sanitizedElements.some(e => e.label || e.placeholder || e.ariaLabel))
+    // Every observation includes a locally sanitized screenshot for VLM
+    // grounding. Capture runs in parallel with DOM extraction above.
+    const redactedScreenshot = await defaultScreenshotSanitizer.redactScreenshot(
+      screenshotResponse.dataUrl,
+      sanitizedElements,
+      rawDOM.viewport,
+      screenshotPrivacyAudit
     );
-
-    let redactedScreenshot = null;
-    if (!useFastPath) {
-      let screenshotResponse;
-      try {
-        const tab = await chrome.tabs.get(task.tabId);
-        screenshotResponse = await defaultScreenshotService.captureTab(tab?.windowId ?? null);
-      } catch {
-        screenshotResponse = await defaultScreenshotService.captureTab();
-      }
-      redactedScreenshot = await defaultScreenshotSanitizer.redactScreenshot(
-        screenshotResponse.dataUrl,
-        sanitizedElements,
-        rawDOM.viewport,
-        {
-          coverageEstablished: Array.isArray(rawDOM.elements),
-          unlocatedSensitiveText: defaultDOMSanitizer.hasUnlocatedSensitiveText(rawDOM),
-          opaqueVisualSurface: Boolean(rawDOM.opaqueVisualSurface),
-          maskedCount: sensitiveCount
-        }
-      );
-    }
 
     taskManager.updatePrivacyMetrics({
       sensitiveFieldsDetected: sensitiveCount,
       secretsKeptLocal: sensitiveCount,
-      redactedRegionsCount: useFastPath ? 0 : sensitiveCount,
+      redactedRegionsCount: sensitiveCount,
       detectedCategories
     });
     // Transparency: record exactly what leaves the device for the "What is
@@ -350,22 +340,28 @@ export class AgentController {
         value: e.value,
         value_source: e.value_source || null
       }));
+      const screenshotStatus = defaultScreenshotSanitizer.lastRedactionStatus || 'unknown';
       task.lastLLMPayload = {
         taskSent: String(task.prompt || '').slice(0, 140),
         elementsSent: (sanitizedElements || []).length,
         redactedCount: sensitiveCount,
         detectedCategories: detectedCategories || [],
         tokens,
-        screenshot: useFastPath
-          ? 'not captured (DOM fast path)'
-          : sensitiveCount > 0 ? 'masked (black boxes)' : 'clean (no PII regions)',
+        screenshotStatus,
+        screenshot: screenshotStatus === 'withheld'
+          ? 'withheld (neutral placeholder)'
+          : screenshotStatus === 'masked'
+            ? 'masked known sensitive regions'
+            : screenshotStatus === 'checked'
+              ? 'processed; no known sensitive regions to mask'
+              : 'sanitization status unavailable',
         sampleElements,
         timestamp: Date.now()
       };
     } catch { /* transparency is best-effort */ }
     this.notify('PRIVACY_UPDATED', task.privacyMetrics);
 
-    // STEP 3: SERVER VLM PERCEPTION (sanitized data only)
+    // STEP 3: SERVER VLM PERCEPTION (sanitized data only, every observation)
     taskManager.updateState(AgentState.VISUAL_ANALYSIS, 'Interpreting the visual layout…');
     this.notify('STATE_CHANGED', { state: AgentState.VISUAL_ANALYSIS });
 
@@ -373,8 +369,7 @@ export class AgentController {
       task.id,
       redactedScreenshot,
       sanitizedDOM,
-      { viewport: rawDOM.viewport, title: rawDOM.title, url: defaultDOMSanitizer.sanitizeUrl(rawDOM.url) },
-      { fastPath: useFastPath }
+      { viewport: rawDOM.viewport, title: rawDOM.title, url: defaultDOMSanitizer.sanitizeUrl(rawDOM.url) }
     );
 
     if (visualObservation._source !== 'DOM_ONLY') {
