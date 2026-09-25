@@ -261,18 +261,19 @@ class SidePanelApp {
   // ---- actions ----
   async activeTabId() {
     try {
+      let [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab || /^(?:chrome|moz)-extension:\/\//i.test(String(tab.url || ''))) {
+        [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      }
+      if (tab?.id && !/^(?:chrome|moz)-extension:\/\//i.test(String(tab.url || ''))) {
+        return tab.id;
+      }
       const tabs = await chrome.tabs.query({ currentWindow: true });
-      const webTab = tabs.find(t => t.active && /^(https?:\/\/)/i.test(String(t.url || '')));
-      if (webTab) return webTab.id;
-      const anyWeb = tabs.find(t => /^(https?:\/\/)/i.test(String(t.url || '')));
-      if (anyWeb) return anyWeb.id;
-      const allTabs = await chrome.tabs.query({});
-      const anyAllWeb = allTabs.find(t => /^(https?:\/\/)/i.test(String(t.url || '')));
-      if (anyAllWeb) return anyAllWeb.id;
       const nonExt = tabs.find(t => !/^(?:chrome|moz)-extension:\/\//i.test(String(t.url || '')));
       if (nonExt) return nonExt.id;
-      let [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (!tab) [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      const allTabs = await chrome.tabs.query({});
+      const anyNonExt = allTabs.find(t => !/^(?:chrome|moz)-extension:\/\//i.test(String(t.url || '')));
+      if (anyNonExt) return anyNonExt.id;
       return tab?.id ?? null;
     } catch { return null; }
   }

@@ -3,6 +3,7 @@ node_modules/
 dist/
 __pycache__/
 *.pyc
+*.zip
 
 # Local Environment & Secrets
 .env

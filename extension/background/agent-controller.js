@@ -330,7 +330,8 @@ export class AgentController {
     }
 
     if (screenshotResponse?.captured === false || !screenshotResponse?.dataUrl) {
-      throw new LocalVisionRequiredError('The current tab screenshot could not be captured.');
+      const pageInfo = currentTab?.url ? `on ${currentTab.url}` : `(capability: ${capability})`;
+      throw new LocalVisionRequiredError(`The current tab screenshot could not be captured ${pageInfo}. Ensure the tab is an open, visible webpage.`);
     }
 
     const rawDOM = domResponse.data;
@@ -884,6 +885,17 @@ export class AgentController {
         this.notify('TASK_FAILED', { error: taskManager.getTask()?.error, hint: taskManager.getTask()?.hint });
         return { handled: true, shouldContinue: false };
       }
+
+      // If already on the target destination host/URL for a compound task, skip redundant re-navigation
+      const currentHost = (() => { try { return new URL(currentTab?.url || '').hostname.toLowerCase(); } catch { return ''; } })();
+      const targetHost = validation.host?.toLowerCase() || '';
+      if (!goal.isPure && currentHost && targetHost && (currentHost === targetHost || currentHost.endsWith('.' + targetHost))) {
+        if (task.taskState?.getActiveSubgoal()?.toLowerCase()?.startsWith('open ')) {
+          try { task.taskState.advanceSubgoal?.(); } catch {}
+        }
+        return notHandled;
+      }
+
       return await this._executeBootstrapNavigation(task, currentTab, validation.normalizedUrl, {
         pure: goal.isPure,
         thought: goal.isPure
@@ -892,12 +904,22 @@ export class AgentController {
       });
     }
 
-    // Compound task stranded on a non-automatable page: hop to the task's
-    // site homepage (if deterministically known), then re-observe.
-    if (capability !== PageCapability.AUTOMATABLE_WEB) {
-      const site = task.taskState?.site;
-      let home = site ? getSiteHomepage(site) : null;
+    // Compound task stranded on a non-automatable page or starting on another site:
+    // hop to the task's site homepage (if deterministically known), then re-observe.
+    const site = task.taskState?.site;
+    let home = site ? getSiteHomepage(site) : null;
+    const currentHost = (() => { try { return new URL(currentTab?.url || '').hostname.toLowerCase(); } catch { return ''; } })();
+    const targetSiteHost = site?.toLowerCase();
 
+    // If already on that site, do not navigate again
+    if (home && currentHost && targetSiteHost && (currentHost === targetSiteHost || currentHost.includes(targetSiteHost))) {
+      home = null;
+      if (task.taskState?.getActiveSubgoal()?.toLowerCase()?.startsWith('open ')) {
+        try { task.taskState.advanceSubgoal?.(); } catch {}
+      }
+    }
+
+    if (capability !== PageCapability.AUTOMATABLE_WEB) {
       // Smart bootstrap: If on a blank new tab with a search/find task
       // and no specific website was mentioned ("Find cheapest flight...", "Search for laptops..."),
       // automatically navigate to Google so the agent can execute the search!
@@ -905,22 +927,22 @@ export class AgentController {
       const isNewTabOrBlank = capability === PageCapability.ABOUT_BLANK ||
         currentUrl.includes('newtab') ||
         currentUrl === 'about:blank';
-      const intent = task.taskState?.intent;
 
       if (!home && isNewTabOrBlank) {
         home = 'https://www.google.com/';
       }
-
-      if (home) {
-        const validation = validateNavigationUrl(home);
-        if (!validation.valid) return notHandled;
-        console.log(`[NAVIGATION] target=${validation.normalizedUrl} validated=true`);
-        return await this._executeBootstrapNavigation(task, currentTab, validation.normalizedUrl, {
-          pure: false,
-          thought: `Current page is a new tab (${capability}); navigate to ${home.includes('google') ? 'Google' : site} first, then continue.`
-        });
-      }
     }
+
+    if (home) {
+      const validation = validateNavigationUrl(home);
+      if (!validation.valid) return notHandled;
+      console.log(`[NAVIGATION] target=${validation.normalizedUrl} validated=true`);
+      return await this._executeBootstrapNavigation(task, currentTab, validation.normalizedUrl, {
+        pure: false,
+        thought: `Navigate to ${home.includes('google') ? 'Google' : site} first, then continue the task.`
+      });
+    }
+
     return notHandled;
   }
 
@@ -1009,6 +1031,12 @@ export class AgentController {
       this.notify('TASK_COMPLETED', { result: `Navigated to ${verification.actualUrl}.` });
       return { handled: true, shouldContinue: false };
     }
+
+    try {
+      if (task.taskState?.getActiveSubgoal()?.toLowerCase()?.startsWith('open ')) {
+        task.taskState.advanceSubgoal?.();
+      }
+    } catch {}
 
     await this.sleep(this._getPostActionWait(ActionType.NAVIGATE));
     return { handled: true, shouldContinue: true };

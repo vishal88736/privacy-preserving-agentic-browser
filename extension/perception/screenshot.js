@@ -13,8 +13,17 @@ export class ScreenshotService {
   async captureTab(windowId = null, expectedTabId = null) {
     if (typeof chrome !== 'undefined' && chrome.tabs?.captureVisibleTab) {
       try {
+        if (expectedTabId) {
+          try {
+            const cur = await chrome.tabs.get(expectedTabId);
+            if (!cur.active) {
+              await chrome.tabs.update(expectedTabId, { active: true });
+              await new Promise((r) => setTimeout(r, 100));
+            }
+          } catch {}
+        }
         const options = { format: 'jpeg', quality: 80 };
-        const dataUrl = await new Promise((resolve) => {
+        const doCapture = () => new Promise((resolve) => {
           const callback = (res) => {
             if (chrome.runtime.lastError) {
               console.warn('[ScreenshotService] captureVisibleTab notice:', chrome.runtime.lastError.message);
@@ -30,6 +39,12 @@ export class ScreenshotService {
             chrome.tabs.captureVisibleTab(options, callback);
           }
         });
+
+        let dataUrl = await doCapture();
+        if (!dataUrl) {
+          await new Promise((r) => setTimeout(r, 150));
+          dataUrl = await doCapture();
+        }
 
         if (dataUrl) {
           return {

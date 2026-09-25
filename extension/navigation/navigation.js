@@ -103,8 +103,19 @@ export function resolveNavigationTarget(text) {
   if (COMMON_SITES[siteKey]) {
     return { url: COMMON_SITES[siteKey], site: siteKey };
   }
+
+  // 2b. Compound action: "open youtube and play...", "go to amazon to buy...", "visit github then search..."
+  const compoundMatch = lower.match(/^([a-z0-9.-]+)(?:\s+(?:and(?:\s+then)?|to|then|for)\s+.*)?$/i);
+  if (compoundMatch) {
+    const candidateSite = compoundMatch[1].replace(/^(the\s+)?/, '').trim();
+    if (COMMON_SITES[candidateSite]) {
+      return { url: COMMON_SITES[candidateSite], site: candidateSite };
+    }
+  }
+
   // 3. Explicit URL or bare domain: "open https://example.com", "go to github.com"
-  const withScheme = /^https?:\/\//i.test(remainder) ? remainder : `https://${remainder}`;
+  const domainCandidate = remainder.replace(/(?:\s+(?:and(?:\s+then)?|to|then|for)\s+.*)$/i, '').trim();
+  const withScheme = /^https?:\/\//i.test(domainCandidate) ? domainCandidate : `https://${domainCandidate}`;
   if (/^https?:\/\/[^\s"'<>\\]+$/i.test(withScheme)) {
     try {
       const parsed = new URL(withScheme);
@@ -115,8 +126,6 @@ export function resolveNavigationTarget(text) {
         const site = host.replace(/^www\./, '').split('.')[0];
         return { url: parsed.toString(), site };
       }
-      // Single-token hosts like "youtube" without TLD fall back to the
-      // allowlist above; anything else is unresolvable.
       return null;
     } catch {
       return null;

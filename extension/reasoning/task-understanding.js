@@ -212,7 +212,7 @@ export function parseTaskSemantics(rawPrompt) {
     if (site) subgoals.push(`open ${site}`);
     if (search_query) subgoals.push(`search for ${search_query}`);
     if (ranking_constraint) subgoals.push(`select ${ranking_constraint} result`);
-    else if (/open|click|select/i.test(lower) && search_query) subgoals.push('open the matching result');
+    else if (/open|click|select|play|watch/i.test(lower) && search_query) subgoals.push('open the matching result');
   } else {
     const mapped = intent === 'fill_form' ? 'FILL_FORM' : intent === 'upload' ? 'UPLOAD'
       : intent === 'login' ? 'LOGIN' : intent === 'book' ? 'BOOK'
