@@ -126,22 +126,11 @@ export class AgentController {
     taskManager.updateState(AgentState.UNDERSTANDING_TASK, 'Interpreting task goal...');
     this.notify('STATE_CHANGED', { state: AgentState.UNDERSTANDING_TASK });
 
-    try {
-      const parsedTask = await defaultGPTOSSClient.interpretTask(sanitizedPrompt);
-      if (!parsedTask || parsedTask.intent === 'unknown') {
-        task.taskState.updateFromModel(localInterpretTask(sanitizedPrompt));
-      } else {
-        task.taskState.updateFromModel(parsedTask);
-      }
-
-      console.log("[TASK_INTERPRETED]", JSON.stringify(task.taskState.toPayload()));
-    } catch (e) {
-      console.error('[AgentController] Pre-planning interpretation error:', e);
-      taskManager.failTask(e?.message || 'Failed to interpret task');
-      this.clearOverlays(task.tabId);
-      this.notify('TASK_FAILED', { error: taskManager.getTask()?.error, hint: taskManager.getTask()?.hint });
-      return;
-    }
+    // Seed task state locally. The first /reason request already receives the
+    // complete sanitized request and grounded page state, so a separate remote
+    // /interpret roundtrip only adds startup latency.
+    task.taskState.updateFromModel(localInterpretTask(sanitizedPrompt));
+    console.log("[TASK_INTERPRETED]", JSON.stringify(task.taskState.toPayload()));
 
     taskManager.updateState(AgentState.UNDERSTANDING_TASK, `Goal: ${task.taskState.goal}`);
     this.notify('STATE_CHANGED', { state: AgentState.UNDERSTANDING_TASK, goal: task.taskState.goal });
@@ -280,17 +269,7 @@ export class AgentController {
     taskManager.updateState(AgentState.OBSERVING, 'Reading page structure and layout…');
     this.notify('STATE_CHANGED', { state: AgentState.OBSERVING, step: task.currentStep + 1 });
 
-    const [domResponse, screenshotResponse] = await Promise.all([
-      this._extractDOM(task.tabId),
-      (async () => {
-        try {
-          const tab = await chrome.tabs.get(task.tabId);
-          return defaultScreenshotService.captureTab(tab?.windowId ?? null);
-        } catch {
-          return defaultScreenshotService.captureTab();
-        }
-      })()
-    ]);
+    const domResponse = await this._extractDOM(task.tabId);
 
     if (!domResponse?.success) {
       throw new Error(`Failed to observe tab: ${domResponse?.error || 'Target page not responding'}. If on a new tab, navigate to a website first.`);
@@ -316,22 +295,45 @@ export class AgentController {
       scroll: extras.scroll
     };
 
-    const redactedScreenshot = await defaultScreenshotSanitizer.redactScreenshot(
-      screenshotResponse.dataUrl,
-      sanitizedElements,
-      rawDOM.viewport,
-      {
-        coverageEstablished: Array.isArray(rawDOM.elements),
-        unlocatedSensitiveText: defaultDOMSanitizer.hasUnlocatedSensitiveText(rawDOM),
-        opaqueVisualSurface: Boolean(rawDOM.opaqueVisualSurface),
-        maskedCount: sensitiveCount
-      }
+    // When the DOM is sufficient, don't capture a screenshot that will never
+    // be sent. This saves capture/redaction work and avoids handling pixels on
+    // the common local fast path.
+    const useFastPath = Boolean(
+      taskManager.settings?.fastMode ||
+      (taskManager.settings?.fastPath !== false &&
+       !taskManager.settings?.alwaysRemoteVision &&
+       sanitizedElements &&
+       sanitizedElements.length >= 2 &&
+       (task.consecutiveFailures || 0) === 0 &&
+       sanitizedElements.some(e => e.label || e.placeholder || e.ariaLabel))
     );
+
+    let redactedScreenshot = null;
+    if (!useFastPath) {
+      let screenshotResponse;
+      try {
+        const tab = await chrome.tabs.get(task.tabId);
+        screenshotResponse = await defaultScreenshotService.captureTab(tab?.windowId ?? null);
+      } catch {
+        screenshotResponse = await defaultScreenshotService.captureTab();
+      }
+      redactedScreenshot = await defaultScreenshotSanitizer.redactScreenshot(
+        screenshotResponse.dataUrl,
+        sanitizedElements,
+        rawDOM.viewport,
+        {
+          coverageEstablished: Array.isArray(rawDOM.elements),
+          unlocatedSensitiveText: defaultDOMSanitizer.hasUnlocatedSensitiveText(rawDOM),
+          opaqueVisualSurface: Boolean(rawDOM.opaqueVisualSurface),
+          maskedCount: sensitiveCount
+        }
+      );
+    }
 
     taskManager.updatePrivacyMetrics({
       sensitiveFieldsDetected: sensitiveCount,
       secretsKeptLocal: sensitiveCount,
-      redactedRegionsCount: sensitiveCount,
+      redactedRegionsCount: useFastPath ? 0 : sensitiveCount,
       detectedCategories
     });
     // Transparency: record exactly what leaves the device for the "What is
@@ -354,7 +356,9 @@ export class AgentController {
         redactedCount: sensitiveCount,
         detectedCategories: detectedCategories || [],
         tokens,
-        screenshot: sensitiveCount > 0 ? 'masked (black boxes)' : 'clean (no PII regions)',
+        screenshot: useFastPath
+          ? 'not captured (DOM fast path)'
+          : sensitiveCount > 0 ? 'masked (black boxes)' : 'clean (no PII regions)',
         sampleElements,
         timestamp: Date.now()
       };
@@ -364,19 +368,6 @@ export class AgentController {
     // STEP 3: SERVER VLM PERCEPTION (sanitized data only)
     taskManager.updateState(AgentState.VISUAL_ANALYSIS, 'Interpreting the visual layout…');
     this.notify('STATE_CHANGED', { state: AgentState.VISUAL_ANALYSIS });
-
-    // Evaluate Fast-Path VLM Skip:
-    // When semantic DOM elements are rich, clear, and no previous step failure occurred,
-    // skip the remote VLM roundtrip to reduce per-step latency by 2-4 seconds.
-    const useFastPath = Boolean(
-      taskManager.settings?.fastMode ||
-      (taskManager.settings?.fastPath !== false &&
-       !taskManager.settings?.alwaysRemoteVision &&
-       sanitizedElements &&
-       sanitizedElements.length >= 2 &&
-       (task.consecutiveFailures || 0) === 0 &&
-       sanitizedElements.some(e => e.label || e.placeholder || e.ariaLabel))
-    );
 
     const visualObservation = await defaultVLMClient.processVisuals(
       task.id,

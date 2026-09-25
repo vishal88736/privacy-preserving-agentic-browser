@@ -61,7 +61,7 @@ Browser DOM Mutation
 
 ## 🔒 Privacy Protections
 
-> **"Secrets are referenced symbolically and are never required by the remote reasoning model."**
+> **"Recognized secrets are referenced symbolically; the remote reasoning model does not need their plaintext values."**
 
 1. **Pattern-based redaction**: Recognized identifiers, configured vault values, and structurally sensitive fields are redacted before model requests. Detection is incomplete; names, addresses, unknown account formats, and arbitrary secrets may be missed.
 2. **Symbolic Resolution**: The AI outputs symbolic intent (`value_source: "LOCAL_AADHAAR"`). The local extension executor injects the actual value directly into the page DOM from the local vault.
@@ -148,6 +148,8 @@ Verify the server:
 curl http://localhost:8000/health
 # Output: {"status":"healthy","service":"PrivAgent-Backend",...}
 ```
+
+Configure provider keys and model IDs in `backend/.env` when using hosted models. The VLM can rotate across OpenRouter, Hugging Face, and Groq credentials; see [Model Provider Configuration](docs/model-providers.md) for setup, timeout, and fallback behavior. Task intent is interpreted locally at startup to avoid an extra model roundtrip.
 
 ### Step 2: Start the Benchmark Evaluation Server
 ```bash

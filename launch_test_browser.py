@@ -35,6 +35,10 @@ def ensure_servers():
 def main():
     ensure_servers()
 
+    form_path = sys.argv[1] if len(sys.argv) > 1 else "/flight-search.html"
+    if not form_path.startswith("/") or ".." in form_path:
+        raise ValueError("Pass a benchmark path such as /government-aadhaar.html")
+
     print("[Launcher] Starting Chromium test browser with PrivAgent extension...")
     with sync_playwright() as p:
         context = p.chromium.launch_persistent_context(
@@ -72,21 +76,35 @@ def main():
 
         print(f"[Launcher] PrivAgent loaded with Extension ID: {ext_id}")
 
-        # Page 1: Flight comparison test portal
+        # Page 1: Selected benchmark form
         page = context.pages[0] if context.pages else context.new_page()
-        page.goto("http://localhost:5000/flight-search.html")
-        print("[Launcher] Tab 1: Opened http://localhost:5000/flight-search.html")
+        form_url = f"http://localhost:5000{form_path}"
+        page.goto(form_url)
+        print(f"[Launcher] Tab 1: Opened {form_url}")
 
-        # Page 2: PrivAgent Side Panel UI
+        # Open the actual Chrome side panel from an extension page in this window.
         if ext_id:
             sp = context.new_page()
             sp.goto(f"chrome-extension://{ext_id}/sidepanel/index.html")
-            print(f"[Launcher] Tab 2: Opened PrivAgent UI at chrome-extension://{ext_id}/sidepanel/index.html")
+            sp.evaluate("""() => {
+              const button = document.createElement('button');
+              button.id = 'open-privagent-panel';
+              button.onclick = async () => {
+                const tab = await chrome.tabs.getCurrent();
+                await chrome.sidePanel.open({ windowId: tab.windowId });
+                button.dataset.opened = 'yes';
+              };
+              document.body.append(button);
+            }""")
+            sp.click("#open-privagent-panel")
+            sp.wait_for_function("() => document.querySelector('#open-privagent-panel').dataset.opened === 'yes'")
+            page.bring_to_front()
+            print("[Launcher] PrivAgent Side Panel opened alongside the form")
 
         print("\n" + "="*60)
         print("  PrivAgent Test Browser is now running!")
-        print("  - Tab 1: Flight search benchmark portal (http://localhost:5000/flight-search.html)")
-        print("  - Tab 2: PrivAgent Side Panel")
+        print(f"  - Form: {form_url}")
+        print("  - PrivAgent Side Panel: open on the right")
         print("  Keep this window open to interact with the agent.")
         print("="*60 + "\n")
 

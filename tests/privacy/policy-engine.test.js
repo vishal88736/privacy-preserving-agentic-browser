@@ -116,6 +116,7 @@ test('PolicyEngine - blocks IFSC code in payload (rule 7)', () => {
   const engine = makeEngine();
   const leaked = { ifsc: 'SBIN0001234' };
   assert.throws(() => engine.enforceOutboundSafety(leaked), OutboundPolicyViolationError);
+  assert.throws(() => engine.enforceOutboundSafety({ ifsc: 'sbin0001234' }), OutboundPolicyViolationError);
 });
 
 // ── Timestamp & base64 exemptions ────────────────────────────────────────

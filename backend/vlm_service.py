@@ -6,16 +6,87 @@ headings) instead of re-labeling inputs only.
 """
 
 import re
+import threading
 from typing import Dict, Any, List, Optional
 import json
 import requests
 from config import settings
 
 
+_PROVIDERS = {
+    "openrouter": {
+        "label": "OpenRouter",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "keys_setting": "OPENROUTER_API_KEYS",
+        "model_setting": "VLM_OPENROUTER_MODEL",
+    },
+    "huggingface": {
+        "label": "Hugging Face",
+        "url": "https://router.huggingface.co/v1/chat/completions",
+        "keys_setting": "HUGGINGFACE_API_KEYS",
+        "model_setting": "VLM_HUGGINGFACE_MODEL",
+    },
+    "groq": {
+        "label": "Groq",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "keys_setting": "GROQ_API_KEYS",
+        "model_setting": "VLM_GROQ_MODEL",
+    },
+}
+
+
+class VLMProviderRotator:
+    """Round-robin configured VLM credentials, with bounded failover."""
+
+    def __init__(self):
+        self._cursor = 0
+        self._lock = threading.Lock()
+
+    def ordered_candidates(self) -> List[Dict[str, str]]:
+        order = [name.strip().lower() for name in settings.VLM_PROVIDER_ORDER.split(",") if name.strip()]
+        profiles: List[Dict[str, str]] = []
+        for name in order:
+            spec = _PROVIDERS.get(name)
+            if not spec:
+                continue
+            keys = tuple(getattr(settings, spec["keys_setting"], ()) or ())
+            model = getattr(settings, spec["model_setting"], "") or settings.VLM_MODEL
+            for key in keys:
+                profiles.append({
+                    "provider": spec["label"],
+                    "url": spec["url"],
+                    "key": key,
+                    "model": model,
+                })
+
+        any_supported_keys = any(
+            getattr(settings, spec["keys_setting"], ()) for spec in _PROVIDERS.values()
+        )
+        # Preserve the original single-endpoint configuration (AI_API_KEY,
+        # OpenAI-compatible local servers, etc.) if provider keys are absent.
+        if not profiles and not any_supported_keys and settings.API_KEY:
+            profiles.append({
+                "provider": "configured endpoint",
+                "url": f"{settings.AI_BASE_URL.rstrip('/')}/chat/completions",
+                "key": settings.API_KEY,
+                "model": settings.VLM_MODEL,
+            })
+
+        if not profiles:
+            return []
+        with self._lock:
+            start = self._cursor % len(profiles)
+            self._cursor = (start + 1) % len(profiles)
+        rotated = profiles[start:] + profiles[:start]
+        attempts = min(len(rotated), max(1, int(settings.VLM_MAX_ATTEMPTS)))
+        return rotated[:attempts]
+
+
 class VLMService:
     def __init__(self):
         self.aadhaar_regex = re.compile(r"\b[2-9]\d{3}[\s-]?\d{4}[\s-]?\d{4}\b")
         self.pan_regex = re.compile(r"\b[A-Z]{5}[0-9]{4}[A-Z]{1}\b", re.IGNORECASE)
+        self.provider_rotator = VLMProviderRotator()
 
     def process_visuals(self, task_id: str, sanitized_screenshot: str, sanitized_dom: Dict[str, Any], metadata: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(sanitized_screenshot, str) or not sanitized_screenshot.startswith("data:image/"):
@@ -30,9 +101,14 @@ class VLMService:
             re.compile(r"\b(?:0[1-9]|[12]\d|3[01])[-/.](?:0[1-9]|1[0-2])[-/.](?:19|20)\d{2}\b"),
             re.compile(r"\b(?:sk|pk|api)[-_][A-Za-z0-9_-]{16,}\b", re.I),
             re.compile(r"\bBearer\s+[A-Za-z0-9._~+/-]{12,}={0,2}", re.I),
+            re.compile(r"\b[A-Z]{4}0[A-Z0-9]{6}\b", re.I),
         ]
         if any(pattern.search(dom_str) for pattern in forbidden_patterns):
             raise ValueError("Security rejection: outbound DOM contains an unredacted sensitive pattern")
+        for match in re.finditer(r"(?<!\d)(?:\d[ -]?){13,19}(?!\d)", dom_str):
+            digits = re.sub(r"[ -]", "", match.group(0))
+            if 13 <= len(digits) <= 19 and self._luhn_valid(digits):
+                raise ValueError("Security rejection: outbound DOM contains an unredacted card number")
 
         heuristic = self._from_dom(sanitized_dom, metadata)
         heuristic["grounding_source"] = "dom_heuristic"
@@ -44,32 +120,45 @@ class VLMService:
             heuristic["provenance"] = "DOM_PLUS_REAL_VLM"
         return heuristic
 
+    @staticmethod
+    def _luhn_valid(number: str) -> bool:
+        total = 0
+        parity = len(number) % 2
+        for index, char in enumerate(number):
+            digit = int(char)
+            if index % 2 == parity:
+                digit *= 2
+                if digit > 9:
+                    digit -= 9
+            total += digit
+        return total % 10 == 0
+
     def _try_real_vlm(self, screenshot: str, heuristic: Dict[str, Any], metadata: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if not settings.API_KEY or not screenshot or not str(screenshot).startswith("data:image"):
             return None
-        # Attempt a vision call for any configured model. Non-vision models
-        # will fail fast (400/404) and we fall back to the DOM heuristic.
-        # A narrow name gate previously blocked valid vision models such as
-        # google/gemma-3 (which contains neither "vl" nor "vision"), so the
-        # real VLM was never used. Only skip obvious text-only families.
-        model = (settings.VLM_MODEL or "").lower()
-        text_only_markers = ("gpt-oss", "deepseek-chat", "llama-3.3-70b-versatile", "whisper", "tts-", "embed")
-        if any(k in model for k in text_only_markers):
+        candidates = self.provider_rotator.ordered_candidates()
+        if not candidates:
             return None
-        try:
+
+        prompt = (
+            "Describe the webpage layout in JSON with keys: "
+            "spatial_layout (one sentence), visual_state (one sentence), "
+            "page_type, notable_visible_text (array of short strings). "
+            "Do not transcribe any numbers that look like IDs or secrets. "
+            f"Known DOM summary: {heuristic.get('spatial_layout')}"
+        )
+        for candidate in candidates:
+            model = str(candidate["model"] or "").lower()
+            text_only_markers = ("gpt-oss", "deepseek-chat", "llama-3.3-70b-versatile", "whisper", "tts-", "embed")
+            if any(marker in model for marker in text_only_markers):
+                continue
+
             headers = {
-                "Authorization": f"Bearer {settings.API_KEY}",
-                "Content-Type": "application/json"
+                "Authorization": f"Bearer {candidate['key']}",
+                "Content-Type": "application/json",
             }
-            prompt = (
-                "Describe the webpage layout in JSON with keys: "
-                "spatial_layout (one sentence), visual_state (one sentence), "
-                "page_type, notable_visible_text (array of short strings). "
-                "Do not transcribe any numbers that look like IDs or secrets. "
-                f"Known DOM summary: {heuristic.get('spatial_layout')}"
-            )
             payload = {
-                "model": settings.VLM_MODEL,
+                "model": candidate["model"],
                 "messages": [{
                     "role": "user",
                     "content": [
@@ -78,28 +167,46 @@ class VLMService:
                     ]
                 }],
                 "max_tokens": 400,
-                "temperature": 0
+                "temperature": 0,
             }
-            resp = requests.post(f"{settings.AI_BASE_URL}/chat/completions", headers=headers, json=payload, timeout=12)
-            if resp.status_code != 200:
-                print(f"[VLM] vision model {settings.VLM_MODEL} returned {resp.status_code}; using DOM heuristic")
-                return None
-            content = (resp.json().get("choices") or [{}])[0].get("message", {}).get("content") or ""
-            match = re.search(r"\{.*\}", content, re.DOTALL)
-            if not match:
-                return {"spatial_layout": content.strip()[:400]} if content else None
-            parsed = json.loads(match.group(0))
-            out = {}
-            if parsed.get("spatial_layout"):
-                out["spatial_layout"] = parsed["spatial_layout"]
-            if parsed.get("visual_state"):
-                out["visual_state"] = parsed["visual_state"]
-            if parsed.get("page_type"):
-                out["page_type"] = parsed["page_type"]
-            return out
-        except Exception as e:
-            print(f"[VLM] optional vision call skipped: {e}")
-            return None
+            try:
+                resp = requests.post(
+                    candidate["url"],
+                    headers=headers,
+                    json=payload,
+                    timeout=settings.VLM_REQUEST_TIMEOUT_SECONDS,
+                )
+                if resp.status_code != 200:
+                    print(f"[VLM] {candidate['provider']} returned HTTP {resp.status_code}; rotating provider/key")
+                    continue
+
+                content = (resp.json().get("choices") or [{}])[0].get("message", {}).get("content") or ""
+                if not isinstance(content, str):
+                    continue
+                match = re.search(r"\{.*\}", content, re.DOTALL)
+                if not match:
+                    return {"spatial_layout": content.strip()[:400]} if content else None
+                parsed = json.loads(match.group(0))
+                out = {}
+                if parsed.get("spatial_layout"):
+                    out["spatial_layout"] = parsed["spatial_layout"]
+                if parsed.get("visual_state"):
+                    out["visual_state"] = parsed["visual_state"]
+                if parsed.get("page_type"):
+                    out["page_type"] = parsed["page_type"]
+                if out:
+                    return out
+            except Exception as exc:
+                # Exception messages may include request details. Log only
+                # provider and exception type, never tokens or payload text.
+                if isinstance(exc, requests.exceptions.Timeout):
+                    print(f"[VLM] {candidate['provider']} timed out; using DOM heuristic")
+                    # Keep a slow provider from multiplying the wait. The
+                    # cursor advances, so the next vision request starts on
+                    # the next configured credential/provider.
+                    break
+                print(f"[VLM] {candidate['provider']} request failed ({type(exc).__name__}); rotating provider/key")
+        return None
 
     def _from_dom(self, sanitized_dom: Dict[str, Any], metadata: Dict[str, Any]) -> Dict[str, Any]:
         elements = sanitized_dom.get("elements", [])

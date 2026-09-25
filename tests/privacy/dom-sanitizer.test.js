@@ -74,6 +74,15 @@ test('DOMSanitizer - Sanitizes sensitive query parameters in URLs', () => {
   assert.ok(cleanUrl.includes('token=%5BREDACTED%5D') || cleanUrl.includes('token=[REDACTED]'));
 });
 
+test('DOMSanitizer - Redacts lowercase IFSC codes from outbound text and placeholders', () => {
+  const sanitizer = new DOMSanitizer();
+  const extras = sanitizer.sanitizePageExtras({ visible_text: 'Branch IFSC: sbin0001234' });
+  const placeholder = sanitizer.scrubPlaceholderText('sbin0001234');
+  assert.doesNotMatch(extras.visible_text, /sbin0001234/i);
+  assert.doesNotMatch(placeholder, /sbin0001234/i);
+  assert.doesNotThrow(() => new PolicyEngine(new LocalVault()).enforceOutboundSafety(extras));
+});
+
 test('PolicyEngine - Blocks outbound payloads containing unredacted secrets', () => {
   const vault = new LocalVault();
   const policyEngine = new PolicyEngine(vault);

@@ -1,7 +1,8 @@
 """
 PrivAgent SIH - Master End-to-End Chromium Hardening & Verification Suite
-Validates all capabilities in a real Chromium browser with live extension, live pages,
-live perception (DOM + VLM), live reasoning (GPT-OSS), and strict local privacy boundaries.
+Exercises extension flows in Chromium and checks known synthetic privacy sentinels
+at the extension-to-local-backend boundary. It cannot prove protection for unknown
+PII or inspect backend-to-provider traffic.
 """
 
 import os
@@ -328,7 +329,7 @@ def test_9_service_worker_resilience():
     return True
 
 def test_10_network_privacy_audit():
-    print("\n[TEST 10] Comprehensive Outbound Network Privacy Audit (Zero Leakage)...")
+    print("\n[TEST 10] Extension-to-Backend Synthetic Privacy Sentinel Audit...")
     outbound_payloads = []
     with sync_playwright() as p:
         context, ext_id = setup_browser(p)
@@ -368,7 +369,7 @@ def test_10_network_privacy_audit():
 
         context.close()
 
-    print(f"  ✔ Total outbound AI requests intercepted: {len(outbound_payloads)}")
+    print(f"  ✔ Extension-to-backend model requests captured: {len(outbound_payloads)}")
     violations = []
     for req in outbound_payloads:
         body = req.get("post_data") or ""
@@ -377,7 +378,11 @@ def test_10_network_privacy_audit():
                 violations.append(f"Synthetic privacy sentinel matched in {req['url']}")
 
     assert len(violations) == 0, f"Privacy violations: {violations}"
-    print(f"  ✔ 100% STRICT PRIVACY ASSERTION PASSED: 0 secrets leaked across {len(outbound_payloads)} AI requests")
+    if outbound_payloads:
+        print(f"  ✔ No configured synthetic sentinels found in {len(outbound_payloads)} captured payloads")
+    else:
+        print("  ℹ No extension-to-backend model payloads were captured")
+    print("    Unknown PII coverage and backend-to-provider egress are not measured by this test.")
     return True
 
 def open_test_side_panel(context, ext_id, page):

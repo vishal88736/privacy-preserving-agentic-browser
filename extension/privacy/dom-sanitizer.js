@@ -82,6 +82,7 @@ export class DOMSanitizer {
     out = out.replace(/\b[2-9]\d{3}[\s-]?\d{4}[\s-]?\d{4}\b/g, '[example]');
     out = out.replace(/(?<!\d)(?:(?:\+|0{0,2})91[\s-]?)?[6-9]\d{9}(?!\d)/g, '[example]');
     out = out.replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, '[example]');
+    out = out.replace(/\b[A-Z]{4}0[A-Z0-9]{6}\b/gi, '[example]');
     return out;
   }
 
@@ -114,7 +115,7 @@ export class DOMSanitizer {
 
     // Scrub IFSC codes (bank branch identifiers) so the outbound policy
     // engine never blocks benign banking pages.
-    out = out.replace(/\b[A-Z]{4}0[A-Z0-9]{6}\b/g, `[${SymbolicSecretSource.LOCAL_PROFILE}]`);
+    out = out.replace(/\b[A-Z]{4}0[A-Z0-9]{6}\b/gi, `[${SymbolicSecretSource.LOCAL_PROFILE}]`);
 
     // Common textual credential/identifier formats beyond the field-level
     // detector. These are pattern coverage, not a claim to detect arbitrary
@@ -245,14 +246,25 @@ export class DOMSanitizer {
       /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i,
       /(?<!\d)(?:(?:\+|0{0,2})91[\s-]?)?[6-9]\d{9}(?!\d)/,
       /\b(?:0[1-9]|[12]\d|3[01])[-/.](?:0[1-9]|1[0-2])[-/.](?:19|20)\d{2}\b/,
-      /\b(?:password|passcode|one.time.code|otp|account number|bank account|api key|access token)\s*[:#-]\s*\S+/i
+      /\b(?:password|passcode|one.time.code|otp|account number|bank account|api key|access token)\s*[:#-]\s*\S+/i,
+      /\b(?:sk|pk|api)[-_][A-Za-z0-9_-]{16,}\b/i,
+      /\bBearer\s+[A-Za-z0-9._~+/-]{12,}={0,2}/i,
+      /\b[A-Z]{4}0[A-Z0-9]{6}\b/i
     ];
     const texts = [rawDOM.visible_text, ...(rawDOM.headings || []).map((h) => h.text), ...(rawDOM.result_items || []).map((i) => i.text || i.title)];
     // These text aggregates do not carry reliable pixel boxes. Even if some
     // originating nodes had geometry, the screenshot redactor only receives
     // interactive-element boxes, so any recognized match requires withholding
     // the full image.
-    return texts.some((value) => typeof value === 'string' && patterns.some((pattern) => pattern.test(value)));
+    return texts.some((value) => {
+      if (typeof value !== 'string') return false;
+      if (patterns.some((pattern) => pattern.test(value))) return true;
+      const cardNumbers = value.match(/(?<!\d)(?:\d[ -]?){13,19}(?!\d)/g) || [];
+      return cardNumbers.some((candidate) => {
+        const digits = candidate.replace(/[ -]/g, '');
+        return digits.length >= 13 && digits.length <= 19 && validateLuhn(digits);
+      });
+    });
   }
 
   /**

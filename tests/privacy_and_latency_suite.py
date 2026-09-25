@@ -1,7 +1,8 @@
 """
-PrivAgent SIH - Privacy Boundary Assertion & Latency Benchmark Suite
-Asserts zero leakage of sensitive PII in outbound network payloads and measures
-exact performance latencies for each stage in the perception-action loop.
+PrivAgent SIH - Synthetic Privacy Sentinel & Latency Audit
+Checks known test sentinels in extension-to-local-backend payloads and measures
+the browser-visible workflow and model endpoint roundtrips. It cannot prove
+that unknown PII is absent or inspect backend-to-provider traffic.
 """
 
 import os
@@ -31,6 +32,7 @@ def run_privacy_and_latency_audit():
     print("================================================================")
 
     outbound_payloads = []
+    requests_by_identity = {}
     latencies = {}
 
     with sync_playwright() as p:
@@ -54,17 +56,28 @@ def run_privacy_and_latency_audit():
 
         assert ext_id, "Extension failed to load"
 
-        # Intercept all outbound network requests across all pages
+        # Capture only extension-to-local-backend requests. Provider egress is
+        # made by the backend process and is outside this browser-context audit.
         def handle_request(req):
             if "localhost:8000" in req.url:
-                outbound_payloads.append({
+                record = {
                     "url": req.url,
                     "method": req.method,
                     "post_data": req.post_data,
-                    "headers": req.headers
-                })
+                    "headers": req.headers,
+                    "started_at": time.perf_counter(),
+                    "duration_ms": None,
+                }
+                outbound_payloads.append(record)
+                requests_by_identity[id(req)] = record
+
+        def handle_response(response):
+            record = requests_by_identity.get(id(response.request))
+            if record:
+                record["duration_ms"] = round((time.perf_counter() - record["started_at"]) * 1000, 2)
 
         context.on("request", handle_request)
+        context.on("response", handle_response)
 
         # Open Aadhaar Government Portal
         t0 = time.time()
@@ -73,10 +86,10 @@ def run_privacy_and_latency_audit():
         page.wait_for_load_state("networkidle")
         t_page_load = time.time() - t0
 
-        # Measure DOM extraction latency directly via content script
+        # A selector probe, not the complete extension DOM extraction stage.
         t0 = time.time()
         dom_res = page.evaluate("() => { const s = performance.now(); const el = document.querySelectorAll('input, button, select, a'); const e = performance.now(); return { count: el.length, latency: e - s }; }")
-        latencies["dom_extraction_ms"] = round(dom_res["latency"], 2)
+        latencies["dom_query_probe_ms"] = round(dom_res["latency"], 2)
 
         # Open Sidepanel
         sp = context.new_page()
@@ -136,32 +149,37 @@ def run_privacy_and_latency_audit():
 
     # --- PRIVACY BOUNDARY ASSERTIONS ---
     print("\n----------------------------------------------------------------")
-    print("NETWORK PRIVACY ASSERTIONS ON OUTBOUND PAYLOADS")
+    print("EXTENSION-TO-LOCAL-BACKEND PRIVACY ASSERTIONS")
     print("----------------------------------------------------------------")
-    print(f"Total outbound AI requests intercepted: {len(outbound_payloads)}")
+    print(f"Total extension-to-backend model requests captured: {len(outbound_payloads)}")
 
     violations = []
     for req in outbound_payloads:
         url = req["url"]
         body = req.get("post_data") or ""
-        print(f"  Captured Outbound: {req['method']} {url} (size: {len(body)} bytes)")
+        print(f"  Captured: {req['method']} {url} (size: {len(body)} bytes)")
 
         # Assert zero plain secrets in request payload
         for secret in SENSITIVE_TEST_VALUES:
             if secret in body:
                 violations.append(f"Synthetic privacy sentinel matched in request to {url}!")
 
-        # Verify screenshot is masked in /vision payload
+        # Check payload shape and that sensitive controls are represented by
+        # sanitized DOM values. This does not decode or prove screenshot pixels.
         if "/vision" in url:
-            assert "data:image" in body, "Vision payload missing screenshot data URL"
-            assert "[REDACTED]" in body or "sensitive" in body, "Vision DOM payload missing redactions"
+            parsed = json.loads(body)
+            assert str(parsed.get("sanitized_screenshot", "")).startswith("data:image/"), "Vision payload missing screenshot data URL"
+            elements = parsed.get("sanitized_dom", {}).get("elements", [])
+            for element in elements:
+                if element.get("sensitive"):
+                    assert element.get("value") == "[REDACTED]", "Sensitive DOM value was not redacted"
 
         # Verify reasoning payload uses symbolic references
         if "/reason" in url:
             # Check for symbolic tokens
             has_symbolic = any(tok in body for tok in ["LOCAL_AADHAAR", "LOCAL_PAN", "LOCAL_FULL_NAME", "LOCAL_PASSWORD"])
             if has_symbolic:
-                print("    ✔ Found symbolic vault reference in /reason payload (zero plaintext secrets)")
+                print("    ✔ Found symbolic vault reference in /reason payload")
 
     print(f"\nPrivacy assertion result: {len(violations)} violations detected.")
     if violations:
@@ -169,19 +187,25 @@ def run_privacy_and_latency_audit():
             print("❌ " + v)
         raise AssertionError("Privacy boundary violated: plaintext secrets found in outbound payloads!")
     else:
-        print("✔ 100% STRICT PRIVACY BOUNDARY VERIFIED: Zero plaintext secrets transmitted to external AI endpoints.")
+        if outbound_payloads:
+            print("✔ Known synthetic sentinels were absent from captured extension-to-backend payloads.")
+        else:
+            print("ℹ No extension-to-backend model payloads were captured in this run.")
+        print("  This run does not establish protection for unknown PII or inspect backend-to-provider egress.")
 
     # --- LATENCY SUMMARY ---
     print("\n----------------------------------------------------------------")
     print("MEASURED PERFORMANCE LATENCIES")
     print("----------------------------------------------------------------")
-    print(f"  DOM Extraction Latency:        {latencies.get('dom_extraction_ms', 1.2)} ms")
-    print(f"  Screenshot Capture Latency:    ~35 - 55 ms")
-    print(f"  Client Privacy Sanitization:   ~8 - 14 ms")
-    print(f"  Server VLM (/vision) Latency:  ~450 - 850 ms")
-    print(f"  GPT-OSS Reasoning (/reason):   ~1200 - 2800 ms")
-    print(f"  Browser Execution Latency:     ~15 - 30 ms")
-    print(f"  Complete Agent Step Latency:   ~1.8 - 3.5 s")
+    print(f"  DOM query probe:                {latencies.get('dom_query_probe_ms', 'not measured')} ms")
+    for endpoint in ("/vision", "/reason", "/interpret"):
+        samples = [r["duration_ms"] for r in outbound_payloads if endpoint in r["url"] and r["duration_ms"] is not None]
+        if samples:
+            average = round(sum(samples) / len(samples), 2)
+            print(f"  {endpoint} roundtrip:            n={len(samples)}, avg={average} ms, max={max(samples)} ms")
+        else:
+            print(f"  {endpoint} roundtrip:            not observed")
+    print(f"  Complete workflow:              {latencies.get('total_workflow_seconds', 'not completed')} seconds")
     print("----------------------------------------------------------------\n")
     return True
 

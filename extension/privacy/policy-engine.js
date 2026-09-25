@@ -137,7 +137,7 @@ export class PolicyEngine {
     }
 
     // L8: 7. Scan for IFSC codes
-    const ifscMatch = scannable.match(/\b[A-Z]{4}0[A-Z0-9]{6}\b/);
+    const ifscMatch = scannable.match(/\b[A-Z]{4}0[A-Z0-9]{6}\b/i);
     if (ifscMatch) {
       throw new OutboundPolicyViolationError(
         'Outbound policy blocked payload: Unmasked IFSC code found in request body',

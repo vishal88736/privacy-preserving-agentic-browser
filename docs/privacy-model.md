@@ -29,7 +29,7 @@ The backend-driven `/agent` browser automation path is retired. The backend acce
 | Arbitrary sensitive text | Not reliably detectable | Requires user review or a broader local classifier. |
 | PII in canvas/video or text embedded in images | Not detected | Screenshot is withheld when canvas/video exists; image content can still be present in ordinary screenshots. |
 
-Text recognized in the aggregate page excerpt is locally pattern-sanitized. If known sensitive text is found there without a reliable location, the screenshot is replaced by a neutral placeholder. Known sensitive form controls with bounding boxes are blacked out. Unknown visual text can remain visible; the project does not claim OCR-complete screenshot privacy.
+Text recognized in the aggregate page excerpt is locally pattern-sanitized. If known sensitive text is found there without a reliable location—including Luhn-valid card numbers, IFSC codes, and common bearer/API-key patterns—the screenshot is replaced by a neutral placeholder. Known sensitive form controls with bounding boxes are blacked out. Unknown visual text can remain visible; the project does not claim OCR-complete screenshot privacy.
 
 ## Vault and documents
 

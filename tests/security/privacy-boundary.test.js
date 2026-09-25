@@ -80,6 +80,27 @@ test('sensitive values outside semantic controls are found where pattern recogni
   assert.match(sanitizer.sanitizePageExtras(raw).visible_text, /REDACTED_API_KEY/);
 });
 
+test('unlocated card numbers, bearer tokens, and IFSC codes withhold the screenshot', async () => {
+  const sanitizer = new DOMSanitizer();
+  const screenshotSanitizer = new ScreenshotSanitizer();
+  const rawScreenshot = 'data:image/png;base64,UkFX';
+  const samples = [
+    'Card number: 4532015000000007',
+    'Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.synthetic-token-value',
+    'Bank branch IFSC: sbin0001234'
+  ];
+  for (const visible_text of samples) {
+    const audit = {
+      coverageEstablished: true,
+      unlocatedSensitiveText: sanitizer.hasUnlocatedSensitiveText({ visible_text })
+    };
+    assert.equal(audit.unlocatedSensitiveText, true, `Expected to detect ${visible_text}`);
+    const safeScreenshot = await screenshotSanitizer.redactScreenshot(rawScreenshot, [], {}, audit);
+    assert.notEqual(safeScreenshot, rawScreenshot);
+  }
+  assert.doesNotMatch(sanitizer.sanitizePageExtras({ visible_text: samples[0] }).visible_text, /4532015000000007/);
+});
+
 test('PII detection coverage is partial: labeled accounts are scrubbed, arbitrary names and financial prose are not', () => {
   const sanitizer = new DOMSanitizer();
   const known = sanitizer.sanitizeUserPrompt('Account number: 123456789012');

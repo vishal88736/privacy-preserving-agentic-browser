@@ -1,8 +1,8 @@
 /**
  * Task Understanding & State Machine
  * Maintains the internal semantic representation of the user's task.
- * Includes a local fallback interpreter so a failed /interpret call
- * never blanks the original request.
+ * Includes a local interpreter for fast task startup and grounded fallback
+ * planning, so task understanding does not depend on a separate model call.
  */
 
 // L18: Expanded stop-word list — prevents noise entities from polluting grounding

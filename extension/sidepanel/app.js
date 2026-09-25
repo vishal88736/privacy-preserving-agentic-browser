@@ -493,7 +493,9 @@ class SidePanelApp {
     if (this.llmElCount) this.llmElCount.textContent = payload ? String(payload.elementsSent ?? 0) : '0';
     if (this.llmRedacted) this.llmRedacted.textContent = String(payload ? (payload.redactedCount ?? redacted) : redacted);
     if (this.llmScreenshot) {
-      this.llmScreenshot.textContent = !payload ? '—' : (payload.redactedCount > 0 ? 'Masked' : 'Clean');
+      this.llmScreenshot.textContent = !payload ? '—'
+        : String(payload.screenshot || '').startsWith('not captured') ? 'Not captured'
+          : (payload.redactedCount > 0 ? 'Masked' : 'Clean');
     }
     // Distinct symbolic tokens referenced across executed steps + current payload
     const tokenSet = new Set(payload?.tokens || []);
@@ -513,10 +515,10 @@ class SidePanelApp {
     const lines = [];
     lines.push(`task_sent: "${payload ? payload.taskSent : String(t?.prompt || '').slice(0, 140)}"`);
     lines.push(`elements_sent: ${payload ? payload.elementsSent : 0} (roles + redacted labels only)`);
-    lines.push(`values: ${payload ? payload.redactedCount : redacted} x "[REDACTED]" (plaintext blocked)`);
+    lines.push(`sensitive fields redacted: ${payload ? payload.redactedCount : redacted}`);
     lines.push(`screenshot: ${payload ? payload.screenshot : 'sanitized before upload'}`);
     lines.push(`tokens: ${(payload?.tokens || [...tokenSet]).join(', ') || 'none'} (resolved locally)`);
-    lines.push(`policy: outbound payload scanned, 0 secrets transmitted`);
+    lines.push('policy: outbound payload checked for known sensitive patterns; unknown PII may be missed');
     if (payload?.sampleElements?.length) {
       lines.push('sample:');
       for (const s of payload.sampleElements.slice(0, 3)) {

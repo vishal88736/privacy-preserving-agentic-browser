@@ -148,7 +148,12 @@ Output ONLY a valid JSON object. Do NOT include markdown blocks:
         }
 
         try:
-            resp = requests.post(f"{settings.AI_BASE_URL}/chat/completions", headers=headers, json=payload, timeout=10)
+            resp = requests.post(
+                f"{settings.AI_BASE_URL}/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=settings.INTERPRETATION_REQUEST_TIMEOUT_SECONDS,
+            )
             if resp.status_code == 200:
                 content = resp.json().get("choices", [])[0].get("message", {}).get("content", "").strip()
                 return _extract_json(content)
@@ -264,7 +269,12 @@ CRITICAL RULES:
                 "max_tokens": 1500
             }
 
-            resp = requests.post(f"{settings.AI_BASE_URL}/chat/completions", headers=headers, json=payload, timeout=20)
+            resp = requests.post(
+                f"{settings.AI_BASE_URL}/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=settings.REASONING_REQUEST_TIMEOUT_SECONDS,
+            )
             if resp.status_code == 200:
                 raw_choices = resp.json().get("choices", [])
                 if not raw_choices:
