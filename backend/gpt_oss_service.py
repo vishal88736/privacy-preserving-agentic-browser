@@ -76,16 +76,87 @@ def _allowed_ids(fused_observation: Dict[str, Any], page_state: Optional[Dict[st
     return {i for i in ids if i}
 
 
-def _repair_action(parsed: dict, allowed: set, page_state: Optional[Dict[str, Any]]) -> dict:
+def _option_texts(fused_observation: Optional[Dict[str, Any]], element_id: Optional[str]) -> List[str]:
+    """Collect option text/value strings for a select element from the observation."""
+    texts: List[str] = []
+    if not element_id:
+        return texts
+    for el in (fused_observation or {}).get("elements", []) or []:
+        if not isinstance(el, dict):
+            continue
+        if el.get("id") != element_id and el.get("element_id") != element_id:
+            continue
+        dom = el.get("dom") if isinstance(el.get("dom"), dict) else el
+        options = dom.get("options")
+        if not isinstance(options, list):
+            continue
+        for opt in options:
+            if isinstance(opt, dict):
+                for key in ("text", "label", "value"):
+                    if isinstance(opt.get(key), str) and opt[key].strip():
+                        texts.append(opt[key].strip().lower())
+            elif isinstance(opt, str) and opt.strip():
+                texts.append(opt.strip().lower())
+    return texts
+
+
+def _value_matches_option(value: str, options: List[str]) -> bool:
+    """Fuzzy match a proposed select value against known option texts."""
+    if not options:
+        return True  # options unknown: cannot judge, do not block
+    normalized = re.sub(r"\s+", " ", re.sub(r"[._\-]+", " ", value.strip().lower())).strip()
+    for option in options:
+        if normalized == option or normalized in option or option in normalized:
+            return True
+    return False
+
+
+def _repair_action(parsed: dict, allowed: set, page_state: Optional[Dict[str, Any]], fused_observation: Optional[Dict[str, Any]] = None) -> dict:
     act = parsed.get("action") or {}
     if not isinstance(act, dict):
         _log_safe_plan_shape(parsed)
         return parsed
     target = act.get("target") or {}
     eid = target.get("element_id") if isinstance(target, dict) else None
-    if act.get("action") in ("DONE", "WAIT", "NAVIGATE", "SCROLL", "GO_BACK", "GO_FORWARD", "EXTRACT", "PRESS_KEY", "OPEN_TAB", "SWITCH_TAB", "ASK_USER"):
+    if act.get("action") in ("DONE", "WAIT", "SCROLL", "GO_BACK", "GO_FORWARD", "EXTRACT", "PRESS_KEY", "OPEN_TAB", "SWITCH_TAB", "ASK_USER"):
         _log_safe_plan_shape(parsed)
         return parsed
+
+    action_type = act.get("action")
+    downgrade_reason = None
+
+    # Value hallucination guard 1: TYPE with neither an inline value nor a
+    # symbolic source would be rejected by the extension's schema anyway —
+    # repairing here saves the wasted observation roundtrip.
+    if action_type == "TYPE" and not act.get("value") and not act.get("value_source"):
+        downgrade_reason = "TYPE has no value and no value_source"
+
+    # Value hallucination guard 2: a SELECT value that matches none of the
+    # element's known options is fabricated. The extension executor would
+    # fail to match it; downgrade so the model re-observes.
+    if action_type == "SELECT" and not downgrade_reason:
+        proposed_value = act.get("value")
+        if isinstance(proposed_value, str) and proposed_value.strip():
+            options = _option_texts(fused_observation, eid)
+            if not _value_matches_option(proposed_value, options):
+                downgrade_reason = f"SELECT value '{proposed_value.strip()[:40]}' matches no option of {eid or 'the target'}"
+
+    # Hallucination guard 3: a NAVIGATE target must be a real http(s) URL —
+    # invented scheme-relative or internal URLs fail at execution.
+    if action_type == "NAVIGATE":
+        nav_target = act.get("target") or {}
+        nav_url = nav_target.get("url") if isinstance(nav_target, dict) else None
+        if not isinstance(nav_url, str) or not re.match(r"^https?://", nav_url.strip(), re.I):
+            downgrade_reason = "NAVIGATE target is not a valid http(s) URL"
+
+    if downgrade_reason:
+        act["action"] = "WAIT"
+        act["target"] = None
+        parsed["action"] = act
+        parsed["thought"] = (parsed.get("thought") or "") + f" [grounding-repair: {downgrade_reason}; waiting to re-observe]"
+        _log_safe_plan_shape(parsed)
+        return parsed
+
     # Hallucination guard: any target id that is not a known page element is
     # fabricated, including when the observation supplied no element ids at
     # all (an empty allowed set must NOT let a hallucinated id pass through).
@@ -336,7 +407,7 @@ CRITICAL RULES:
                         valid_sources = ("LOCAL_AADHAAR", "LOCAL_PAN", "LOCAL_DOCUMENT", "LOCAL_PASSWORD", "LOCAL_FULL_NAME", "LOCAL_DOB", "LOCAL_PHONE", "LOCAL_EMAIL", "LOCAL_ADDRESS", "LOCAL_PROFILE", "LOCAL_CREDIT_CARD", "LOCAL_CVV", "LOCAL_SSN", "LOCAL_SIN", "LOCAL_NIN", "LOCAL_NHS", "LOCAL_IBAN", "LOCAL_CITY", "LOCAL_STATE", "LOCAL_ZIP", "LOCAL_COUNTRY", "LOCAL_GENDER", "LOCAL_TERMS")
                         if act["value_source"] not in valid_sources and not re.fullmatch(r"LOCAL_CUSTOM_[A-Z0-9_]{1,48}", str(act["value_source"])):
                             act["value_source"] = None
-                    parsed = _repair_action(parsed, allowed, page_state)
+                    parsed = _repair_action(parsed, allowed, page_state, fused_observation)
                     return parsed
                 raise Exception("Model returned invalid schema")
             raise Exception(f"Model API error: {resp.status_code}")

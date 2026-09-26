@@ -86,6 +86,18 @@ export class VLMClient {
   }
 
   /**
+   * Public DOM-only fallback for callers that skip the screenshot path
+   * entirely (capture failed / local analysis unavailable). No image is
+   * involved, so nothing sensitive can leak.
+   */
+  domOnlyObservation(sanitizedDom, errorNote = null) {
+    const fallback = this._domOnlyObservation(sanitizedDom);
+    fallback._source = 'DOM_ONLY';
+    if (errorNote) fallback._error = String(errorNote).slice(0, 200);
+    return fallback;
+  }
+
+  /**
    * Deterministic local fallback when remote VLM endpoint is not reachable
    * Generates visual annotations directly from sanitized DOM coordinates.
    */

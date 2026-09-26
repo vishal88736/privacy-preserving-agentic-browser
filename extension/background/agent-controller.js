@@ -353,17 +353,29 @@ export class AgentController {
     }
 
     if (screenshotResponse?.captured === false || !screenshotResponse?.dataUrl) {
-      const pageInfo = currentTab?.url ? `on ${currentTab.url}` : `(capability: ${capability})`;
-      throw new LocalVisionRequiredError(`The current tab screenshot could not be captured ${pageInfo}. Ensure the tab is an open, visible webpage.`);
+      console.warn(`[AgentController] Screenshot capture failed on this page; continuing from the sanitized DOM only.`);
     }
 
     const rawDOM = domResponse.data;
     const expectedSensitiveCounts = defaultDOMSanitizer.getUnlocatedSensitiveCounts(rawDOM);
+    // `captured: false` is the explicit placeholder signal from the capture
+    // service; a dataUrl without the flag is a successful capture.
+    const screenshotAvailable = Boolean(screenshotResponse?.dataUrl) && screenshotResponse?.captured !== false;
 
     // Screenshot pixels are sent only to the extension side panel for local
-    // object detection and OCR. The server request is reached only after this
-    // analysis has completed successfully.
-    const localVision = await this._analyzeScreenshotLocally(screenshotResponse.dataUrl, rawDOM.viewport, expectedSensitiveCounts);
+    // object detection and OCR. When the capture or the local analysis is
+    // unavailable, no screenshot exists to send — the task continues from the
+    // sanitized DOM only instead of failing outright (nothing sensitive can
+    // leak: there is no image).
+    let localVision = null;
+    if (screenshotAvailable) {
+      try {
+        localVision = await this._analyzeScreenshotLocally(screenshotResponse.dataUrl, rawDOM.viewport, expectedSensitiveCounts);
+      } catch (visionErr) {
+        if (visionErr?.name !== 'LocalVisionRequiredError') throw visionErr;
+        console.warn('[AgentController] Local visual analysis unavailable; continuing from sanitized DOM only.');
+      }
+    }
 
     // STEP 2: LOCAL PRIVACY SANITIZATION (Client-Side Boundary)
     taskManager.updateState(AgentState.SANITIZING, 'Redacting sensitive fields locally…');
@@ -379,9 +391,9 @@ export class AgentController {
       // counts. Any unmatched occurrence sets forceWithhold below.
       unlocatedSensitiveText: false,
       opaqueVisualSurface: Boolean(rawDOM.opaqueVisualSurface),
-      maskedCount: sensitiveCount + localVision.piiRegions.length + localVision.people.length,
-      localVisionCompleted: localVision.completed === true,
-      forceWithhold: localVision.safeToTransmitAfterRedaction !== true
+      maskedCount: sensitiveCount + (localVision ? localVision.piiRegions.length + localVision.people.length : 0),
+      localVisionCompleted: localVision?.completed === true,
+      forceWithhold: localVision ? localVision.safeToTransmitAfterRedaction !== true : true
     };
 
     const sanitizedDOM = {
@@ -397,7 +409,7 @@ export class AgentController {
       scroll: extras.scroll,
       // This contains labels, counts, confidence and geometry only. OCR text is
       // intentionally discarded by the local engine and never reaches IPC.
-      local_vision_context: {
+      local_vision_context: localVision ? {
         model: localVision.model,
         model_revision: localVision.modelRevision,
         people_masked: localVision.people.length,
@@ -410,50 +422,56 @@ export class AgentController {
         model_load_ms: localVision.modelLoadMs,
         inference_ms: localVision.inferenceMs,
         asset_bytes: localVision.assetBytes
-      }
+      } : null
     };
 
-    const localMaskElements = [
+    const localMaskElements = localVision ? [
       ...sanitizedElements,
       ...localVision.piiRegions.map((region) => ({ bbox: region.bbox, sensitive: true, semantic_type: region.category })),
       ...localVision.people.map((person) => ({ bbox: person.bbox, sensitive: true, semantic_type: 'PERSON' }))
-    ];
+    ] : sanitizedElements;
 
     // Every observation includes a locally sanitized screenshot for VLM
-    // grounding. Capture runs in parallel with DOM extraction above.
-    const redactedScreenshot = await defaultScreenshotSanitizer.redactScreenshot(
-      screenshotResponse.dataUrl,
-      localMaskElements,
-      rawDOM.viewport,
-      screenshotPrivacyAudit
-    );
+    // grounding. Capture runs in parallel with DOM extraction above. When no
+    // screenshot is available, redactedScreenshot stays null and the task
+    // continues from the sanitized DOM only.
+    const redactedScreenshot = screenshotAvailable
+      ? await defaultScreenshotSanitizer.redactScreenshot(
+          screenshotResponse.dataUrl,
+          localMaskElements,
+          rawDOM.viewport,
+          screenshotPrivacyAudit
+        )
+      : null;
 
-    task.visionSamples ||= [];
-    task.visionSamples.push({
-      step: task.currentStep + 1,
-      objects: localVision.objectDetections,
-      pii: localVision.piiRegions.map(({ bbox, category }) => ({ bbox, category })),
-      redactions: localMaskElements.filter((region) => region.sensitive && Array.isArray(region.bbox)).map((region) => ({
-        bbox: region.bbox,
-        category: region.semantic_type || 'SENSITIVE'
-      })),
-      localVisionLatencyMs: localVision.totalMs,
-      clientHeapBytes: localVision.heapUsedBytes,
-      clientAssetBytes: localVision.assetBytes
-    });
+    if (screenshotAvailable && localVision) {
+      task.visionSamples ||= [];
+      task.visionSamples.push({
+        step: task.currentStep + 1,
+        objects: localVision.objectDetections,
+        pii: localVision.piiRegions.map(({ bbox, category }) => ({ bbox, category })),
+        redactions: localMaskElements.filter((region) => region.sensitive && Array.isArray(region.bbox)).map((region) => ({
+          bbox: region.bbox,
+          category: region.semantic_type || 'SENSITIVE'
+        })),
+        localVisionLatencyMs: localVision.totalMs,
+        clientHeapBytes: localVision.heapUsedBytes,
+        clientAssetBytes: localVision.assetBytes
+      });
+    }
 
     taskManager.updatePrivacyMetrics({
       sensitiveFieldsDetected: sensitiveCount,
       secretsKeptLocal: sensitiveCount,
-      redactedRegionsCount: sensitiveCount + localVision.piiRegions.length + localVision.people.length,
-      localVisionLatencyMs: localVision.totalMs,
-      localModelAssetBytes: localVision.assetBytes,
-      localOcrPiiRegions: localVision.piiRegions.length,
-      localPeopleMasked: localVision.people.length,
+      redactedRegionsCount: sensitiveCount + (localVision ? localVision.piiRegions.length + localVision.people.length : 0),
+      localVisionLatencyMs: localVision?.totalMs || 0,
+      localModelAssetBytes: localVision?.assetBytes,
+      localOcrPiiRegions: localVision?.piiRegions.length || 0,
+      localPeopleMasked: localVision?.people.length || 0,
       detectedCategories: [...new Set([
         ...detectedCategories,
-        ...localVision.piiCategories,
-        ...(localVision.people.length ? ['PERSON'] : [])
+        ...(localVision?.piiCategories || []),
+        ...(localVision?.people.length ? ['PERSON'] : [])
       ])]
     });
     // Transparency: record exactly what leaves the device for the "What is
@@ -470,13 +488,15 @@ export class AgentController {
         value: e.value,
         value_source: e.value_source || null
       }));
-      const screenshotStatus = defaultScreenshotSanitizer.lastRedactionStatus || 'unknown';
+      const screenshotStatus = redactedScreenshot
+        ? (defaultScreenshotSanitizer.lastRedactionStatus || 'unknown')
+        : 'unavailable';
       task.lastLLMPayload = {
         taskSent: String(task.prompt || '').slice(0, 140),
         elementsSent: (sanitizedElements || []).length,
         redactedCount: sensitiveCount,
         detectedCategories: detectedCategories || [],
-        localVision: {
+        localVision: localVision ? {
           model: localVision.model,
           analysisMs: localVision.totalMs,
           modelLoadMs: localVision.modelLoadMs,
@@ -486,7 +506,7 @@ export class AgentController {
           ocrRegionsMasked: localVision.piiRegions.length,
           ocrCategoriesMasked: localVision.piiCategories,
           heapUsedBytes: localVision.heapUsedBytes
-        },
+        } : undefined,
         tokens,
         screenshotStatus,
         screenshot: screenshotStatus === 'withheld'
@@ -495,7 +515,7 @@ export class AgentController {
             ? 'masked known sensitive regions'
             : screenshotStatus === 'checked'
               ? 'processed; no known sensitive regions to mask'
-              : 'sanitization status unavailable',
+              : 'unavailable on this page; no image was sent',
         sampleElements,
         timestamp: Date.now()
       };
@@ -506,24 +526,31 @@ export class AgentController {
     taskManager.updateState(AgentState.VISUAL_ANALYSIS, 'Interpreting the visual layout…');
     this.notify('STATE_CHANGED', { state: AgentState.VISUAL_ANALYSIS });
 
-    const visualObservation = await defaultVLMClient.processVisuals(
-      task.id,
-      redactedScreenshot,
-      sanitizedDOM,
-      {
-        viewport: rawDOM.viewport,
-        // Sanitized copy: the raw title never leaves the device.
-        title: sanitizedDOM.title,
-        url: defaultDOMSanitizer.sanitizeUrl(rawDOM.url),
-        privacy_redaction_summary: {
-          dom_regions: sensitiveCount,
-          ocr_regions: localVision.piiRegions.length,
-          people_regions: localVision.people.length,
-          screenshot_withheld: defaultScreenshotSanitizer.lastRedactionStatus === 'withheld',
-          unresolved_sensitive_categories: localVision.unlocatedSensitiveCategories
-        }
-      }
-    );
+    const visualObservation = redactedScreenshot
+      ? await defaultVLMClient.processVisuals(
+          task.id,
+          redactedScreenshot,
+          sanitizedDOM,
+          {
+            viewport: rawDOM.viewport,
+            // Sanitized copy: the raw title never leaves the device.
+            title: sanitizedDOM.title,
+            url: defaultDOMSanitizer.sanitizeUrl(rawDOM.url),
+            privacy_redaction_summary: {
+              dom_regions: sensitiveCount,
+              ocr_regions: localVision?.piiRegions.length || 0,
+              people_regions: localVision?.people.length || 0,
+              screenshot_withheld: defaultScreenshotSanitizer.lastRedactionStatus === 'withheld',
+              unresolved_sensitive_categories: localVision?.unlocatedSensitiveCategories || []
+            }
+          }
+        )
+      // No screenshot exists to send: continue from the sanitized DOM only
+      // instead of failing the task.
+      : defaultVLMClient.domOnlyObservation(
+          sanitizedDOM,
+          'The screenshot could not be captured on this page; no image was sent.'
+        );
 
     if (visualObservation._source !== 'DOM_ONLY') {
       taskManager.updatePrivacyMetrics({ serverCallsCount: 1 });
@@ -532,8 +559,10 @@ export class AgentController {
       taskManager.updatePrivacyMetrics({ privacyBlocks: 1 });
     }
 
-    const objectSummary = localVision.objectDetections.slice(0, 12).map((item) => item.label).join(', ');
-    const localVisionNote = `Local ${localVision.model} and OCR checks completed in ${localVision.totalMs} ms; detected objects: ${objectSummary || 'none'}. Masked ${localVision.people.length} people and ${localVision.piiRegions.length} OCR-identified sensitive regions. OCR text was discarded locally.`;
+    const objectSummary = localVision ? localVision.objectDetections.slice(0, 12).map((item) => item.label).join(', ') : '';
+    const localVisionNote = localVision
+      ? `Local ${localVision.model} and OCR checks completed in ${localVision.totalMs} ms; detected objects: ${objectSummary || 'none'}. Masked ${localVision.people.length} people and ${localVision.piiRegions.length} OCR-identified sensitive regions. OCR text was discarded locally.`
+      : 'Local screenshot analysis was unavailable on this page; continuing from the sanitized DOM only. No screenshot was sent.';
     visualObservation.spatial_layout = [visualObservation.spatial_layout, localVisionNote].filter(Boolean).join(' ');
     visualObservation.visual_state = [visualObservation.visual_state, localVisionNote].filter(Boolean).join(' ');
 

@@ -84,7 +84,7 @@ Browser DOM Mutation
 ### 1. DOM, Local Vision, and VLM Perception
 - **DOM Perception**: Extracts accessible labels, semantic roles, input types, bounding boxes, and states.
 - **Local Vision**: Runs YOLOS-Tiny object detection and Tesseract OCR in the extension side panel using locally packaged ONNX/WASM and language data. PII patterns receive OCR boxes for redaction; detected people are conservatively masked by object box. OCR text stays local.
-- **Server VLM Perception**: Receives only the locally sanitized screenshot and sanitized DOM on every observation to interpret page state and visual hierarchy. If no vision model responds, the backend labels its DOM-derived fallback explicitly. If local screenshot analysis fails, the screenshot is never sent and the task stops.
+- **Server VLM Perception**: Receives only the locally sanitized screenshot and sanitized DOM on every observation to interpret page state and visual hierarchy. If no vision model responds, the backend labels its DOM-derived fallback explicitly. If local screenshot analysis fails or the capture is unavailable, no screenshot is ever sent and the task continues from the sanitized DOM only.
 - **Observation Fusion**: Matches DOM elements with visual bounding boxes using Intersection-over-Union (IoU) and semantic matching.
 
 ### 2. Autonomous Agent Loop

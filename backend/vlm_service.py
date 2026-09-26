@@ -235,6 +235,17 @@ class VLMService:
                 if parsed.get("page_type"):
                     out["page_type"] = parsed["page_type"]
                 if out:
+                    # Anti-hallucination guard: masked regions are opaque
+                    # black, so a "real-looking" PII pattern in the VLM output
+                    # is confabulated, not read from the screen. Discard the
+                    # response and rotate rather than feeding fabricated
+                    # sensitive claims into the reasoning model.
+                    fabricated = find_sensitive_category(json.dumps(out)) or re.search(
+                        r"\b(?:sk|pk|api)[-_][A-Za-z0-9_-]{16,}\b", json.dumps(out), re.I
+                    )
+                    if fabricated:
+                        print(f"[VLM] {candidate['provider']} output contained fabricated sensitive content; rotating provider/key")
+                        continue
                     return out
                 print(f"[VLM] {candidate['provider']} response missing layout keys; rotating provider/key")
             except Exception as exc:
