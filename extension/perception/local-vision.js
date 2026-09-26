@@ -4,6 +4,8 @@
  * language data are served from the packaged extension directory only.
  */
 
+import { findPIIMatches } from '../privacy/pii-rules.js';
+
 const MODEL_ID = 'Xenova/yolos-tiny';
 const MODEL_REVISION = 'e2f9c7673f0fa61849efe2b56a0d7774779ebb9d';
 const PERSON_THRESHOLD = 0.35;
@@ -21,26 +23,12 @@ function asBox(x0, y0, x1, y1, scaleX, scaleY) {
   return [left, top, right - left, bottom - top];
 }
 
-function checksumLuhn(value) {
-  const digits = value.replace(/\D/g, '');
-  if (digits.length < 13 || digits.length > 19) return false;
-  let sum = 0;
-  let double = false;
-  for (let i = digits.length - 1; i >= 0; i--) {
-    let digit = Number(digits[i]);
-    if (double) {
-      digit *= 2;
-      if (digit > 9) digit -= 9;
-    }
-    sum += digit;
-    double = !double;
-  }
-  return sum % 10 === 0;
-}
-
 /** Return sensitive spans only; OCR text itself never leaves this function. */
 function sensitiveSpans(text) {
   const spans = [];
+  for (const match of findPIIMatches(text, text)) {
+    spans.push({ start: match.index, end: match.end, category: match.category });
+  }
   const addMatches = (regex, category, predicate = () => true, captureGroup = 0) => {
     regex.lastIndex = 0;
     for (const match of text.matchAll(regex)) {
@@ -52,12 +40,6 @@ function sensitiveSpans(text) {
     }
   };
 
-  addMatches(/\b[A-Z]{5}[0-9]{4}[A-Z]\b/gi, 'PAN');
-  addMatches(/\b[2-9]\d{3}[\s-]?\d{4}[\s-]?\d{4}(?!\s?\d)\b/g, 'AADHAAR');
-  addMatches(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, 'EMAIL');
-  addMatches(/(?<!\d)(?:(?:\+|00?)91[\s-]?)?[6-9](?:[\s-]?\d){9}(?!\d)/g, 'PHONE');
-  addMatches(/\b(?:0[1-9]|[12]\d|3[01])[-/.](?:0[1-9]|1[0-2])[-/.](?:19|20)\d{2}\b/g, 'DOB');
-  addMatches(/(?<!\d)(?:\d[\s-]?){13,19}(?!\d)/g, 'CREDIT_CARD', (value) => checksumLuhn(value));
   addMatches(/\b(?:account|acct|bank\s*account)(?:\s*(?:number|no\.?|#))?\s*[:#-]?\s*(\d(?:[\s-]?\d){5,23})(?!\d)/gi, 'ACCOUNT', () => true, 1);
   addMatches(/\b(?:otp|one[ -]?time(?: password| code)?|verification code|security code|pin)\s*[:#-]?\s*([A-Z0-9-]{4,12})\b/gi, 'OTP', () => true, 1);
   addMatches(/\b(?:password|passcode|access token|api key|bearer)\s*[:#-]?\s*([A-Z0-9._~+/-]{6,96}={0,2})/gi, 'CREDENTIAL', () => true, 1);

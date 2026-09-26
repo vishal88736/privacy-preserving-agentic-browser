@@ -8,10 +8,11 @@
  * L13: PAN regex is now case-insensitive
  */
 
-import { defaultPIIDetector, validateLuhn } from './pii-detector.js';
+import { defaultPIIDetector } from './pii-detector.js';
 import { defaultSecretDetector } from './secret-detector.js';
 import { defaultLocalVault } from './local-vault.js';
 import { SymbolicSecretSource } from '../shared/constants.js';
+import { findPIIMatches, redactPII } from './pii-rules.js';
 
 export class DOMSanitizer {
   constructor(piiDetector = defaultPIIDetector, secretDetector = defaultSecretDetector, vault = null) {
@@ -76,14 +77,7 @@ export class DOMSanitizer {
     for (const secret of this._vaultSecrets()) {
       out = this._scrubVaultToken(out, secret, '[example]');
     }
-    // PII-shaped examples independent of vault contents
-    // L13: PAN regex is case-insensitive
-    out = out.replace(/\b[A-Z]{5}[0-9]{4}[A-Z]{1}\b/gi, '[example]');
-    out = out.replace(/\b[2-9]\d{3}[\s-]?\d{4}[\s-]?\d{4}\b/g, '[example]');
-    out = out.replace(/(?<!\d)(?:(?:\+|0{0,2})91[\s-]?)?[6-9]\d{9}(?!\d)/g, '[example]');
-    out = out.replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, '[example]');
-    out = out.replace(/\b[A-Z]{4}0[A-Z0-9]{6}\b/gi, '[example]');
-    return out;
+    return redactPII(out, text).replace(/\[REDACTED_[A-Z_]+\]/g, '[example]');
   }
 
   /**
@@ -105,43 +99,13 @@ export class DOMSanitizer {
       // ignore vault errors
     }
 
-    // 2. Generic PII Regex Fallbacks
-    // L13: PAN regex is now case-insensitive
-    out = out.replace(/\b[A-Z]{5}[0-9]{4}[A-Z]{1}\b/gi, `[${SymbolicSecretSource.LOCAL_PAN}]`);
-    out = out.replace(/\b[2-9]\d{3}[\s-_]?\d{4}[\s-_]?\d{4}\b/g, `[${SymbolicSecretSource.LOCAL_AADHAAR}]`);
+    // 2. Use the same PII registry as the outbound policy engine.
+    out = redactPII(out);
 
-    // L10: Scrub email addresses from text sent to models
-    out = out.replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, `[${SymbolicSecretSource.LOCAL_EMAIL}]`);
-
-    // Scrub IFSC codes (bank branch identifiers) so the outbound policy
-    // engine never blocks benign banking pages.
-    out = out.replace(/\b[A-Z]{4}0[A-Z0-9]{6}\b/gi, `[${SymbolicSecretSource.LOCAL_PROFILE}]`);
-
-    // Common textual credential/identifier formats beyond the field-level
-    // detector. These are pattern coverage, not a claim to detect arbitrary
-    // private language or every national identifier.
-    out = out.replace(/\b(?:0[1-9]|[12][0-9]|3[01])[-/.](?:0[1-9]|1[012])[-/.](?:19|20)\d{2}\b/g, '[REDACTED_DOB]');
+    // Credential-shaped text not covered by region-specific identity rules.
     out = out.replace(/\b(?:sk|pk|api)[-_][A-Za-z0-9_-]{16,}\b/gi, '[REDACTED_API_KEY]');
     out = out.replace(/\bBearer\s+[A-Za-z0-9._~+/-]{12,}={0,2}/gi, 'Bearer [REDACTED_TOKEN]');
     out = out.replace(/\b(?:account|acct|bank\s*account)(?:\s*(?:number|no\.?|#))?\s*[:#-]?\s*[A-Z0-9 -]{6,24}\b/gi, '[REDACTED_ACCOUNT]');
-
-    // Scrub Indian phone numbers only when they look like standalone phone
-    // numbers (not timestamps/order IDs). Require a word boundary on both
-    // sides via lookarounds so substrings of longer digit runs are kept.
-    out = out.replace(/(?<!\d)(?:(?:\+|0{0,2})91[\s-]?)?[6-9]\d{9}(?!\d)/g, `[${SymbolicSecretSource.LOCAL_PHONE}]`);
-
-    // Scrub credit/debit card patterns only when Luhn-valid, otherwise
-    // order IDs and timestamps would be destroyed.
-    out = out.replace(/(?<!\d)(?:\d[\s-]?){13,19}(?!\d)/g, (match) => {
-      const clean = match.replace(/[\s-]/g, '');
-      if (/^\d{13,19}$/.test(clean)) {
-        try {
-          if (typeof validateLuhn === 'function' && !validateLuhn(clean)) return match;
-        } catch { return match; }
-        return `[${SymbolicSecretSource.LOCAL_CREDIT_CARD}]`;
-      }
-      return match;
-    });
 
     return out;
   }
@@ -196,6 +160,9 @@ export class DOMSanitizer {
       // not user data) so literal examples never reach remote models.
       sanitized.placeholder = this.scrubPlaceholderText(sanitized.placeholder);
       if (sanitized.label) sanitized.label = this.scrubPlaceholderText(sanitized.label);
+      if (sanitized.ariaLabel) sanitized.ariaLabel = this.sanitizeUserPrompt(sanitized.ariaLabel);
+      if (sanitized.ariaDescribedBy) sanitized.ariaDescribedBy = this.sanitizeUserPrompt(sanitized.ariaDescribedBy);
+      if (sanitized.fieldset_legend) sanitized.fieldset_legend = this.sanitizeUserPrompt(sanitized.fieldset_legend);
       if (sanitized.context) sanitized.context = this.sanitizeUserPrompt(sanitized.context);
       if (sanitized.href) sanitized.href = this.sanitizeLink(sanitized.href);
       if (Array.isArray(sanitized.options)) {
@@ -247,15 +214,9 @@ export class DOMSanitizer {
   /** Count known sensitive text without returning any of its values. */
   getUnlocatedSensitiveCounts(rawDOM = {}) {
     const patterns = [
-      ['AADHAAR', /\b[2-9]\d{3}[\s-]?\d{4}[\s-]?\d{4}\b/gi],
-      ['PAN', /\b[A-Z]{5}\d{4}[A-Z]\b/gi],
-      ['EMAIL', /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi],
-      ['PHONE', /(?<!\d)(?:(?:\+|0{0,2})91[\s-]?)?[6-9]\d{9}(?!\d)/g],
-      ['DOB', /\b(?:0[1-9]|[12]\d|3[01])[-/.](?:0[1-9]|1[0-2])[-/.](?:19|20)\d{2}\b/g],
       ['CREDENTIAL', /\b(?:password|passcode|one[ .-]?time(?:[ .-]code|[ .-]password)?|otp|account number|bank account|api key|access token)\s*[:#-]\s*\S+/gi],
       ['CREDENTIAL', /\b(?:sk|pk|api)[-_][A-Za-z0-9_-]{16,}\b/gi],
       ['CREDENTIAL', /\bBearer\s+[A-Za-z0-9._~+/-]{12,}={0,2}/gi],
-      ['IFSC', /\b[A-Z]{4}0[A-Z0-9]{6}\b/gi]
     ];
     const aggregateTexts = typeof rawDOM.visible_text === 'string' && rawDOM.visible_text
       ? [rawDOM.visible_text]
@@ -267,16 +228,10 @@ export class DOMSanitizer {
         if (!spansByCategory.has(category)) spansByCategory.set(category, []);
         spansByCategory.get(category).push({ start, end });
       };
+      for (const match of findPIIMatches(value, value)) addSpan(match.category, match.index, match.end);
       for (const [category, pattern] of patterns) {
         pattern.lastIndex = 0;
         for (const match of value.matchAll(pattern)) addSpan(category, match.index, match.index + match[0].length);
-      }
-      const cardPattern = /(?<!\d)(?:\d[ -]?){13,19}(?!\d)/g;
-      for (const match of value.matchAll(cardPattern)) {
-        const digits = match[0].replace(/[ -]/g, '');
-        if (digits.length >= 13 && digits.length <= 19 && validateLuhn(digits)) {
-          addSpan('CREDIT_CARD', match.index, match.index + match[0].length);
-        }
       }
       for (const [category, spans] of spansByCategory) {
         spans.sort((a, b) => a.start - b.start || a.end - b.end);

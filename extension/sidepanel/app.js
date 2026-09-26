@@ -222,6 +222,7 @@ class SidePanelApp {
     this.$('vault-btn').addEventListener('click', () => this.openVault());
     this.$('close-vault-btn').addEventListener('click', () => this.closeModal(this.vaultModal));
     this.$('save-vault-btn').addEventListener('click', () => this.saveVault());
+    this.$('vault-add-custom-btn').addEventListener('click', () => this.addCustomVaultField());
 
     this.$('settings-btn').addEventListener('click', () => this.openSettings());
     this.$('close-settings-btn').addEventListener('click', () => this.closeModal(this.settingsModal));
@@ -290,7 +291,15 @@ class SidePanelApp {
     this.feed.appendChild(this.feedEmpty);
     this.hideStatePanels();
     this.setControls('running');
-    this.send(MessageType.START_TASK, { prompt, tabId }, () => { this.busy = false; });
+    this.send(MessageType.START_TASK, { prompt, tabId }, (res) => {
+      this.busy = false;
+      if (!res?.success) {
+        this.showError(
+          res?.error || 'PrivAgent could not start this task.',
+          res?.hint || 'The extension background did not respond. Reload the extension and retry.'
+        );
+      }
+    });
   }
 
   togglePause() {
@@ -816,9 +825,50 @@ class SidePanelApp {
       this.$('vault-name').value = typeof v.LOCAL_FULL_NAME === 'string' ? v.LOCAL_FULL_NAME : '';
       this.$('vault-dob').value = typeof v.LOCAL_DOB === 'string' ? v.LOCAL_DOB : '';
       this.$('vault-phone').value = typeof v.LOCAL_PHONE === 'string' ? v.LOCAL_PHONE : '';
+      this.$('vault-email').value = typeof v.LOCAL_EMAIL === 'string' ? v.LOCAL_EMAIL : '';
       this.$('vault-password').value = typeof v.LOCAL_PASSWORD === 'string' ? v.LOCAL_PASSWORD : '';
+      this.$('vault-ssn').value = typeof v.LOCAL_SSN === 'string' ? v.LOCAL_SSN : '';
+      this.$('vault-sin').value = typeof v.LOCAL_SIN === 'string' ? v.LOCAL_SIN : '';
+      this.$('vault-nin').value = typeof v.LOCAL_NIN === 'string' ? v.LOCAL_NIN : '';
+      this.$('vault-nhs').value = typeof v.LOCAL_NHS === 'string' ? v.LOCAL_NHS : '';
+      this.$('vault-iban').value = typeof v.LOCAL_IBAN === 'string' ? v.LOCAL_IBAN : '';
+      const customFields = this.$('vault-custom-fields');
+      customFields.replaceChildren();
+      for (const [key, value] of Object.entries(v)) {
+        if (/^LOCAL_CUSTOM_[A-Z0-9_]{1,48}$/.test(key)) this.addCustomVaultField(key, value);
+      }
       this.openModal(this.vaultModal);
     });
+  }
+
+  addCustomVaultField(key = '', value = '') {
+    const customFields = this.$('vault-custom-fields');
+    const field = document.createElement('label');
+    field.className = 'vault-field';
+    const header = document.createElement('div');
+    header.className = 'vault-label-row';
+    const label = document.createElement('input');
+    label.type = 'text';
+    label.autocomplete = 'off';
+    label.dataset.vaultName = 'true';
+    label.placeholder = 'Value name, e.g. Passport';
+    label.value = key ? key.replace(/^LOCAL_CUSTOM_/, '').replace(/_/g, ' ') : '';
+    const token = document.createElement('code');
+    token.className = 'mono-token';
+    token.textContent = key || 'LOCAL_CUSTOM_…';
+    header.append(label, token);
+    const input = document.createElement('input');
+    input.type = 'password';
+    input.autocomplete = 'off';
+    input.dataset.originalVaultKey = key;
+    input.value = typeof value === 'string' ? value : '';
+    input.placeholder = 'Stored only in this browser';
+    label.addEventListener('input', () => {
+      const slug = label.value.toUpperCase().trim().replace(/[^A-Z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 48);
+      token.textContent = slug ? `LOCAL_CUSTOM_${slug}` : 'LOCAL_CUSTOM_…';
+    });
+    field.append(header, input);
+    customFields.append(field);
   }
 
   saveVault() {
@@ -828,7 +878,22 @@ class SidePanelApp {
       ['LOCAL_FULL_NAME', this.$('vault-name').value],
       ['LOCAL_DOB', this.$('vault-dob').value],
       ['LOCAL_PHONE', this.$('vault-phone').value],
-      ['LOCAL_PASSWORD', this.$('vault-password').value]
+      ['LOCAL_EMAIL', this.$('vault-email').value],
+      ['LOCAL_PASSWORD', this.$('vault-password').value],
+      ['LOCAL_SSN', this.$('vault-ssn').value],
+      ['LOCAL_SIN', this.$('vault-sin').value],
+      ['LOCAL_NIN', this.$('vault-nin').value],
+      ['LOCAL_NHS', this.$('vault-nhs').value],
+      ['LOCAL_IBAN', this.$('vault-iban').value],
+      ...Array.from(this.$('vault-custom-fields').querySelectorAll('input[data-original-vault-key]'))
+        .flatMap((input) => {
+          const label = input.parentElement.querySelector('input[data-vault-name]')?.value || '';
+          const slug = label.toUpperCase().trim().replace(/[^A-Z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 48);
+          if (!slug) return [];
+          const key = `LOCAL_CUSTOM_${slug}`;
+          const oldKey = input.dataset.originalVaultKey;
+          return oldKey && oldKey !== key ? [[oldKey, ''], [key, input.value]] : [[key, input.value]];
+        })
     ];
     (async () => {
       for (const [key, value] of updates) {

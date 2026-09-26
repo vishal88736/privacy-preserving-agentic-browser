@@ -126,6 +126,7 @@ When you see these tokens in the task or task state, they refer to locally-store
 - LOCAL_AADHAAR → User-configured Aadhaar value, resolved in the browser; outbound privacy checks are best-effort
 - LOCAL_PAN → User's PAN card number
 - LOCAL_FULL_NAME → User's full legal name
+- LOCAL_SSN / LOCAL_SIN / LOCAL_NIN / LOCAL_NHS / LOCAL_IBAN → User-configured regional identifier or banking value; resolve only in the browser
 - LOCAL_DOB → User's date of birth
 - LOCAL_PHONE → User's phone number
 - LOCAL_EMAIL → User's email address

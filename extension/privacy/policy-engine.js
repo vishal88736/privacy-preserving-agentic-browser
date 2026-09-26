@@ -3,12 +3,12 @@
  * Scans all outgoing network payloads before dispatch to ensure
  * no plaintext secrets, PII, or vault credentials bypass sanitization.
  *
- * L8: Now scans for credit card, email, phone, and IFSC patterns
- *     in addition to Aadhaar and PAN.
+ * Uses the shared local PII registry plus exact configured vault values.
  */
 
 import { defaultLocalVault } from './local-vault.js';
-import { defaultPIIDetector, validateLuhn } from './pii-detector.js';
+import { defaultPIIDetector } from './pii-detector.js';
+import { findPIIMatches } from './pii-rules.js';
 import { SymbolicSecretSource } from '../shared/constants.js';
 
 export class OutboundPolicyViolationError extends Error {
@@ -74,81 +74,18 @@ export class PolicyEngine {
       }
     }
 
-    // 2. Scan for unmasked Aadhaar numbers (12-digit pattern starting with 2-9, space or hyphen separated)
-    const rawAadhaarMatch = scannable.match(/\b[2-9]\d{3}[\s-_]?\d{4}[\s-_]?\d{4}\b/);
-    if (rawAadhaarMatch && !rawAadhaarMatch[0].includes('REDACTED')) {
+    // Use the same registry as the local DOM sanitizer for identifiers,
+    // payment data, and date formats.
+    const piiMatch = findPIIMatches(scannable, scannable).find((candidate) => {
+      if (candidate.id !== 'PHONE_IN') return true;
+      const nearby = scannable.slice(Math.max(0, candidate.index - 24), candidate.index);
+      return /phone|mobile|telephone|tel|contact|LOCAL_PHONE/i.test(nearby) || candidate.value.startsWith('+91');
+    });
+    if (piiMatch) {
       throw new OutboundPolicyViolationError(
-        'Outbound policy blocked payload: Unmasked 12-digit Aadhaar pattern found in request body',
-        { category: 'AADHAAR' }
+        `Outbound policy blocked payload: Unredacted ${piiMatch.category} pattern found in request body`,
+        { category: piiMatch.category }
       );
-    }
-
-    // 3. Scan for unmasked PAN numbers (L13: case-insensitive)
-    const rawPANMatch = scannable.match(/\b[A-Z]{5}[0-9]{4}[A-Z]{1}\b/i);
-    if (rawPANMatch) {
-      throw new OutboundPolicyViolationError(
-        'Outbound policy blocked payload: Unmasked PAN pattern found in request body',
-        { category: 'PAN' }
-      );
-    }
-
-    // L8: 4. Scan for credit card numbers (13-19 digits passing Luhn check)
-    const ccRegex = /(?:\d[ -]*?){13,19}/g;
-    let match;
-    while ((match = ccRegex.exec(scannable)) !== null) {
-      const cleanNumber = match[0].replace(/[\s-]/g, '');
-      if (cleanNumber.length >= 13 && cleanNumber.length <= 19) {
-        // Skip if this looks like a timestamp in JSON
-        const precedingText = scannable.substring(Math.max(0, match.index - 20), match.index);
-        if (/timestamp["']?\s*:\s*$/i.test(precedingText)) continue;
-
-        if (validateLuhn(cleanNumber)) {
-          throw new OutboundPolicyViolationError(
-            'Outbound policy blocked payload: Unmasked credit/debit card number (Luhn-valid) found in request body.',
-            { match: cleanNumber.slice(0, 4) + '****' }
-          );
-        }
-      }
-    }
-
-    // L8: 5. Scan for unmasked email addresses
-    const emailMatch = scannable.match(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/);
-    if (emailMatch) {
-      const emailStr = emailMatch[0];
-      throw new OutboundPolicyViolationError(
-        'Outbound policy blocked payload: Unmasked email address found in request body',
-        { match: emailStr.replace(/(.{3}).*(@.*)/, '$1***$2') }
-      );
-    }
-
-    // L8: 6. Scan for unmasked Indian phone numbers (standalone 10 digits
-    // starting 6-9, optionally with +91). (?<!\d)/(?!\d) prevent matching
-    // substrings of timestamps, bbox coords, or longer IDs.
-    const phoneMatch = scannable.match(/(?<!\d)(?:(?:\+|0{0,2})91[\s-]?)?[6-9]\d{9}(?!\d)/);
-    if (phoneMatch) {
-      const phoneStr = phoneMatch[0].replace(/[\s-]/g, '');
-      // Avoid false positives on short numeric sequences that are element IDs or timestamps
-      if (phoneStr.length >= 10 && !/el_\d|vis_\d|task_\d|obs_\d/.test(scannable.substring(Math.max(0, scannable.indexOf(phoneMatch[0]) - 20), scannable.indexOf(phoneMatch[0]) + phoneMatch[0].length + 5))) {
-        throw new OutboundPolicyViolationError(
-          'Outbound policy blocked payload: Unmasked Indian phone number pattern found in request body',
-          { match: phoneStr.slice(0, 4) + '******' }
-        );
-      }
-    }
-
-    // L8: 7. Scan for IFSC codes
-    const ifscMatch = scannable.match(/\b[A-Z]{4}0[A-Z0-9]{6}\b/i);
-    if (ifscMatch) {
-      throw new OutboundPolicyViolationError(
-        'Outbound policy blocked payload: Unmasked IFSC code found in request body',
-        { category: 'IFSC' }
-      );
-    }
-
-    // Common textual tokens detectable without semantic page context.
-    const dobMatch = scannable.match(/\b(?:0[1-9]|[12]\d|3[01])[-/.](?:0[1-9]|1[0-2])[-/.](?:19|20)\d{2}\b/);
-    if (dobMatch) {
-      throw new OutboundPolicyViolationError('Outbound policy blocked payload: Date-like personal data found.', { category: 'DOB' });
     }
     const apiKeyMatch = scannable.match(/\b(?:sk|pk|api)[-_][A-Za-z0-9_-]{16,}\b/i);
     if (apiKeyMatch) {

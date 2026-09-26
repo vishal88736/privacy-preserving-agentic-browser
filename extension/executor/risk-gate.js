@@ -23,7 +23,7 @@ export class RiskGate {
 
     // 1. Critical Security Rejections
     // Prevent exfiltration: Never allow a LOCAL_* secret to be entered into search or query fields
-    if (value_source && Object.values(SymbolicSecretSource).includes(value_source)) {
+    if (value_source && (Object.values(SymbolicSecretSource).includes(value_source) || /^LOCAL_CUSTOM_[A-Z0-9_]{1,48}$/.test(value_source))) {
       const targetText = `${targetLabel} ${(target?.placeholder || '').toLowerCase()} ${(target?.name || '').toLowerCase()} ${String(context.targetDom?.placeholder || '').toLowerCase()} ${String(context.targetDom?.name || '').toLowerCase()} ${String(context.targetDom?.type || '').toLowerCase()}`;
       if (/search|query|find|google|bing|duckduckgo/i.test(targetText)) {
         return {
@@ -68,7 +68,7 @@ export class RiskGate {
     // 4. Medium-Risk: Typing sensitive identity values into input fields.
     // All identity-bound tokens get MEDIUM so privacy UI can highlight them;
     // none require confirmation (values stay local by construction).
-    if (value_source && [
+    if (value_source && ([
       SymbolicSecretSource.LOCAL_AADHAAR,
       SymbolicSecretSource.LOCAL_PAN,
       SymbolicSecretSource.LOCAL_PASSWORD,
@@ -77,10 +77,15 @@ export class RiskGate {
       SymbolicSecretSource.LOCAL_ADDRESS,
       SymbolicSecretSource.LOCAL_DOB,
       SymbolicSecretSource.LOCAL_FULL_NAME,
+      SymbolicSecretSource.LOCAL_SSN,
+      SymbolicSecretSource.LOCAL_SIN,
+      SymbolicSecretSource.LOCAL_NIN,
+      SymbolicSecretSource.LOCAL_NHS,
+      SymbolicSecretSource.LOCAL_IBAN,
       SymbolicSecretSource.LOCAL_CREDIT_CARD,
       SymbolicSecretSource.LOCAL_CVV,
       SymbolicSecretSource.LOCAL_PROFILE
-    ].includes(value_source)) {
+    ].includes(value_source) || /^LOCAL_CUSTOM_[A-Z0-9_]{1,48}$/.test(value_source))) {
       return {
         allowed: true,
         risk: RiskLevel.MEDIUM,

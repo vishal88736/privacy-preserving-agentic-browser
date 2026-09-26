@@ -91,7 +91,12 @@ export const SymbolicSecretSource = Object.freeze({
   LOCAL_PROFILE: 'LOCAL_PROFILE',
   LOCAL_COUNTRY: 'LOCAL_COUNTRY',
   LOCAL_GENDER: 'LOCAL_GENDER',
-  LOCAL_TERMS: 'LOCAL_TERMS'
+  LOCAL_TERMS: 'LOCAL_TERMS',
+  LOCAL_SSN: 'LOCAL_SSN',
+  LOCAL_SIN: 'LOCAL_SIN',
+  LOCAL_NIN: 'LOCAL_NIN',
+  LOCAL_NHS: 'LOCAL_NHS',
+  LOCAL_IBAN: 'LOCAL_IBAN'
 });
 
 export const PIICategory = Object.freeze({
@@ -108,7 +113,13 @@ export const PIICategory = Object.freeze({
   DOB: 'DOB',
   FULL_NAME: 'FULL_NAME',
   ADDRESS: 'ADDRESS',
-  DOCUMENT: 'DOCUMENT'
+  DOCUMENT: 'DOCUMENT',
+  SSN: 'SSN',
+  SIN: 'SIN',
+  NIN: 'NIN',
+  NHS: 'NHS',
+  IBAN: 'IBAN',
+  IFSC: 'IFSC'
 });
 
 export const ServerDefaults = Object.freeze({

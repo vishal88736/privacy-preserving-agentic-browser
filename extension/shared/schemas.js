@@ -55,7 +55,8 @@ export function validateAction(action) {
     if (!action.value && !action.value_source) {
       throw new ValidationError('TYPE action requires either value or value_source');
     }
-    if (action.value_source && !Object.values(SymbolicSecretSource).includes(action.value_source)) {
+    if (action.value_source && !Object.values(SymbolicSecretSource).includes(action.value_source) &&
+        !/^LOCAL_CUSTOM_[A-Z0-9_]{1,48}$/.test(action.value_source)) {
       throw new ValidationError(`Invalid value_source: ${action.value_source}`);
     }
   }

@@ -52,9 +52,13 @@ export class FormPlanBuilder {
     const actionable = [];
     const asks = [];
 
-    // The first detected semantic form is the task's form target. Keep this
-    // scoped: a page can contain unrelated navigation/search forms.
-    const plan = plans[0];
+    // Pages commonly have a one-field email capture or search form before the
+    // actual profile/application form. Select the strongest semantic form
+    // rather than relying on DOM order, which can silently omit phone/email
+    // fields from the user's intended form.
+    const plan = plans.reduce((best, candidate) =>
+      this._formScore(candidate) > this._formScore(best) ? candidate : best
+    );
     const untrustedPlan = { ...plan, fields: (plan.fields || []).map((field) => ({ ...field })) };
     let localResolved;
     try {
@@ -119,6 +123,16 @@ export class FormPlanBuilder {
     }
 
     return { status: 'COMPLETE', action: null, fields: [], askFields: [] };
+  }
+
+  _formScore(plan) {
+    const fields = [...(plan?.fields || []), ...(plan?.ambiguous || [])];
+    const usefulTypes = new Set(fields
+      .map((field) => field.semantic_type)
+      .filter((type) => type && !['other', 'comments', 'newsletter', 'terms'].includes(type)));
+    const contactAndIdentity = new Set(['full_name', 'first_name', 'last_name', 'email', 'phone']);
+    const priorityCount = fields.filter((field) => contactAndIdentity.has(field.semantic_type)).length;
+    return fields.length * 10 + usefulTypes.size * 3 + priorityCount * 2;
   }
 
   _askField(field, resolved = null) {

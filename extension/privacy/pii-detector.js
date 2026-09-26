@@ -1,10 +1,9 @@
 /**
- * Local Deterministic & Contextual PII Detector
- * Runs strictly client-side to detect Indian Government IDs, Passwords,
- * Financial details, and personal data.
+ * Local deterministic/contextual detector using the shared PII rule registry.
  */
 
 import { PIICategory, SymbolicSecretSource } from '../shared/constants.js';
+import { findPIIMatches, validateLuhnDigits } from './pii-rules.js';
 
 // Verhoeff Algorithm for Aadhaar Validation
 const VERHOEFF_D = [
@@ -49,29 +48,11 @@ export function validateAadhaarVerhoeff(numStr) {
 export function validateLuhn(cardStr) {
   const clean = String(cardStr).replace(/[\s-]/g, '');
   if (!/^\d{13,19}$/.test(clean)) return false;
-
-  let sum = 0;
-  let shouldDouble = false;
-  for (let i = clean.length - 1; i >= 0; i--) {
-    let digit = parseInt(clean.charAt(i), 10);
-    if (shouldDouble) {
-      digit *= 2;
-      if (digit > 9) digit -= 9;
-    }
-    sum += digit;
-    shouldDouble = !shouldDouble;
-  }
-  return sum % 10 === 0;
+  return validateLuhnDigits(clean);
 }
 
 export class PIIDetector {
   constructor() {
-    this.panRegex = /\b[A-Z]{5}[0-9]{4}[A-Z]{1}\b/i;
-    this.aadhaarRegex = /\b[2-9]\d{3}[\s-]?\d{4}[\s-]?\d{4}(?!\s?\d)\b/;
-    this.phoneRegex = /(?:(?:\+|0{0,2})91[\s-]?)?[6-9]\d{9}\b/;
-    this.emailRegex = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/;
-    this.dobRegex = /\b(?:0[1-9]|[12][0-9]|3[01])[-/.](?:0[1-9]|1[012])[-/.](?:19|20)\d\d\b/;
-    this.ifscRegex = /^[A-Z]{4}0[A-Z0-9]{6}$/;
     this.otpRegex = /\b\d{4,8}\b/;
   }
 
@@ -83,73 +64,16 @@ export class PIIDetector {
     const trimmed = text.trim();
     if (!trimmed) return null;
 
-    // Check PAN
-    if (this.panRegex.test(trimmed)) {
+    const match = findPIIMatches(trimmed, contextHint)[0];
+    if (match) {
+      const confidence = match.id === 'AADHAAR'
+        ? (validateAadhaarVerhoeff(match.value) ? 0.99 : 0.85)
+        : match.confidence;
       return {
-        category: PIICategory.PAN,
-        source: SymbolicSecretSource.LOCAL_PAN,
-        confidence: 0.98,
-        match: trimmed.match(this.panRegex)[0]
-      };
-    }
-
-    // Check Credit Card (13-19 digits with Luhn) before 12-digit Aadhaar
-    const cardMatch = trimmed.match(/\b(?:\d[\s-]?){13,19}\b/);
-    if (cardMatch) {
-      const cleanDigits = cardMatch[0].replace(/[\s-]/g, '');
-      if (validateLuhn(cleanDigits)) {
-        return {
-          category: PIICategory.CREDIT_CARD,
-          source: SymbolicSecretSource.LOCAL_CREDIT_CARD,
-          confidence: 0.95,
-          match: cleanDigits
-        };
-      }
-    }
-
-    // Check Aadhaar (strictly 12 digits)
-    const aadhaarMatch = trimmed.match(this.aadhaarRegex);
-    if (aadhaarMatch) {
-      const isChecksumValid = validateAadhaarVerhoeff(aadhaarMatch[0]);
-      return {
-        category: PIICategory.AADHAAR,
-        source: SymbolicSecretSource.LOCAL_AADHAAR,
-        confidence: isChecksumValid ? 0.99 : 0.85,
-        match: aadhaarMatch[0]
-      };
-    }
-
-    // Check Email
-    const emailMatch = trimmed.match(this.emailRegex);
-    if (emailMatch) {
-      return {
-        category: PIICategory.EMAIL,
-        source: SymbolicSecretSource.LOCAL_EMAIL,
-        confidence: 0.96,
-        match: emailMatch[0]
-      };
-    }
-
-    // Check Phone (specifically if context indicates mobile/phone or 10-digit Indian pattern)
-    const phoneMatch = trimmed.match(this.phoneRegex);
-    const safeHint = (contextHint || '').toLowerCase();
-    if (phoneMatch && (safeHint.includes('phone') || safeHint.includes('mobile') || safeHint.includes('tel') || trimmed.startsWith('+91'))) {
-      return {
-        category: PIICategory.PHONE,
-        source: SymbolicSecretSource.LOCAL_PHONE,
-        confidence: 0.92,
-        match: phoneMatch[0]
-      };
-    }
-
-    // Check DOB
-    const dobMatch = trimmed.match(this.dobRegex);
-    if (dobMatch) {
-      return {
-        category: PIICategory.DOB,
-        source: SymbolicSecretSource.LOCAL_DOB,
-        confidence: 0.90,
-        match: dobMatch[0]
+        category: match.category,
+        source: match.source,
+        confidence,
+        match: match.value
       };
     }
 

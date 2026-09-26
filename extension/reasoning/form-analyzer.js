@@ -5,6 +5,7 @@
  */
 
 import { SymbolicSecretSource } from '../shared/constants.js';
+import { defaultLocalVault } from '../privacy/local-vault.js';
 
 const SEMANTIC_PATTERNS = [
   { type: 'first_name', regex: /\b(first.?name|fname|given.?name)\b/i, weight: 1.0 },
@@ -24,11 +25,24 @@ const SEMANTIC_PATTERNS = [
   { type: 'comments', regex: /\b(comments?|remarks|notes|additional.?info|message)\b/i, weight: 0.9 },
   { type: 'other', regex: /\b(other|custom\s+preference)\b/i, weight: 0.8 },
   { type: 'pan', regex: /\b(pan|pan.?number|pan.?card|permanent.?account.?number)\b/i, weight: 1.0 },
+  { type: 'ssn', regex: /\b(ssn|social.?security(?:.?number)?)\b/i, weight: 1.0 },
+  { type: 'sin', regex: /\b(sin|social.?insurance(?:.?number)?)\b/i, weight: 1.0 },
+  { type: 'nin', regex: /\b(nin|national.?insurance(?:.?number)?)\b/i, weight: 1.0 },
+  { type: 'nhs', regex: /\bnhs(?:.?number)?\b/i, weight: 1.0 },
+  { type: 'iban', regex: /\biban\b/i, weight: 1.0 },
   { type: 'aadhaar', regex: /\b(aadhaar|aadhar|uidai)\b/i, weight: 1.0 },
+  { type: 'passport', regex: /\bpassport(?:.?number|.?no\.?)?\b/i, weight: 1.0 },
+  { type: 'driver_license', regex: /\b(?:driver.?s?.?licen[cs]e|driving.?licen[cs]e)\b/i, weight: 1.0 },
+  { type: 'national_id', regex: /\b(?:national.?id|identity.?number|id.?number)\b/i, weight: 0.95 },
+  { type: 'tax_id', regex: /\b(?:tax.?id|tax.?identification.?number)\b/i, weight: 0.95 },
   { type: 'terms', regex: /\b(terms|conditions|agree|accept)\b/i, weight: 1.0 }
 ];
 
 export class FormAnalyzer {
+  constructor(vault = defaultLocalVault) {
+    this.vault = vault;
+  }
+
   /**
    * Normalize flat extractor elements AND fused {id, dom, interaction}
    * elements into a common flat shape so bulk planning works on real
@@ -60,6 +74,7 @@ export class FormAnalyzer {
       form_id: el.form_id || dom.form_id || el.formId || dom.formId || null,
       options: el.options || dom.options,
       semantic_type: el.semantic_type || dom.semantic_type || '',
+      autocomplete: el.autocomplete || dom.autocomplete || '',
       value: el.value !== undefined ? el.value : dom.value,
       checked: el.checked !== undefined ? el.checked : dom.checked,
       _raw: el
@@ -168,7 +183,33 @@ export class FormAnalyzer {
 
   classifyField(field) {
     const f = this._norm(field);
-    const evidence = [
+    const normalizeEvidence = (parts) => parts.filter(Boolean).join(' ')
+      .replace(/([a-z])([A-Z])/g, '$1 $2')
+      .replace(/[._-]+/g, ' ')
+      .replace(/\s+/g, ' ');
+    const autocomplete = String(f.autocomplete || '').toLowerCase().trim();
+    if (autocomplete === 'name') return { semantic_type: 'full_name', confidence: 0.99 };
+    if (autocomplete === 'given-name') return { semantic_type: 'first_name', confidence: 0.99 };
+    if (autocomplete === 'family-name') return { semantic_type: 'last_name', confidence: 0.99 };
+    if (autocomplete === 'email' || String(f.type).toLowerCase() === 'email') {
+      return { semantic_type: 'email', confidence: 0.99 };
+    }
+    if (['tel', 'tel-national', 'tel-country-code'].includes(autocomplete) || String(f.type).toLowerCase() === 'tel') {
+      return { semantic_type: 'phone', confidence: 0.99 };
+    }
+
+    // Prefer the field's own identifying attributes to nearby context. A
+    // generic "Name" control should not become first_name just because the
+    // surrounding form also has a separate first-name field.
+    const directEvidence = normalizeEvidence([f.label, f.name, f.id, f.placeholder, f.ariaLabel, f.semantic_type]);
+    const specificName = directEvidence.match(/\b(first.?name|fname|given.?name)\b/i);
+    if (specificName) return { semantic_type: 'first_name', confidence: 0.99 };
+    const familyName = directEvidence.match(/\b(last.?name|lname|surname|family.?name)\b/i);
+    if (familyName) return { semantic_type: 'last_name', confidence: 0.99 };
+    if (/\b(full.?name|your.?name|applicant.?name|candidate.?name|name)\b/i.test(directEvidence)) {
+      return { semantic_type: 'full_name', confidence: 0.95 };
+    }
+    const evidence = normalizeEvidence([
       f.label,
       f.name,
       f.id,
@@ -178,7 +219,7 @@ export class FormAnalyzer {
       f.fieldset_legend,
       f.context,
       f.semantic_type
-    ].filter(Boolean).join(' ');
+    ]);
 
     let bestMatch = null;
     let highestScore = 0;
@@ -227,6 +268,11 @@ export class FormAnalyzer {
       'state': SymbolicSecretSource.LOCAL_ADDRESS,
       'zip_code': SymbolicSecretSource.LOCAL_ADDRESS,
       'pan': SymbolicSecretSource.LOCAL_PAN,
+      'ssn': SymbolicSecretSource.LOCAL_SSN,
+      'sin': SymbolicSecretSource.LOCAL_SIN,
+      'nin': SymbolicSecretSource.LOCAL_NIN,
+      'nhs': SymbolicSecretSource.LOCAL_NHS,
+      'iban': SymbolicSecretSource.LOCAL_IBAN,
       'aadhaar': SymbolicSecretSource.LOCAL_AADHAAR,
       'country': SymbolicSecretSource.LOCAL_COUNTRY,
       'gender': SymbolicSecretSource.LOCAL_GENDER,
@@ -242,6 +288,9 @@ export class FormAnalyzer {
     // LOCAL_PROFILE.
     const key = semanticType?.toLowerCase();
     if (key && Object.hasOwn(map, key)) return map[key];
+    const customKey = `LOCAL_CUSTOM_${String(key || '').toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 48)}`;
+    if (key && this.vault.resolveSecret(customKey)) return customKey;
+    if (['passport', 'driver_license', 'national_id', 'tax_id'].includes(key)) return null;
     return SymbolicSecretSource.LOCAL_PROFILE;
   }
 

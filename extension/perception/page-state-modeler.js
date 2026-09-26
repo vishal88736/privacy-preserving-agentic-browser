@@ -120,7 +120,7 @@ export class PageStateModeler {
     }
 
     // Video / Media
-    if (urlLower.includes('video') || urlLower.includes('watch') || urlLower.includes('youtube') || titleLower.includes('watch')) {
+    if (urlLower.includes('video') || urlLower.includes('watch') || titleLower.includes('watch')) {
       return 'VIDEO_PAGE';
     }
 

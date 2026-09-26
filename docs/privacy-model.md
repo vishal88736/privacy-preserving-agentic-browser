@@ -2,7 +2,7 @@
 
 ## What this prototype does
 
-The extension extracts a bounded set of interactive controls, headings, result cards, and visible text. Before model requests, it redacts fields classified by input type, labels, attributes, known identifier patterns, and configured vault values. A packaged object detector and OCR engine also analyze each current screenshot inside the extension. The outbound policy checks a finite set of common identifier and token patterns. These controls reduce accidental disclosure; they do not prove that arbitrary private data is absent.
+The extension extracts a bounded set of interactive controls, headings, result cards, and visible text. Before model requests, it redacts fields classified by input type, labels, attributes, registered identifier patterns, and configured vault values. A packaged object detector and OCR engine also analyze each current screenshot inside the extension. The DOM sanitizer, local OCR, and outbound policy share the rule registry in `extension/privacy/pii-rules.js`. Coverage remains finite and heuristic; it does not prove that arbitrary private data is absent.
 
 The expected request path is:
 
@@ -27,7 +27,7 @@ The backend-driven `/agent` browser automation path is retired. The backend acce
 | Data | Coverage | Limit |
 |---|---|---|
 | Password fields, labeled Aadhaar/PAN/card/phone/email/DOB/name/address fields | Partially supported | A deceptive or unlabeled field can evade semantic detection. |
-| Aadhaar, PAN, common card, email, Indian phone, date-like DOB, IFSC, common account and credential patterns | Pattern detected in DOM/OCR text | Formats vary; OCR and regex false negatives/positives are possible. |
+| Aadhaar, PAN, US SSN, Canadian SIN, UK NIN/NHS, IBAN, cards, email, phone, DOB, IFSC, common account and credential patterns | Registered patterns are checked in DOM text, OCR, and outbound payloads | Coverage is finite; national formats, OCR, validators, and false positives/negatives vary. Passport and other country-specific IDs need an explicit rule or semantic field label. |
 | Configured vault strings | Exact/normalized matching for strings of useful length | Values not configured in the vault and transformed/encoded variants may not match. |
 | Names, addresses, account numbers, financial details | Partially detected from field labels and common account wording | Arbitrary names/addresses/account formats cannot be recognized reliably. |
 | Arbitrary sensitive text | Not reliably detectable | Requires user review or a broader local classifier. |
@@ -39,7 +39,7 @@ The background sends each captured screenshot to the open extension side panel f
 
 ## Vault and documents
 
-Vault values are user-configured and stored in `chrome.storage.local`. This module does not encrypt them at rest, derive a key from a PIN, or guarantee memory erasure. The vault starts empty and rejects unsupported keys and non-text values.
+Vault values are user-configured and stored in `chrome.storage.local`. This module does not encrypt them at rest, derive a key from a PIN, or guarantee memory erasure. The vault starts empty, accepts built-in values and `LOCAL_CUSTOM_*` text keys, and rejects other key formats and non-text values. Custom rule registration is code-configured through `registerPIIRule` in `extension/privacy/pii-rules.js`.
 
 Real local-document selection is not implemented. A `LOCAL_DOCUMENT` action fails closed. A user can select a file directly on the website; that file is handled by the website and is outside this extension's document-privacy guarantee. The old backend `/agent` file/screenshot route is removed.
 

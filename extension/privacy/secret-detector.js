@@ -10,6 +10,13 @@ export class SecretDetector {
   constructor() {
     this.sensitiveKeywords = [
       { pattern: /aadhaar|uidai|unique\s*id/i, category: PIICategory.AADHAAR, source: SymbolicSecretSource.LOCAL_AADHAAR },
+      { pattern: /\b(?:ssn|social\s*security(?:\s*number)?)\b/i, category: PIICategory.SSN, source: SymbolicSecretSource.LOCAL_SSN },
+      { pattern: /\b(?:sin|social\s*insurance(?:\s*number)?)\b/i, category: PIICategory.SIN, source: SymbolicSecretSource.LOCAL_SIN },
+      { pattern: /\b(?:nin|national\s*insurance(?:\s*number)?)\b/i, category: PIICategory.NIN, source: SymbolicSecretSource.LOCAL_NIN },
+      { pattern: /\bnhs(?:\s*(?:number|no\.?))?\b/i, category: PIICategory.NHS, source: SymbolicSecretSource.LOCAL_NHS },
+      { pattern: /\biban\b/i, category: PIICategory.IBAN, source: SymbolicSecretSource.LOCAL_IBAN },
+      { pattern: /\bpassport(?:\s*(?:number|no\.?))?\b/i, category: PIICategory.PASSPORT, source: SymbolicSecretSource.LOCAL_PROFILE },
+      { pattern: /\b(?:driver.?s?.?licen[cs]e|driving.?licen[cs]e|national.?id(?:entity)?(?:.?number)?|tax.?id(?:.?number)?)\b/i, category: PIICategory.DOCUMENT, source: SymbolicSecretSource.LOCAL_PROFILE },
       { pattern: /\bpan\b|pan\s*card|permanent\s*account/i, category: PIICategory.PAN, source: SymbolicSecretSource.LOCAL_PAN },
       { pattern: /password|passcode|secret|pin\b/i, category: PIICategory.PASSWORD, source: SymbolicSecretSource.LOCAL_PASSWORD },
       { pattern: /otp|one\s*time\s*pass|verification\s*code/i, category: PIICategory.OTP, source: SymbolicSecretSource.LOCAL_PASSWORD },
@@ -19,7 +26,9 @@ export class SecretDetector {
       { pattern: /phone|mobile|cell|contact\s*num/i, category: PIICategory.PHONE, source: SymbolicSecretSource.LOCAL_PHONE },
       { pattern: /email|e-mail/i, category: PIICategory.EMAIL, source: SymbolicSecretSource.LOCAL_EMAIL },
       { pattern: /\bdob\b|date\s*of\s*birth|birth\s*date/i, category: PIICategory.DOB, source: SymbolicSecretSource.LOCAL_DOB },
-      { pattern: /full\s*name|applicant\s*name|first\s*name|last\s*name/i, category: PIICategory.FULL_NAME, source: SymbolicSecretSource.LOCAL_FULL_NAME },
+      // Include standalone "name" labels used by short forms. Word boundaries
+      // avoid matching unrelated values such as username or filename.
+      { pattern: /\b(full\s*name|applicant\s*name|first\s*name|last\s*name|your\s*name|name)\b/i, category: PIICategory.FULL_NAME, source: SymbolicSecretSource.LOCAL_FULL_NAME },
       { pattern: /address|residential\s*address|pincode|postal\s*code/i, category: PIICategory.ADDRESS, source: SymbolicSecretSource.LOCAL_ADDRESS },
       { pattern: /upload\s*(aadhaar|pan|id|document|passport|pdf)/i, category: PIICategory.DOCUMENT, source: SymbolicSecretSource.LOCAL_DOCUMENT }
     ];
@@ -46,6 +55,19 @@ export class SecretDetector {
         source: SymbolicSecretSource.LOCAL_PASSWORD,
         reason: 'input[type=password]'
       };
+    }
+
+    if (type === 'email' || autoLower.includes('email')) {
+      return { isSensitive: true, category: PIICategory.EMAIL, source: SymbolicSecretSource.LOCAL_EMAIL, reason: 'email_control' };
+    }
+    if (type === 'tel' || autoLower.includes('tel')) {
+      return { isSensitive: true, category: PIICategory.PHONE, source: SymbolicSecretSource.LOCAL_PHONE, reason: 'telephone_control' };
+    }
+    if (/^(?:name|given-name|family-name)$/.test(autoLower.trim())) {
+      return { isSensitive: true, category: PIICategory.FULL_NAME, source: SymbolicSecretSource.LOCAL_FULL_NAME, reason: 'autocomplete=name' };
+    }
+    if (autoLower.includes('bday')) {
+      return { isSensitive: true, category: PIICategory.DOB, source: SymbolicSecretSource.LOCAL_DOB, reason: 'autocomplete=bday' };
     }
 
     // 2. Autocomplete attribute hints

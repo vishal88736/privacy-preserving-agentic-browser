@@ -43,4 +43,4 @@ Symbolic values are resolved in the extension immediately before DOM input. Vaul
 
 ## Limits
 
-Pattern detection covers common Aadhaar, PAN, card, email, phone, DOB, IFSC, account, and credential forms, plus semantic field labels and configured vault strings. OCR is English-only. Name/address/account recognition is heuristic. YOLOS masks people with their full detected box; it is not a face detector. Arbitrary sensitive prose and text in images may be missed. See [privacy-model.md](privacy-model.md) for claim status and coverage.
+The shared local rule registry covers Aadhaar, PAN, US SSN, Canadian SIN, UK NIN/NHS, IBAN, cards, email, supported phone formats, DOB, and IFSC patterns, plus semantic field labels and configured vault strings. The registry is extensible, but coverage remains finite; OCR is English-only. Name/address/account recognition is heuristic. YOLOS masks people with their full detected box; it is not a face detector. Arbitrary sensitive prose and text in images may be missed. See [privacy-model.md](privacy-model.md) for claim status and coverage.

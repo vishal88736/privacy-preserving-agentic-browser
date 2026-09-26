@@ -43,9 +43,8 @@ export class GPTOSSClient {
 
   async interpretTask(taskPrompt) {
     const payload = { task: taskPrompt };
-    this.policyEngine.enforceOutboundSafety(payload);
-
     try {
+      this.policyEngine.enforceOutboundSafety(payload);
       const response = await this.post('/interpret', payload);
       if (!response.ok) throw new Error(`Interpret returned ${response.status}`);
       const data = await response.json();
@@ -78,8 +77,10 @@ export class GPTOSSClient {
     }
     const isFormTask = String(interpreted?.intent || '').toUpperCase() === 'FILL_FORM' ||
       /\b(fill|form|application|register|sign\s*up|profile)\b/i.test(String(task || ''));
-    const profileDrivenForm = /\b(saved profile|my profile|local vault|saved details|profile details)\b/i.test(String(task || ''));
-    if (isFormTask && profileDrivenForm) {
+    // Route ordinary form-fill requests through the local semantic planner as
+    // well. Relying on the remote model here caused it to omit recognized
+    // contact fields (especially email and phone) after filling only one field.
+    if (isFormTask) {
       const formDecision = this.formPlanBuilder.decide(
         fusedObservation?.elements || [], task, taskHistory
       );
@@ -133,9 +134,12 @@ export class GPTOSSClient {
     };
 
     validateReasonPayload(payload);
-    this.policyEngine.enforceOutboundSafety(payload);
 
     try {
+      // A rejected payload is never sent. Treat the rejection like an
+      // unavailable remote reasoner and continue with the grounded local
+      // planner, which can fill configured form fields without network data.
+      this.policyEngine.enforceOutboundSafety(payload);
       const response = await fetch(`${this.baseUrl}${ServerDefaults.REASON_ENDPOINT}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -239,11 +243,16 @@ export class GPTOSSClient {
     const isClickable = (e) => Boolean(interOf(e).clickable) || tagOf(e) === 'button' || tagOf(e) === 'a';
 
     const secretForField = (e) => {
-      if (domOf(e).value_source && Object.values(SymbolicSecretSource).includes(domOf(e).value_source)) {
+      if (domOf(e).value_source && (Object.values(SymbolicSecretSource).includes(domOf(e).value_source) || /^LOCAL_CUSTOM_[A-Z0-9_]{1,48}$/.test(domOf(e).value_source))) {
         return domOf(e).value_source;
       }
       const l = `${labelOf(e)} ${domOf(e).name || ''} ${domOf(e).semantic_type || ''}`.toLowerCase();
       if (/aadhaar|aadhar/.test(l)) return SymbolicSecretSource.LOCAL_AADHAAR;
+      if (/\bssn\b|social security/.test(l)) return SymbolicSecretSource.LOCAL_SSN;
+      if (/\bsin\b|social insurance/.test(l)) return SymbolicSecretSource.LOCAL_SIN;
+      if (/\bnin\b|national insurance/.test(l)) return SymbolicSecretSource.LOCAL_NIN;
+      if (/\bnhs\b/.test(l)) return SymbolicSecretSource.LOCAL_NHS;
+      if (/\biban\b/.test(l)) return SymbolicSecretSource.LOCAL_IBAN;
       if (/\bpan\b/.test(l)) return SymbolicSecretSource.LOCAL_PAN;
       if (/password|passcode|pin\b/.test(l)) return SymbolicSecretSource.LOCAL_PASSWORD;
       if (/email/.test(l)) return SymbolicSecretSource.LOCAL_EMAIL;
@@ -293,7 +302,7 @@ export class GPTOSSClient {
         const askFirst = interpreted.constraints.includes('must ask user before submitting');
         const plan = plans[0];
         const isSensitive = plan.fields?.some(f => 
-          [SymbolicSecretSource.LOCAL_AADHAAR, SymbolicSecretSource.LOCAL_PAN, SymbolicSecretSource.LOCAL_PASSWORD, SymbolicSecretSource.LOCAL_CREDIT_CARD, SymbolicSecretSource.LOCAL_CVV, SymbolicSecretSource.LOCAL_DOCUMENT].includes(f.value_source) ||
+          [SymbolicSecretSource.LOCAL_AADHAAR, SymbolicSecretSource.LOCAL_PAN, SymbolicSecretSource.LOCAL_PASSWORD, SymbolicSecretSource.LOCAL_CREDIT_CARD, SymbolicSecretSource.LOCAL_CVV, SymbolicSecretSource.LOCAL_DOCUMENT, SymbolicSecretSource.LOCAL_SSN, SymbolicSecretSource.LOCAL_SIN, SymbolicSecretSource.LOCAL_NIN, SymbolicSecretSource.LOCAL_NHS, SymbolicSecretSource.LOCAL_IBAN].includes(f.value_source) ||
           f.semantic_type === 'aadhaar' || f.semantic_type === 'pan' || f.semantic_type === 'password'
         ) || askFirst;
         

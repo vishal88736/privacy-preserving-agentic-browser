@@ -58,8 +58,20 @@ export function setupMessageRouter(chromeApi = chrome, deps = {}) {
         if (!payload?.prompt || !payload?.tabId) {
           sendResponse({ success: false, error: 'Task needs a prompt and an active tab.' });
         } else {
-          controller.startTask(payload.prompt, payload.tabId);
-          sendResponse({ success: true, task: manager.getTask() });
+          controller.startTask(payload.prompt, payload.tabId).then(() => {
+            sendResponse({ success: true, task: manager.getTask() });
+          }).catch((err) => {
+            console.error('[MessageRouter] Task startup failed:', err);
+            manager.failTask(err?.message || 'Task startup failed.');
+            const task = manager.getTask();
+            controller.notify('TASK_FAILED', { error: task?.error, hint: task?.hint });
+            sendResponse({
+              success: false,
+              error: task?.error || 'PrivAgent could not start this task.',
+              hint: task?.hint || 'Reload the extension and try again.'
+            });
+          });
+          return true;
         }
         break;
 

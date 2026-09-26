@@ -31,10 +31,11 @@ export class VLMClient {
     // 1. Validate payload schema
     validateVisionPayload(payload);
 
-    // 2. Strict policy engine scan (guarantee no raw secrets leave browser)
-    this.policyEngine.enforceOutboundSafety(payload);
-
     try {
+      // 2. Strict policy engine scan (guarantee no raw secrets leave browser).
+      // Vision is optional: on a local policy rejection, continue with the
+      // sanitized DOM-only observation instead of aborting the browser task.
+      this.policyEngine.enforceOutboundSafety(payload);
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(), 20000);
       const response = await fetch(`${this.baseUrl}${ServerDefaults.VISION_ENDPOINT}`, {

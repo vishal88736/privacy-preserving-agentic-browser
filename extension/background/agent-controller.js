@@ -538,6 +538,16 @@ export class AgentController {
     console.log("[PAGE_OBSERVED]", JSON.stringify(pageState));
 
     // STEP 5: REASONING & PLANNING
+    // Storage initialization must not block task creation or the initial UI
+    // updates or unrelated tasks. Wait only for form tasks, immediately before
+    // local profile resolution.
+    const needsLocalProfile = String(taskIntent || '').toUpperCase() === 'FILL_FORM' ||
+      /\b(fill|form|application|register|sign\s*up|profile)\b/i.test(String(task.prompt || ''));
+    if (needsLocalProfile) {
+      taskManager.updateState(AgentState.PLANNING, 'Loading local profile values…');
+      this.notify('STATE_CHANGED', { state: AgentState.PLANNING });
+      await defaultLocalVault.ready;
+    }
     taskManager.updateState(AgentState.PLANNING, `Planning next action for "${task.taskState.getActiveSubgoal()}"…`);
     this.notify('STATE_CHANGED', { state: AgentState.PLANNING, active_subgoal: task.taskState.getActiveSubgoal() });
 

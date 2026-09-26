@@ -12,7 +12,7 @@ import { SymbolicSecretSource } from '../shared/constants.js';
 export class LocalVault {
   constructor() {
     this.memoryStore = {};
-    this._loadFromStorage();
+    this.ready = this._loadFromStorage();
   }
 
   async _loadFromStorage() {
@@ -22,7 +22,7 @@ export class LocalVault {
         if (stored && stored.agent_local_vault) {
           const safe = {};
           for (const [key, value] of Object.entries(stored.agent_local_vault)) {
-            if (VAULT_KEYS.has(key) && typeof value === 'string') safe[key] = value;
+            if (isVaultKey(key) && typeof value === 'string') safe[key] = value;
           }
           // Remove legacy built-in demonstration credentials on upgrade.
           for (const [key, value] of Object.entries(LEGACY_DEMO_VALUES)) {
@@ -66,7 +66,8 @@ export class LocalVault {
    * Updates an entry in the vault
    */
   async updateSecret(symbolicSource, value) {
-    if (!VAULT_KEYS.has(symbolicSource)) throw new Error('Unsupported vault key.');
+    await this.ready;
+    if (!isVaultKey(symbolicSource)) throw new Error('Unsupported vault key.');
     if (typeof value !== 'string') throw new Error('Vault values must be text.');
     if (value.length > 4096) throw new Error('Vault value is too large.');
     this.memoryStore[symbolicSource] = value;
@@ -115,8 +116,15 @@ const VAULT_KEYS = new Set([
   SymbolicSecretSource.LOCAL_PASSWORD, SymbolicSecretSource.LOCAL_CREDIT_CARD,
   SymbolicSecretSource.LOCAL_CVV, SymbolicSecretSource.LOCAL_PROFILE,
   SymbolicSecretSource.LOCAL_COUNTRY, SymbolicSecretSource.LOCAL_GENDER,
-  SymbolicSecretSource.LOCAL_TERMS
+  SymbolicSecretSource.LOCAL_TERMS,
+  SymbolicSecretSource.LOCAL_SSN, SymbolicSecretSource.LOCAL_SIN,
+  SymbolicSecretSource.LOCAL_NIN, SymbolicSecretSource.LOCAL_NHS,
+  SymbolicSecretSource.LOCAL_IBAN
 ]);
+
+function isVaultKey(key) {
+  return VAULT_KEYS.has(key) || /^LOCAL_CUSTOM_[A-Z0-9_]{1,48}$/.test(String(key || ''));
+}
 
 const LEGACY_DEMO_VALUES = {
   LOCAL_AADHAAR: '4821 7392 0184', LOCAL_PAN: 'ABCDE1234F',
@@ -124,7 +132,8 @@ const LEGACY_DEMO_VALUES = {
   LOCAL_PHONE: '9876543210', LOCAL_EMAIL: 'vishal.agrawal@example.com',
   LOCAL_ADDRESS: 'Flat 402, Green Meadows, Baner, Pune, Maharashtra - 411045',
   LOCAL_PASSWORD: 'SecureDemoPass#2026', LOCAL_PROFILE: 'Vishal Agrawal',
-  LOCAL_COUNTRY: 'us', LOCAL_GENDER: 'male', LOCAL_TERMS: 'yes'
+  LOCAL_COUNTRY: 'us', LOCAL_GENDER: 'male', LOCAL_TERMS: 'yes',
+  LOCAL_SSN: '', LOCAL_SIN: '', LOCAL_NIN: '', LOCAL_NHS: '', LOCAL_IBAN: ''
 };
 
 export const defaultLocalVault = new LocalVault();

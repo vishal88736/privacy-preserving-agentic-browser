@@ -49,9 +49,25 @@ export function friendlyError(rawMessage) {
     };
   }
   if (low.includes('outbound policy') || low.includes('unmasked')) {
+    // Policy messages contain category/token names only. Extract that safe
+    // metadata so a generic warning does not leave the user guessing, and
+    // never include the matched value in the UI.
+    const match = raw.match(/unredacted\s+([A-Z][A-Z0-9_]*)\s+pattern|raw value of\s+(LOCAL_[A-Z0-9_]+)/i);
+    const tokenCategory = match?.[2]?.replace(/^LOCAL_/, '');
+    const category = String(match?.[1] || tokenCategory || '').toUpperCase();
+    const labels = {
+      EMAIL: 'email address', PHONE: 'phone number', FULL_NAME: 'name',
+      SSN: 'Social Security number', SIN: 'Social Insurance number',
+      NIN: 'National Insurance number', NHS: 'NHS number', IBAN: 'IBAN',
+      AADHAAR: 'Aadhaar number', PAN: 'PAN number', DOB: 'date of birth',
+      CREDIT_CARD: 'payment card number', API_KEY: 'API key', TOKEN: 'access token'
+    };
+    const detected = labels[category] || (category ? 'sensitive information' : null);
     return {
-      error: 'A request was blocked because it may have contained sensitive data.',
-      hint: 'Nothing was sent. The agent will continue with redacted data.'
+      error: detected
+        ? `A local privacy check detected a possible ${detected} in page context and blocked the request.`
+        : 'A local privacy check blocked a request that may contain sensitive information.',
+      hint: 'The blocked request was not sent. Check the page context and retry, or continue manually. The value itself was not shown.'
     };
   }
   if (low.includes('local credential') || low.includes('not configured')) {

@@ -585,11 +585,47 @@
         </label>
         <label class="vault-field">
           <div class="vault-label-row">
+            <span>Email address</span>
+            <code class="mono-token">LOCAL_EMAIL</code>
+          </div>
+          <input id="vault-email" type="email" autocomplete="email" placeholder="you@example.com">
+        </label>
+        <label class="vault-field">
+          <div class="vault-label-row"><span>US Social Security number</span><code class="mono-token">LOCAL_SSN</code></div>
+          <input id="vault-ssn" autocomplete="off" placeholder="XXX-XX-XXXX">
+        </label>
+        <label class="vault-field">
+          <div class="vault-label-row"><span>Canadian Social Insurance number</span><code class="mono-token">LOCAL_SIN</code></div>
+          <input id="vault-sin" autocomplete="off" placeholder="XXX XXX XXX">
+        </label>
+        <label class="vault-field">
+          <div class="vault-label-row"><span>UK National Insurance number</span><code class="mono-token">LOCAL_NIN</code></div>
+          <input id="vault-nin" autocomplete="off" placeholder="AB 12 34 56 C">
+        </label>
+        <label class="vault-field">
+          <div class="vault-label-row"><span>NHS number</span><code class="mono-token">LOCAL_NHS</code></div>
+          <input id="vault-nhs" autocomplete="off" placeholder="XXX XXX XXXX">
+        </label>
+        <label class="vault-field">
+          <div class="vault-label-row"><span>IBAN</span><code class="mono-token">LOCAL_IBAN</code></div>
+          <input id="vault-iban" autocomplete="off" placeholder="Country code and account number">
+        </label>
+        <label class="vault-field">
+          <div class="vault-label-row">
             <span>Password</span>
             <code class="mono-token">LOCAL_PASSWORD</code>
           </div>
           <input id="vault-password" type="password" autocomplete="new-password" placeholder="••••••••">
         </label>
+      </div>
+
+      <div class="vault-custom-section">
+        <div class="vault-label-row">
+          <span>Custom local values</span>
+          <button id="vault-add-custom-btn" class="btn btn-secondary" type="button">Add value</button>
+        </div>
+        <p class="muted small">Custom values are stored locally and checked by exact value before requests leave the browser.</p>
+        <div id="vault-custom-fields" class="vault-grid"></div>
       </div>
 
       <div class="modal-actions">

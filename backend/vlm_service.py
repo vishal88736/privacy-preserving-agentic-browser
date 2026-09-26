@@ -11,6 +11,7 @@ from typing import Dict, Any, List, Optional
 import json
 import requests
 from config import settings
+from privacy_rules import find_sensitive_category
 
 
 _PROVIDERS = {
@@ -84,8 +85,6 @@ class VLMProviderRotator:
 
 class VLMService:
     def __init__(self):
-        self.aadhaar_regex = re.compile(r"\b[2-9]\d{3}[\s-]?\d{4}[\s-]?\d{4}\b")
-        self.pan_regex = re.compile(r"\b[A-Z]{5}[0-9]{4}[A-Z]{1}\b", re.IGNORECASE)
         self.provider_rotator = VLMProviderRotator()
 
     def process_visuals(self, task_id: str, sanitized_screenshot: str, sanitized_dom: Dict[str, Any], metadata: Dict[str, Any]) -> Dict[str, Any]:
@@ -94,46 +93,21 @@ class VLMService:
         if not isinstance(sanitized_dom, dict) or not isinstance(sanitized_dom.get("elements", []), list):
             raise ValueError("Security rejection: malformed sanitized DOM")
         dom_str = str(sanitized_dom)
-        forbidden_patterns = [
-            self.aadhaar_regex, self.pan_regex,
-            re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
-            re.compile(r"(?<!\d)(?:(?:\+|0{0,2})91[\s-]?)?[6-9]\d{9}(?!\d)"),
-            re.compile(r"\b(?:0[1-9]|[12]\d|3[01])[-/.](?:0[1-9]|1[0-2])[-/.](?:19|20)\d{2}\b"),
-            re.compile(r"\b(?:sk|pk|api)[-_][A-Za-z0-9_-]{16,}\b", re.I),
-            re.compile(r"\bBearer\s+[A-Za-z0-9._~+/-]{12,}={0,2}", re.I),
-            re.compile(r"\b[A-Z]{4}0[A-Z0-9]{6}\b", re.I),
-        ]
-        if any(pattern.search(dom_str) for pattern in forbidden_patterns):
+        sensitive_category = find_sensitive_category(dom_str)
+        if sensitive_category or re.search(r"\b(?:sk|pk|api)[-_][A-Za-z0-9_-]{16,}\b|\bBearer\s+[A-Za-z0-9._~+/-]{12,}={0,2}", dom_str, re.I):
             raise ValueError("Security rejection: outbound DOM contains an unredacted sensitive pattern")
-        for match in re.finditer(r"(?<!\d)(?:\d[ -]?){13,19}(?!\d)", dom_str):
-            digits = re.sub(r"[ -]", "", match.group(0))
-            if 13 <= len(digits) <= 19 and self._luhn_valid(digits):
-                raise ValueError("Security rejection: outbound DOM contains an unredacted card number")
 
         heuristic = self._from_dom(sanitized_dom, metadata)
         heuristic["grounding_source"] = "dom_heuristic"
         heuristic["provenance"] = "DOM_PLUS_HEURISTIC"
-        vision = self._try_real_vlm(sanitized_screenshot, heuristic, metadata)
+        vision = self._try_real_vlm(sanitized_screenshot, heuristic, metadata, sanitized_dom)
         if vision:
             heuristic.update(vision)
             heuristic["grounding_source"] = "vision_model"
             heuristic["provenance"] = "DOM_PLUS_REAL_VLM"
         return heuristic
 
-    @staticmethod
-    def _luhn_valid(number: str) -> bool:
-        total = 0
-        parity = len(number) % 2
-        for index, char in enumerate(number):
-            digit = int(char)
-            if index % 2 == parity:
-                digit *= 2
-                if digit > 9:
-                    digit -= 9
-            total += digit
-        return total % 10 == 0
-
-    def _try_real_vlm(self, screenshot: str, heuristic: Dict[str, Any], metadata: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _try_real_vlm(self, screenshot: str, heuristic: Dict[str, Any], metadata: Dict[str, Any], sanitized_dom: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if not settings.API_KEY or not screenshot or not str(screenshot).startswith("data:image"):
             return None
         candidates = self.provider_rotator.ordered_candidates()
