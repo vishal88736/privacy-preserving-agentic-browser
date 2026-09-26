@@ -46,6 +46,7 @@ _HUGGINGFACE_KEYS = _read_api_keys(
     "HUGGINGFACE_API_KEYS", "HUGGINGFACE_API_KEY", "HF_API_KEYS", "HF_API_KEY", "HF_TOKEN"
 )
 _GROQ_KEYS = _read_api_keys("GROQ_API_KEYS", "GROQ_API_KEY")
+_CONFIGURED_AI_BASE_URL = os.getenv("AI_BASE_URL")
 
 
 def _default_ai_base_url():
@@ -62,13 +63,27 @@ def _default_ai_base_url():
     return "https://api.openai.com/v1"
 
 
-class Settings:
-    HOST: str = os.getenv("HOST", "127.0.0.1")
-    PORT: int = int(os.getenv("PORT", 8000))
-
-    # Supports one general reasoning key plus provider-specific keys.
-    API_KEY: str = (
-        os.getenv("AI_API_KEY") or
+def _reasoning_api_key(base_url):
+    """Choose the provider-specific key matching the reasoning endpoint."""
+    # An explicitly configured generic key remains the highest-priority
+    # override. Otherwise, don't send (for example) an OpenRouter key to Groq
+    # merely because both provider keys happen to be present in .env.
+    if os.getenv("AI_API_KEY"):
+        return os.getenv("AI_API_KEY")
+    host = str(base_url or "").lower()
+    if "groq.com" in host and _GROQ_KEYS:
+        return _GROQ_KEYS[0]
+    if "openrouter.ai" in host and _OPENROUTER_KEYS:
+        return _OPENROUTER_KEYS[0]
+    if "huggingface.co" in host and _HUGGINGFACE_KEYS:
+        return _HUGGINGFACE_KEYS[0]
+    if "api.x.ai" in host:
+        return os.getenv("GROK_API_KEY") or os.getenv("XAI_API_KEY") or ""
+    if "integrate.api.nvidia.com" in host:
+        return os.getenv("NVIDIA_API_KEY", "")
+    if "api.openai.com" in host:
+        return os.getenv("OPENAI_API_KEY", "")
+    return (
         (_OPENROUTER_KEYS[0] if _OPENROUTER_KEYS else "") or
         (_HUGGINGFACE_KEYS[0] if _HUGGINGFACE_KEYS else "") or
         os.getenv("NVIDIA_API_KEY") or
@@ -80,8 +95,16 @@ class Settings:
         ""
     )
 
+
+class Settings:
+    HOST: str = os.getenv("HOST", "127.0.0.1")
+    PORT: int = int(os.getenv("PORT", 8000))
+
+    # Supports one general reasoning key plus provider-specific keys.
+    API_KEY: str = _reasoning_api_key(_CONFIGURED_AI_BASE_URL or _default_ai_base_url())
+
     # Base URL for reasoning calls; VLM provider endpoints rotate independently.
-    AI_BASE_URL: str = os.getenv("AI_BASE_URL", _default_ai_base_url())
+    AI_BASE_URL: str = _CONFIGURED_AI_BASE_URL or _default_ai_base_url()
 
     VLM_MODEL: str = os.getenv("VLM_MODEL", "qwen2.5-vl-72b")
     VLM_OPENROUTER_MODEL: str = os.getenv("VLM_OPENROUTER_MODEL", "")
