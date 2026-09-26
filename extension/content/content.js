@@ -5,11 +5,23 @@
  */
 
 (() => {
-  // Prevent multiple injections
-  if (window.__PRIVACY_AGENT_CONTENT_INITIALIZED__) return;
+  // Prevent duplicate injections, but recover after an extension
+  // reload/update: this flag persists in the isolated world while the
+  // previous injection's runtime is invalidated (its listeners stop
+  // working). Probe the runtime and re-initialize when it is dead —
+  // otherwise the auto-injection retry fails permanently.
+  let previousInjectionValid = false;
+  if (window.__PRIVACY_AGENT_CONTENT_INITIALIZED__) {
+    try {
+      previousInjectionValid = Boolean(chrome.runtime?.id);
+    } catch {
+      previousInjectionValid = false;
+    }
+  }
+  if (previousInjectionValid) return;
   window.__PRIVACY_AGENT_CONTENT_INITIALIZED__ = true;
 
-  console.log('[PrivacyAgent] Content script initialized in', window.location.href);
+  console.log('[PrivacyAgent] Content script initialized.');
 
   // Message Types
   const MessageType = {
@@ -287,17 +299,28 @@
         headings: this.extractHeadings(),
         result_items: this.extractResultItems(extracted),
         visible_text,
-        // Canvas/video pixels have no reliable text-node geometry for local
-        // redaction. The background therefore withholds the screenshot.
-        opaqueVisualSurface: Boolean(document.querySelector('canvas, video')),
+        // Only a rendered, in-viewport canvas/video surface can contain
+        // pixels that OCR cannot audit. Invisible analytics-pixel canvases
+        // (common on modern pages) must not gut visual grounding for every
+        // observation on the page.
+        opaqueVisualSurface: this._hasOpaqueVisualSurface(),
         elements: extracted
       };
+    }
+
+    _hasOpaqueVisualSurface() {
+      for (const el of document.querySelectorAll('canvas, video')) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0 && this.isElementVisible(el, rect)) return true;
+      }
+      return false;
     }
   }
 
   const domExtractor = new DOMExtractor();
 
-  // 3. Visual Overlay
+  // 3. Visual Overlay (elements are created lazily on first use, so pages
+  // are not modified when the agent is not running)
   class VisualOverlay {
     constructor() {
       this.cursorEl = null;
@@ -305,7 +328,6 @@
       this._clearTimer = null;
       this._reducedMotion = typeof window !== 'undefined' && window.matchMedia &&
         window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      this._ensureElements();
     }
 
     _ensureElements() {
@@ -475,14 +497,18 @@
 
         case 'CHECK':
           if (targetElement) {
-            if (!targetElement.checked && typeof targetElement.click === 'function') targetElement.click();
+            // Already in the desired state: do not re-notify framework
+            // listeners with a synthetic change event.
+            if (targetElement.checked) return { success: true, changed: false };
+            if (typeof targetElement.click === 'function') targetElement.click();
             else { targetElement.checked = true; targetElement.dispatchEvent(new Event('change', { bubbles: true })); }
           }
           return { success: true };
 
         case 'UNCHECK':
           if (targetElement) {
-            if (targetElement.checked && typeof targetElement.click === 'function') targetElement.click();
+            if (!targetElement.checked) return { success: true, changed: false };
+            if (typeof targetElement.click === 'function') targetElement.click();
             else { targetElement.checked = false; targetElement.dispatchEvent(new Event('change', { bubbles: true })); }
           }
           return { success: true };
@@ -522,19 +548,33 @@
           return { success: true, needs_user_input: true, prompt: promptText.slice(0, 500), ...(fields ? { ambiguousFields: fields } : {}) };
         }
 
-        case 'OPEN_TAB':
-        case 'SWITCH_TAB': {
+        case 'OPEN_TAB': {
           const url = target?.url || resolvedValue || actionPayload.value;
           if (url && typeof url === 'string' && /^https?:\/\//i.test(url)) {
-            window.open(url, '_blank');
+            const opened = window.open(url, '_blank');
+            // Never fake success: a popup-blocked open returns null.
+            if (!opened) {
+              return { success: false, error: 'The browser blocked the new tab. Allow popups for this site, or use NAVIGATE for same-tab navigation.' };
+            }
             return { success: true, openedUrl: url };
           }
-          return { success: false, error: `${action} needs a valid http(s) URL; use NAVIGATE for same-tab navigation.` };
+          return { success: false, error: 'OPEN_TAB needs a valid http(s) URL; use NAVIGATE for same-tab navigation.' };
         }
 
-        case 'WAIT':
-          await this.sleep(actionPayload.duration || 1000);
+        case 'SWITCH_TAB': {
+          // The page world cannot focus another tab. Report the limitation
+          // honestly so the planner re-grounds with NAVIGATE instead of
+          // assuming a switch happened.
+          return { success: false, error: 'SWITCH_TAB is not supported in the page context; use NAVIGATE for same-tab navigation.' };
+        }
+
+        case 'WAIT': {
+          // Bound the wait: an unvalidated model-proposed duration could
+          // stall the agent loop for hours.
+          const duration = Math.min(30000, Math.max(0, Number(actionPayload.duration) || 1000));
+          await this.sleep(duration);
           return { success: true };
+        }
 
         case 'PRESS_KEY':
           return this._executePressKey(targetElement, actionPayload);
@@ -620,7 +660,8 @@
       }
       element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: valueToSet }));
       element.dispatchEvent(new Event('change', { bubbles: true }));
-      element.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Enter' }));
+      // No synthetic Enter keyup here: pages with keyup-Enter submit handlers
+      // (chats, search bars) would submit prematurely during a typing step.
 
       return { success: true };
     }

@@ -146,7 +146,9 @@ export class TaskManager {
         sensitiveFieldsCurrent: 0,
         secretsKeptLocal: 0,
         redactedRegionsCount: 0,
+        redactedRegionsCurrent: 0,
         serverCallsCount: 0,
+        privacyBlocks: 0,
         localVisionLatencyMs: 0,
         localModelAssetBytes: null,
         localOcrPiiRegions: 0,
@@ -197,13 +199,24 @@ export class TaskManager {
   updatePrivacyMetrics(metricsUpdate) {
     if (this.currentTask) {
       const pm = this.currentTask.privacyMetrics;
-      if (metricsUpdate.sensitiveFieldsDetected) pm.sensitiveFieldsDetected += metricsUpdate.sensitiveFieldsDetected;
-      // Per-observation (current page) counts overwrite; cumulative totals above accumulate.
-      if (typeof metricsUpdate.sensitiveFieldsDetected === 'number') pm.sensitiveFieldsCurrent = metricsUpdate.sensitiveFieldsDetected;
-      if (typeof metricsUpdate.redactedRegionsCount === 'number') pm.redactedRegionsCurrent = metricsUpdate.redactedRegionsCount;
-      if (metricsUpdate.secretsKeptLocal) pm.secretsKeptLocal += metricsUpdate.secretsKeptLocal;
-      if (metricsUpdate.redactedRegionsCount) pm.redactedRegionsCount += metricsUpdate.redactedRegionsCount;
+      // Per-observation counts re-count ALL page fields on every step, so
+      // accumulate the delta over the previous observation — otherwise
+      // cumulative totals inflate by field-count × steps.
+      if (typeof metricsUpdate.sensitiveFieldsDetected === 'number') {
+        const prev = pm.sensitiveFieldsCurrent || 0;
+        const delta = Math.max(0, metricsUpdate.sensitiveFieldsDetected - prev);
+        pm.sensitiveFieldsCurrent = metricsUpdate.sensitiveFieldsDetected;
+        pm.sensitiveFieldsDetected = (pm.sensitiveFieldsDetected || 0) + delta;
+        pm.secretsKeptLocal = (pm.secretsKeptLocal || 0) + delta;
+      }
+      if (typeof metricsUpdate.redactedRegionsCount === 'number') {
+        const prev = pm.redactedRegionsCurrent || 0;
+        const delta = Math.max(0, metricsUpdate.redactedRegionsCount - prev);
+        pm.redactedRegionsCurrent = metricsUpdate.redactedRegionsCount;
+        pm.redactedRegionsCount = (pm.redactedRegionsCount || 0) + delta;
+      }
       if (metricsUpdate.serverCallsCount) pm.serverCallsCount += metricsUpdate.serverCallsCount;
+      if (metricsUpdate.privacyBlocks) pm.privacyBlocks = (pm.privacyBlocks || 0) + metricsUpdate.privacyBlocks;
       if (typeof metricsUpdate.localVisionLatencyMs === 'number') pm.localVisionLatencyMs += metricsUpdate.localVisionLatencyMs;
       if (typeof metricsUpdate.localModelAssetBytes === 'number') pm.localModelAssetBytes = metricsUpdate.localModelAssetBytes;
       if (typeof metricsUpdate.localOcrPiiRegions === 'number') pm.localOcrPiiRegions += metricsUpdate.localOcrPiiRegions;
@@ -264,6 +277,41 @@ export class TaskManager {
     }
   }
 
+  /**
+   * Restores the last persisted task snapshot after a service-worker
+   * restart. Pending confirmations / input prompts cannot be honored by a
+   * fresh worker (it has no resolvers), so a WAITING_FOR_USER snapshot is
+   * honestly downgraded to FAILED instead of showing dead confirm buttons.
+   */
+  async restorePersistedTask() {
+    if (this.currentTask) return this.currentTask;
+    try {
+      if (typeof chrome === 'undefined' || !chrome.storage?.session) return null;
+      const stored = await chrome.storage.session.get('privagent_task');
+      const snapshot = stored?.privagent_task;
+      if (!snapshot || !snapshot.id) return null;
+      const restored = {
+        ...snapshot,
+        steps: snapshot.steps || [],
+        visionSamples: snapshot.visionSamples || [],
+        privacyMetrics: { ...snapshot.privacyMetrics },
+        consecutiveFailures: 0,
+        lastTargetKey: null
+      };
+      if (restored.state === AgentState.WAITING_FOR_USER) {
+        restored.state = AgentState.FAILED;
+        restored.error = 'The browser restarted the agent service before you could respond.';
+        restored.hint = 'Start the task again to continue. Your saved vault values are still available.';
+        restored.pendingConfirmation = null;
+        restored.pendingUserInput = null;
+      }
+      this.currentTask = restored;
+      return restored;
+    } catch {
+      return null;
+    }
+  }
+
   cancelTask() {
     if (this.currentTask) {
       this.currentTask.state = AgentState.CANCELLED;
@@ -285,6 +333,7 @@ export class TaskManager {
             id: t.id, prompt: t.prompt, tabId: t.tabId, state: t.state,
             currentStep: t.currentStep, maxSteps: t.maxSteps,
             result: t.result || null, error: t.error || null, hint: t.hint || null,
+            rawError: t.rawError || null,
             pendingConfirmation: t.pendingConfirmation || null,
             pendingUserInput: t.pendingUserInput || null,
             privacyMetrics: t.privacyMetrics,

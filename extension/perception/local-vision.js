@@ -15,6 +15,21 @@ function extensionApi() {
   return globalThis.browser || globalThis.chrome;
 }
 
+// Engine-computed capture-group indices (d flag) give exact span offsets.
+// Firefox < 132 lacks hasIndices: fall back to the indexOf approximation.
+const HAS_INDICES_FLAG = (() => {
+  try { new RegExp('', 'd'); return true; } catch { return false; }
+})();
+
+function withIndices(regex) {
+  if (!HAS_INDICES_FLAG || regex.flags.includes('d')) return regex;
+  try { return new RegExp(regex.source, regex.flags + 'd'); } catch { return regex; }
+}
+
+const ACCOUNT_RE = withIndices(/\b(?:account|acct|bank\s*account)(?:\s*(?:number|no\.?|#))?\s*[:#-]?\s*(\d(?:[\s-]?\d){5,23})(?!\d)/gi);
+const OTP_RE = withIndices(/\b(?:otp|one[ -]?time(?: password| code)?|verification code|security code|pin)\s*[:#-]?\s*([A-Z0-9-]{4,12})\b/gi);
+const CREDENTIAL_RE = withIndices(/\b(?:password|passcode|access token|api key|bearer)\s*[:#-]?\s*([A-Z0-9._~+/-]{6,96}={0,2})/gi);
+
 function asBox(x0, y0, x1, y1, scaleX, scaleY) {
   const left = Math.max(0, x0 * scaleX);
   const top = Math.max(0, y0 * scaleY);
@@ -34,15 +49,23 @@ function sensitiveSpans(text) {
     for (const match of text.matchAll(regex)) {
       if (predicate(match[0], match.index)) {
         const value = captureGroup ? match[captureGroup] : match[0];
-        const offset = captureGroup ? match[0].indexOf(value) : 0;
-        spans.push({ start: match.index + offset, end: match.index + offset + value.length, category });
+        if (!value) continue;
+        // Prefer the engine-computed group index when available: indexOf
+        // finds the FIRST occurrence of the group inside the full match,
+        // which mislocates the span (and mask rectangle) when the value also
+        // appears in the matched prefix.
+        const groupIndices = captureGroup ? match.indices?.[captureGroup] : null;
+        const start = groupIndices
+          ? groupIndices[0]
+          : match.index + (captureGroup ? match[0].indexOf(value) : 0);
+        spans.push({ start, end: start + value.length, category });
       }
     }
   };
 
-  addMatches(/\b(?:account|acct|bank\s*account)(?:\s*(?:number|no\.?|#))?\s*[:#-]?\s*(\d(?:[\s-]?\d){5,23})(?!\d)/gi, 'ACCOUNT', () => true, 1);
-  addMatches(/\b(?:otp|one[ -]?time(?: password| code)?|verification code|security code|pin)\s*[:#-]?\s*([A-Z0-9-]{4,12})\b/gi, 'OTP', () => true, 1);
-  addMatches(/\b(?:password|passcode|access token|api key|bearer)\s*[:#-]?\s*([A-Z0-9._~+/-]{6,96}={0,2})/gi, 'CREDENTIAL', () => true, 1);
+  addMatches(ACCOUNT_RE, 'ACCOUNT', () => true, 1);
+  addMatches(OTP_RE, 'OTP', () => true, 1);
+  addMatches(CREDENTIAL_RE, 'CREDENTIAL', () => true, 1);
   addMatches(/\b(?:sk|pk|api)[-_][A-Za-z0-9_-]{16,}\b/gi, 'CREDENTIAL');
   addMatches(/\b[A-Z]{4}0[A-Z0-9]{6}\b/gi, 'IFSC');
 

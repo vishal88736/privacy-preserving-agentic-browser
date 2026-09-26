@@ -27,19 +27,22 @@ const FRIENDLY_STATE = {
 
 const PROGRESS_STAGES = [
   { key: 'observe', label: 'Observe page' },
-  { key: 'visual', label: 'Analyze visual layout' },
   { key: 'protect', label: 'Protect sensitive data' },
+  { key: 'visual', label: 'Analyze visual layout' },
   { key: 'plan', label: 'Plan next action' },
   { key: 'execute', label: 'Execute action' },
   { key: 'verify', label: 'Verify result' }
 ];
 
+// Mirrors the actual execution order: SANITIZING runs before
+// VISUAL_ANALYSIS in every agent cycle, so the progress marker must not
+// move backward (2→1) between stages.
 function stageForState(state) {
   switch (state) {
     case AgentState.UNDERSTANDING_TASK: return 0;
     case AgentState.OBSERVING: return 0;
-    case AgentState.VISUAL_ANALYSIS: return 1;
-    case AgentState.SANITIZING: return 2;
+    case AgentState.SANITIZING: return 1;
+    case AgentState.VISUAL_ANALYSIS: return 2;
     case AgentState.PLANNING:
     case AgentState.REASONING:
     case AgentState.VALIDATING_ACTION: return 3;
@@ -49,6 +52,40 @@ function stageForState(state) {
     case AgentState.COMPLETED: return 6;
     default: return -1;
   }
+}
+
+// Maps clarification-modal semantic types to vault-accepted symbolic keys.
+// Deriving LOCAL_${sem} directly produced keys like LOCAL_DATE_OF_BIRTH and
+// LOCAL_ZIP_CODE that the vault whitelist rejected — the user's "save to
+// vault" choice was silently discarded.
+const VAULT_KEY_ALIASES = {
+  LOCAL_DOB: 'LOCAL_DOB', LOCAL_DATE_OF_BIRTH: 'LOCAL_DOB', LOCAL_BIRTH_DATE: 'LOCAL_DOB',
+  LOCAL_ZIP: 'LOCAL_ZIP', LOCAL_ZIP_CODE: 'LOCAL_ZIP', LOCAL_POSTAL_CODE: 'LOCAL_ZIP', LOCAL_PIN_CODE: 'LOCAL_ZIP',
+  LOCAL_ADDRESS: 'LOCAL_ADDRESS', LOCAL_ADDRESS_LINE1: 'LOCAL_ADDRESS', LOCAL_ADDRESS_LINE_1: 'LOCAL_ADDRESS',
+  LOCAL_ADDRESS_LINE2: 'LOCAL_ADDRESS', LOCAL_STREET_ADDRESS: 'LOCAL_ADDRESS',
+  LOCAL_FULL_NAME: 'LOCAL_FULL_NAME', LOCAL_NAME: 'LOCAL_FULL_NAME',
+  LOCAL_PHONE: 'LOCAL_PHONE', LOCAL_MOBILE: 'LOCAL_PHONE', LOCAL_MOBILE_NUMBER: 'LOCAL_PHONE',
+  LOCAL_PHONE_NUMBER: 'LOCAL_PHONE', LOCAL_TEL: 'LOCAL_PHONE',
+  LOCAL_EMAIL: 'LOCAL_EMAIL', LOCAL_MAIL: 'LOCAL_EMAIL',
+  LOCAL_AADHAAR: 'LOCAL_AADHAAR', LOCAL_AADHAAR_NUMBER: 'LOCAL_AADHAAR', LOCAL_AADHAR: 'LOCAL_AADHAAR',
+  LOCAL_PAN: 'LOCAL_PAN', LOCAL_PAN_NUMBER: 'LOCAL_PAN',
+  LOCAL_PASSWORD: 'LOCAL_PASSWORD', LOCAL_PASSCODE: 'LOCAL_PASSWORD',
+  LOCAL_CREDIT_CARD: 'LOCAL_CREDIT_CARD', LOCAL_CARD_NUMBER: 'LOCAL_CREDIT_CARD',
+  LOCAL_CVV: 'LOCAL_CVV', LOCAL_CVC: 'LOCAL_CVV',
+  LOCAL_SSN: 'LOCAL_SSN', LOCAL_SIN: 'LOCAL_SIN', LOCAL_NIN: 'LOCAL_NIN',
+  LOCAL_NHS: 'LOCAL_NHS', LOCAL_IBAN: 'LOCAL_IBAN',
+  LOCAL_CITY: 'LOCAL_CITY', LOCAL_STATE: 'LOCAL_STATE',
+  LOCAL_COUNTRY: 'LOCAL_COUNTRY', LOCAL_GENDER: 'LOCAL_GENDER', LOCAL_TERMS: 'LOCAL_TERMS'
+};
+
+function vaultKeyForSemantic(sem) {
+  const key = `LOCAL_${String(sem || '').toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_|_$/g, '')}`;
+  if (VAULT_KEY_ALIASES[key]) return VAULT_KEY_ALIASES[key];
+  // Unknown semantics are stored as custom vault entries (resolvable by the
+  // form analyzer for future forms), so "save to vault" never silently
+  // discards the value.
+  const slug = String(sem || '').toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 48);
+  return slug ? `LOCAL_CUSTOM_${slug}` : '';
 }
 
 /** Summarize model output for display: concise, no chain-of-thought, no secrets. */
@@ -236,16 +273,33 @@ class SidePanelApp {
   send(type, payload, cb) {
     try {
       chrome.runtime.sendMessage({ type, payload }, (res) => {
-        if (chrome.runtime.lastError) { cb?.(null); return; }
+        if (chrome.runtime.lastError) {
+          console.warn('[SidePanel] Message failed:', chrome.runtime.lastError.message);
+          cb?.(null);
+          return;
+        }
         cb?.(res);
       });
-    } catch { cb?.(null); }
+    } catch (err) {
+      console.warn('[SidePanel] Message failed:', err?.message || err);
+      cb?.(null);
+    }
   }
 
   listen() {
     chrome.runtime.onMessage.addListener((msg) => {
       if (msg?.type === MessageType.AGENT_STATUS_UPDATE) this.onUpdate(msg.payload);
     });
+    // Background-side settings changes must reflect here: settings are also
+    // mirrored in chrome.storage.local (task manager) and the panel's
+    // localStorage copy can go stale without this listener.
+    if (chrome.storage?.onChanged) {
+      chrome.storage.onChanged.addListener((changes, area) => {
+        if (area === 'local' && changes.privagent_settings?.newValue) {
+          this.reflectSettings(changes.privagent_settings.newValue);
+        }
+      });
+    }
   }
 
   pollStatus() {
@@ -741,8 +795,8 @@ class SidePanelApp {
         const sem = chk.dataset.semanticType;
         const val = answers[fid];
         if (val && sem) {
-          const vaultKey = `LOCAL_${sem.toUpperCase()}`;
-          saveToVault.push({ key: vaultKey, value: val });
+          const vaultKey = vaultKeyForSemantic(sem);
+          if (vaultKey) saveToVault.push({ key: vaultKey, value: val });
         }
       });
     } else {

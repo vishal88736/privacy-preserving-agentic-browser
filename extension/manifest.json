@@ -2,10 +2,10 @@
   "manifest_version": 3,
   "name": "Privacy-Preserving Agentic Browser (SIH)",
   "version": "1.0.0",
+  "minimum_chrome_version": "114",
   "description": "Browser agent with local OCR and object detection, client-side visual PII masking, and VLM reasoning over sanitized screenshots.",
   "permissions": [
     "sidePanel",
-    "activeTab",
     "tabs",
     "scripting",
     "storage"
@@ -31,15 +31,6 @@
   "cross_origin_opener_policy": {
     "value": "same-origin"
   },
-  "web_accessible_resources": [
-    {
-      "resources": [
-        "models/*",
-        "vendor/*"
-      ],
-      "matches": ["<all_urls>"]
-    }
-  ],
   "side_panel": {
     "default_path": "sidepanel/index.html"
   },

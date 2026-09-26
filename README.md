@@ -193,30 +193,9 @@ Chrome is built from `extension/manifest.json`; Firefox is built from `extension
 
 Run the complete test suite with the built-in Node.js test runner:
 ```bash
-node --test tests/**/*.test.js
+node --test 'tests/**/*.test.js' 'extension/perception/task-grounding.test.js'
 ```
-Expected output:
-```
-✔ Integration - Multi-step Aadhaar form filling scenario
-✔ Integration - Document Upload scenario
-✔ Integration - Flight Search comparison scenario
-✔ ObservationFusion - Computes IoU and matches DOM elements with VLM detections
-✔ ActionParser - Parses clean JSON and strips markdown fences
-✔ LocalValueResolver - Safely maps symbolic tokens to vault secrets locally
-✔ RiskGate - Requires confirmation for SUBMIT actions
-✔ RiskGate - Requires confirmation for Document Upload
-✔ RiskGate - BLOCKS secret exfiltration into search boxes
-✔ Schema Validator - Rejects arbitrary eval or code execution
-✔ DOMSanitizer - Scrubs sensitive inputs into [REDACTED] and sets symbolic source
-✔ DOMSanitizer - Sanitizes sensitive query parameters in URLs
-✔ PolicyEngine - Blocks outbound payloads containing unredacted secrets
-✔ PIIDetector - Aadhaar Detection & Verhoeff Validation
-✔ PIIDetector - PAN Card Detection
-✔ PIIDetector - Credit Card & Luhn Algorithm Validation
-✔ PIIDetector - Email and Indian Phone Detection
-✔ PIIDetector - Date of Birth (DOB) and OTP Detection
-ℹ pass 18, fail 0
-```
+Or use the npm aliases (`npm run test:privacy`, `test:executor`, `test:reasoning`, `test:navigation`, `test:perception`, `test:agent`, `test:schemas`). The suite covers PII detection and redaction, the outbound policy engine, risk gates, action validation, observation fusion, the local value resolver, and the grounded local planner. Current state: **336 tests, 0 failures**.
 
 ---
 

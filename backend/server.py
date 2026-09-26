@@ -3,6 +3,7 @@ Privacy-Preserving Agentic Backend Server
 Exposes strict endpoints:
 - POST /vision: Server VLM perception for layout and visual hierarchy
 - POST /reason: GPT-OSS 120B reasoning and action planning with symbolic resolution
+- POST /interpret: Local task interpretation (kept for tooling and tests)
 - GET /health: Healthcheck and status
 """
 
@@ -17,10 +18,13 @@ from vlm_service import vlm_service
 from gpt_oss_service import gpt_oss_service
 from config import settings
 
+_EXTENSION_ORIGIN_REGEX = r"^(?:chrome-extension://[a-p]{32}|moz-extension://[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
+_MODEL_ENDPOINTS = {"/vision", "/reason", "/interpret"}
+
 app = FastAPI(
     title="Privacy-Preserving Browser Agent Backend",
     version="1.0.0",
-    description="VLM Perception & GPT-OSS 120B Reasoning API + Agentic Browsing"
+    description="VLM Perception & GPT-OSS 120B Reasoning API"
 )
 
 # The legacy backend-driven browser loop is intentionally not mounted. It
@@ -30,7 +34,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[],
-    allow_origin_regex=r"^(?:chrome-extension://[a-p]{32}|moz-extension://[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$",
+    allow_origin_regex=_EXTENSION_ORIGIN_REGEX,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -39,13 +43,14 @@ app.add_middleware(
 @app.middleware("http")
 async def require_extension_origin(request, call_next):
     # CORS alone does not reject simple cross-origin requests. Explicitly
-    # reject webpage-originated calls to model endpoints as well.
-    if request.url.path in {"/vision", "/reason", "/interpret"}:
+    # reject webpage-originated calls to model endpoints as well. Normalize
+    # the path so trailing-slash variants cannot slip past the exact match.
+    path = request.url.path
+    if len(path) > 1 and path.endswith("/"):
+        path = path.rstrip("/")
+    if path in _MODEL_ENDPOINTS:
         origin = request.headers.get("origin", "")
-        allowed_extension_origin = re.fullmatch(
-            r"(?:chrome-extension://[a-p]{32}|moz-extension://[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
-            origin,
-        )
+        allowed_extension_origin = re.fullmatch(_EXTENSION_ORIGIN_REGEX, origin)
         if not allowed_extension_origin:
             from starlette.responses import JSONResponse
             return JSONResponse({"detail": "Extension origin required."}, status_code=403)
@@ -63,7 +68,6 @@ class ReasonRequest(BaseModel):
     page_state: Optional[Dict[str, Any]] = None
     fused_observation: Dict[str, Any]
     task_history: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
-    timestamp: Optional[int] = None
 
 class InterpretRequest(BaseModel):
     task: str
@@ -95,7 +99,7 @@ def process_vision(req: VisionRequest):
         raise HTTPException(status_code=400, detail=str(val_err))
     except Exception as e:
         import traceback; traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"VLM processing error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"VLM processing error: {type(e).__name__}")
 
 @app.post("/reason")
 def process_reason(req: ReasonRequest):
@@ -108,9 +112,15 @@ def process_reason(req: ReasonRequest):
             page_state=req.page_state
         )
         return plan
+    except ValueError as val_err:
+        # Outbound privacy / security rejections are controlled messages,
+        # mapped to 400 like the /vision endpoint.
+        raise HTTPException(status_code=400, detail=str(val_err))
     except Exception as e:
         import traceback; traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Reasoning error: {str(e)}")
+        # Log the type only: exception text can carry provider URLs, status
+        # codes, or internal details that must not reach clients.
+        raise HTTPException(status_code=500, detail=f"Reasoning error: {type(e).__name__}")
 
 @app.post("/interpret")
 def process_interpret(req: InterpretRequest):
@@ -119,7 +129,7 @@ def process_interpret(req: InterpretRequest):
         return interpretation
     except Exception as e:
         import traceback; traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Interpretation error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Interpretation error: {type(e).__name__}")
 
 if __name__ == "__main__":
     uvicorn.run(app, host=settings.HOST, port=settings.PORT)

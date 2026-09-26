@@ -23,10 +23,32 @@ def _log_safe_plan_shape(parsed: dict) -> None:
 
 
 def _extract_json(content: str) -> dict:
-    match = re.search(r"\{.*\}", content, re.DOTALL)
-    if not match:
+    # Fast path first: most well-behaved providers return a bare JSON object.
+    if not isinstance(content, str) or not content.strip():
         raise Exception("No JSON object found in response")
-    return json.loads(match.group(0))
+    text = content.strip()
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+    # Balanced scan: parse the first well-formed {...} block. A greedy
+    # first-{-to-last-} span would wrap prose between braces into an invalid
+    # object whose parse failure gets misreported as a provider error and
+    # triggers a needless (slow) provider rotation.
+    decoder = json.JSONDecoder()
+    start = text.find("{")
+    while start != -1:
+        try:
+            parsed, _ = decoder.raw_decode(text[start:])
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+        start = text.find("{", start + 1)
+    raise Exception("No JSON object found in response")
 
 
 def _allowed_ids(fused_observation: Dict[str, Any], page_state: Optional[Dict[str, Any]]) -> set:
@@ -64,12 +86,22 @@ def _repair_action(parsed: dict, allowed: set, page_state: Optional[Dict[str, An
     if act.get("action") in ("DONE", "WAIT", "NAVIGATE", "SCROLL", "GO_BACK", "GO_FORWARD", "EXTRACT", "PRESS_KEY", "OPEN_TAB", "SWITCH_TAB", "ASK_USER"):
         _log_safe_plan_shape(parsed)
         return parsed
-    if eid and allowed and eid not in allowed:
+    # Hallucination guard: any target id that is not a known page element is
+    # fabricated, including when the observation supplied no element ids at
+    # all (an empty allowed set must NOT let a hallucinated id pass through).
+    if eid and eid not in allowed:
         refs = (page_state or {}).get("resolved_references") or {}
+        selected = refs.get("selected_item")
+        if isinstance(selected, str):
+            selected_id = selected
+        elif isinstance(selected, dict):
+            selected_id = selected.get("element_id")
+        else:
+            selected_id = None
         fallback = (
             (refs.get("first_suitable") if isinstance(refs.get("first_suitable"), str) else None)
             or (refs.get("cheapest") if isinstance(refs.get("cheapest"), str) else None)
-            or (refs.get("selected_item") or {}).get("element_id")
+            or selected_id
             or (page_state or {}).get("suggested_search_element")
         )
         if fallback and fallback in allowed:
@@ -156,7 +188,11 @@ Output ONLY a valid JSON object. Do NOT include markdown blocks:
                 timeout=settings.INTERPRETATION_REQUEST_TIMEOUT_SECONDS,
             )
             if resp.status_code == 200:
-                content = resp.json().get("choices", [])[0].get("message", {}).get("content", "").strip()
+                raw_choices = resp.json().get("choices") or []
+                message = raw_choices[0].get("message") or {} if raw_choices else {}
+                content = message.get("content")
+                if not isinstance(content, str) or not content.strip():
+                    raise Exception("Empty response from interpretation model")
                 return _extract_json(content)
             raise Exception(f"Model error: {resp.status_code}")
         except Exception as e:
@@ -164,7 +200,10 @@ Output ONLY a valid JSON object. Do NOT include markdown blocks:
             return {
                 "intent": "unknown",
                 "target": None,
-                "expected_state": None,
+                "constraints": [],
+                "entities": [],
+                "expected_state": "Completed task",
+                "subgoals": [],
                 "confidence": 0.0
             }
 
@@ -281,15 +320,20 @@ CRITICAL RULES:
                 timeout=settings.REASONING_REQUEST_TIMEOUT_SECONDS,
             )
             if resp.status_code == 200:
-                raw_choices = resp.json().get("choices", [])
+                raw_choices = resp.json().get("choices") or []
                 if not raw_choices:
                     raise Exception("Empty response from reasoning model")
-                content = (raw_choices[0].get("message", {}).get("content") or "").strip()
+                message = raw_choices[0].get("message") or {}
+                content = message.get("content")
+                if not isinstance(content, str) or not content.strip():
+                    raise Exception("Empty response from reasoning model")
                 parsed = _extract_json(content)
                 if isinstance(parsed, dict) and "action" in parsed:
-                    act = parsed.get("action") or {}
+                    act = parsed.get("action")
+                    if not isinstance(act, dict):
+                        raise Exception("Model returned invalid schema")
                     if act.get("value_source") and act.get("value"):
-                        valid_sources = ("LOCAL_AADHAAR", "LOCAL_PAN", "LOCAL_DOCUMENT", "LOCAL_PASSWORD", "LOCAL_FULL_NAME", "LOCAL_DOB", "LOCAL_PHONE", "LOCAL_EMAIL", "LOCAL_ADDRESS", "LOCAL_PROFILE", "LOCAL_CREDIT_CARD", "LOCAL_CVV", "LOCAL_SSN", "LOCAL_SIN", "LOCAL_NIN", "LOCAL_NHS", "LOCAL_IBAN")
+                        valid_sources = ("LOCAL_AADHAAR", "LOCAL_PAN", "LOCAL_DOCUMENT", "LOCAL_PASSWORD", "LOCAL_FULL_NAME", "LOCAL_DOB", "LOCAL_PHONE", "LOCAL_EMAIL", "LOCAL_ADDRESS", "LOCAL_PROFILE", "LOCAL_CREDIT_CARD", "LOCAL_CVV", "LOCAL_SSN", "LOCAL_SIN", "LOCAL_NIN", "LOCAL_NHS", "LOCAL_IBAN", "LOCAL_CITY", "LOCAL_STATE", "LOCAL_ZIP", "LOCAL_COUNTRY", "LOCAL_GENDER", "LOCAL_TERMS")
                         if act["value_source"] not in valid_sources and not re.fullmatch(r"LOCAL_CUSTOM_[A-Z0-9_]{1,48}", str(act["value_source"])):
                             act["value_source"] = None
                     parsed = _repair_action(parsed, allowed, page_state)

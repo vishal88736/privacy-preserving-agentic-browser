@@ -36,6 +36,42 @@ _PROVIDERS = {
 }
 
 
+def _truncate_image_data_url(url: str, limit: int) -> str:
+    """Bound a data URL payload without cutting base64 mid-character."""
+    if len(url) <= limit:
+        return url
+    head, sep, b64 = url.partition(",")
+    if not sep:
+        return url[:limit]
+    keep = max(0, ((limit - len(head) - len(sep)) // 4) * 4)
+    return head + sep + b64[:keep]
+
+
+def _extract_json_object(content: str) -> Optional[Dict[str, Any]]:
+    """Parse the first well-formed JSON object in text, else None."""
+    if not isinstance(content, str) or not content.strip():
+        return None
+    text = content.strip()
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+    decoder = json.JSONDecoder()
+    start = text.find("{")
+    while start != -1:
+        try:
+            parsed, _ = decoder.raw_decode(text[start:])
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+        start = text.find("{", start + 1)
+    return None
+
+
 class VLMProviderRotator:
     """Round-robin configured VLM credentials, with bounded failover."""
 
@@ -90,7 +126,12 @@ class VLMService:
     def process_visuals(self, task_id: str, sanitized_screenshot: str, sanitized_dom: Dict[str, Any], metadata: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(sanitized_screenshot, str) or not sanitized_screenshot.startswith("data:image/"):
             raise ValueError("Security rejection: screenshot must be a sanitized image data URL")
-        if not isinstance(sanitized_dom, dict) or not isinstance(sanitized_dom.get("elements", []), list):
+        if not isinstance(sanitized_dom, dict):
+            raise ValueError("Security rejection: malformed sanitized DOM")
+        elements = sanitized_dom.get("elements", [])
+        # Every element must be a dict: string items would pass a bare list
+        # check and crash downstream field extraction with a 500.
+        if not isinstance(elements, list) or not all(isinstance(el, dict) for el in elements):
             raise ValueError("Security rejection: malformed sanitized DOM")
         dom_str = str(sanitized_dom)
         sensitive_category = find_sensitive_category(dom_str)
@@ -135,9 +176,9 @@ class VLMService:
         local_vision = sanitized_dom.get("local_vision_context") or {}
         object_labels = [
             str(item.get("label") or "")[:48]
-            for item in local_vision.get("detected_objects", [])[:20]
+            for item in (local_vision.get("detected_objects") or [])[:20]
             if isinstance(item, dict) and item.get("label")
-        ] if isinstance(local_vision, dict) else []
+        ]
         if object_labels:
             prompt += " Browser-local object labels (not text OCR and not verified UI controls): " + ", ".join(object_labels) + "."
         for candidate in candidates:
@@ -156,7 +197,7 @@ class VLMService:
                     "role": "user",
                     "content": [
                         {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": screenshot[:180000]}}
+                        {"type": "image_url", "image_url": {"url": _truncate_image_data_url(screenshot, 180000)}}
                     ]
                 }],
                 "max_tokens": 400,
@@ -174,12 +215,18 @@ class VLMService:
                     continue
 
                 content = (resp.json().get("choices") or [{}])[0].get("message", {}).get("content") or ""
-                if not isinstance(content, str):
+                if not isinstance(content, str) or not content.strip():
+                    print(f"[VLM] {candidate['provider']} returned empty content; rotating provider/key")
                     continue
-                match = re.search(r"\{.*\}", content, re.DOTALL)
-                if not match:
-                    return {"spatial_layout": content.strip()[:400]} if content else None
-                parsed = json.loads(match.group(0))
+                # Balanced parse of the first well-formed {...} block. A
+                # greedy first-{-to-last-} span wraps prose between braces
+                # into an invalid object and misreports a parse failure as a
+                # provider failure, wasting a rotation. Refusal/apology text
+                # is never returned as visual grounding.
+                parsed = _extract_json_object(content)
+                if parsed is None:
+                    print(f"[VLM] {candidate['provider']} returned non-JSON text; rotating provider/key")
+                    continue
                 out = {}
                 if parsed.get("spatial_layout"):
                     out["spatial_layout"] = parsed["spatial_layout"]
@@ -189,6 +236,7 @@ class VLMService:
                     out["page_type"] = parsed["page_type"]
                 if out:
                     return out
+                print(f"[VLM] {candidate['provider']} response missing layout keys; rotating provider/key")
             except Exception as exc:
                 # Exception messages may include request details. Log only
                 # provider and exception type, never tokens or payload text.
@@ -205,10 +253,14 @@ class VLMService:
         elements = sanitized_dom.get("elements", [])
         viewport = metadata.get("viewport", sanitized_dom.get("viewport") or {"width": 1280, "height": 800})
         headings = sanitized_dom.get("headings") or []
-        result_items = sanitized_dom.get("result_items") or []
+        # Defensively skip non-dict result items: the boundary gate validates
+        # `elements` but result_items pass through unvalidated.
+        result_items = [it for it in (sanitized_dom.get("result_items") or []) if isinstance(it, dict)]
+        if not isinstance(viewport, dict):
+            viewport = {"width": 1280, "height": 800}
 
         detected_elements: List[Dict[str, Any]] = []
-        for idx, el in enumerate(elements):
+        for idx, el in enumerate([e for e in elements if isinstance(e, dict)]):
             tag = el.get("tag", "div")
             role = el.get("role") or tag
             label = el.get("label") or el.get("placeholder") or el.get("name") or f"Element {idx+1}"

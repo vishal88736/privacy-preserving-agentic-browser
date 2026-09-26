@@ -113,7 +113,9 @@ class ReusableTCPServer(socketserver.TCPServer):
     allow_reuse_address = True
 
 def run_server():
-    with ReusableTCPServer(("", PORT), BenchmarkHandler) as httpd:
+    # Bind localhost only: the benchmark server must not be reachable from
+    # the local network.
+    with ReusableTCPServer(("127.0.0.1", PORT), BenchmarkHandler) as httpd:
         print(f"SIH Benchmark Web Server running at http://localhost:{PORT}")
         try:
             httpd.serve_forever()

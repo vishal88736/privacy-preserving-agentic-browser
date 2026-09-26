@@ -12,10 +12,10 @@ __pycache__/
 # Scratch & references
 references/
 scratch/
+scratch*.py
+launch_test_browser.py
 
 # Test artifacts
 tests/qa_screenshots/
 
 browser_agent-main/
-
-references/

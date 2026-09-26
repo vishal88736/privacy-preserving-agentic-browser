@@ -1,6 +1,6 @@
 fastapi>=0.110.0
 uvicorn>=0.28.0
 pydantic>=2.6.0
-python-multipart>=0.0.9
 requests>=2.31.0
+# Used by the Playwright-based e2e suites in tests/, not by the server itself.
 playwright>=1.40.0

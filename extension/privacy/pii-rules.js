@@ -62,12 +62,19 @@ export const PII_RULES = [
   { id: 'IBAN', category: PIICategory.IBAN, source: SymbolicSecretSource.LOCAL_IBAN, pattern: /\b[A-Z]{2}\d{2}(?:[ -]?[A-Z0-9]){11,30}\b/gi, validate: validateIban, confidence: 0.98 },
   { id: 'CREDIT_CARD', category: PIICategory.CREDIT_CARD, source: SymbolicSecretSource.LOCAL_CREDIT_CARD, pattern: /(?<!\d)(?:\d[ -]?){13,19}(?!\d)/g, validate: validateLuhnDigits, confidence: 0.95 },
   { id: 'EMAIL', category: PIICategory.EMAIL, source: SymbolicSecretSource.LOCAL_EMAIL, pattern: /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, confidence: 0.96 },
-  { id: 'PHONE_IN', category: PIICategory.PHONE, source: SymbolicSecretSource.LOCAL_PHONE, pattern: /(?<!\d)(?:(?:\+|0{0,2})91[\s-]?)?[6-9]\d{9}(?!\d)/g, context: 'phone', confidence: 0.92 },
-  { id: 'PHONE_INTL', category: PIICategory.PHONE, source: SymbolicSecretSource.LOCAL_PHONE, pattern: /(?<!\w)\+\d{1,3}[ .-]?(?:\(\d{1,4}\)[ .-]?)?\d(?:[ .-]?\d){6,12}(?!\w)/g, confidence: 0.9 },
+  { id: 'PHONE_IN', category: PIICategory.PHONE, source: SymbolicSecretSource.LOCAL_PHONE, pattern: /(?<!\d)(?:(?:\+|0{0,2})91[\s-]?)?[6-9]\d{9}(?!\d)/g, context: 'phone', confidence: 0.92 },  { id: 'PHONE_INTL', category: PIICategory.PHONE, source: SymbolicSecretSource.LOCAL_PHONE, pattern: /(?<!\w)\+\d{1,3}[ .-]?(?:\(\d{1,4}\)[ .-]?)?\d(?:[ .-]?\d){6,12}(?!\w)/g, confidence: 0.9 },
   { id: 'DOB_DMY', category: PIICategory.DOB, source: SymbolicSecretSource.LOCAL_DOB, pattern: /\b(?:0[1-9]|[12]\d|3[01])[-/.](?:0[1-9]|1[0-2])[-/.](?:19|20)\d{2}\b/g, confidence: 0.9 },
   { id: 'DOB_MDY', category: PIICategory.DOB, source: SymbolicSecretSource.LOCAL_DOB, pattern: /\b(?:0[1-9]|1[0-2])[-/.](?:0[1-9]|[12]\d|3[01])[-/.](?:19|20)\d{2}\b/g, confidence: 0.86 },
-  { id: 'IFSC', category: PIICategory.IFSC, source: SymbolicSecretSource.LOCAL_PROFILE, pattern: /\b[A-Z]{4}0[A-Z0-9]{6}\b/gi, context: 'ifsc', confidence: 0.9 }
+  { id: 'IFSC', category: PIICategory.IFSC, source: SymbolicSecretSource.LOCAL_PROFILE, pattern: /\b[A-Z]{4}0[A-Z0-9]{6}\b/gi, confidence: 0.9 }
 ];
+
+/**
+ * Unconditional rules: bare phone numbers and IFSC-shaped codes are blocked
+ * everywhere. Context gating (a nearby "phone"/"ifsc" word) silently let
+ * these leak from visible_text and select options whose payload happened to
+ * omit the trigger word.
+ */
+const UNCONDITIONAL_IDS = new Set(['PHONE_IN', 'IFSC']);
 
 /** Register an additional locally evaluated rule before making requests. */
 export function registerPIIRule(rule) {
@@ -86,8 +93,12 @@ export function findPIIMatches(text, contextHint = '') {
   const context = String(contextHint || text);
   const matches = [];
   for (const rule of PII_RULES) {
-    const contextPattern = rule.context instanceof RegExp ? rule.context : CONTEXT_RULES[rule.context];
-    if (rule.context && (!contextPattern || !new RegExp(contextPattern.source, contextPattern.flags.replace(/g/g, '')).test(context))) continue;
+    // Unconditional rules (bare phone numbers, IFSC codes) skip context
+    // gating entirely so they cannot leak when the trigger word is absent.
+    if (!UNCONDITIONAL_IDS.has(rule.id)) {
+      const contextPattern = rule.context instanceof RegExp ? rule.context : CONTEXT_RULES[rule.context];
+      if (rule.context && (!contextPattern || !new RegExp(contextPattern.source, contextPattern.flags.replace(/g/g, '')).test(context))) continue;
+    }
     const flags = rule.pattern.flags.includes('g') ? rule.pattern.flags : rule.pattern.flags + 'g';
     const pattern = new RegExp(rule.pattern.source, flags);
     for (const match of text.matchAll(pattern)) {

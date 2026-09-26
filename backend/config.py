@@ -1,6 +1,25 @@
 import os
+import logging
 import re
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+
+def _env_int(name, default):
+    try:
+        return int(os.getenv(name, default))
+    except (TypeError, ValueError):
+        logger.warning("Invalid integer for %s; using default %s.", name, default)
+        return default
+
+
+def _env_float(name, default):
+    try:
+        return float(os.getenv(name, default))
+    except (TypeError, ValueError):
+        logger.warning("Invalid number for %s; using default %s.", name, default)
+        return default
 
 
 def _read_api_keys(*names):
@@ -36,8 +55,11 @@ def load_env():
                             if k not in os.environ:
                                 os.environ[k] = v
                 break
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "Could not read env file %s (%s); continuing with defaults.",
+                    env_path, type(exc).__name__
+                )
 
 load_env()
 
@@ -83,6 +105,12 @@ def _reasoning_api_key(base_url):
         return os.getenv("NVIDIA_API_KEY", "")
     if "api.openai.com" in host:
         return os.getenv("OPENAI_API_KEY", "")
+    # An explicitly configured custom endpoint must never receive provider
+    # credentials that belong to a different host: without a matching key,
+    # fail closed instead of leaking (for example) an OpenRouter token to an
+    # arbitrary host.
+    if _CONFIGURED_AI_BASE_URL:
+        return ""
     return (
         (_OPENROUTER_KEYS[0] if _OPENROUTER_KEYS else "") or
         (_HUGGINGFACE_KEYS[0] if _HUGGINGFACE_KEYS else "") or
@@ -98,7 +126,7 @@ def _reasoning_api_key(base_url):
 
 class Settings:
     HOST: str = os.getenv("HOST", "127.0.0.1")
-    PORT: int = int(os.getenv("PORT", 8000))
+    PORT: int = _env_int("PORT", 8000)
 
     # Supports one general reasoning key plus provider-specific keys.
     API_KEY: str = _reasoning_api_key(_CONFIGURED_AI_BASE_URL or _default_ai_base_url())
@@ -114,15 +142,10 @@ class Settings:
     HUGGINGFACE_API_KEYS: tuple = _HUGGINGFACE_KEYS
     GROQ_API_KEYS: tuple = _GROQ_KEYS
     VLM_PROVIDER_ORDER: str = os.getenv("VLM_PROVIDER_ORDER", "openrouter,huggingface,groq")
-    VLM_MAX_ATTEMPTS: int = max(1, int(os.getenv("VLM_MAX_ATTEMPTS", "2")))
-    VLM_REQUEST_TIMEOUT_SECONDS: float = max(1.0, float(os.getenv("VLM_REQUEST_TIMEOUT_SECONDS", "4")))
+    VLM_MAX_ATTEMPTS: int = max(1, _env_int("VLM_MAX_ATTEMPTS", 2))
+    VLM_REQUEST_TIMEOUT_SECONDS: float = max(1.0, _env_float("VLM_REQUEST_TIMEOUT_SECONDS", 4))
     REASONING_MODEL: str = os.getenv("REASONING_MODEL", "gpt-oss-120b")
-    INTERPRETATION_REQUEST_TIMEOUT_SECONDS: float = max(1.0, float(os.getenv("INTERPRETATION_REQUEST_TIMEOUT_SECONDS", "10")))
-    REASONING_REQUEST_TIMEOUT_SECONDS: float = max(1.0, float(os.getenv("REASONING_REQUEST_TIMEOUT_SECONDS", "12")))
-
-    # Browser Agent Settings
-    BROWSER_CDP_ENDPOINT: str = os.getenv("BROWSER_CDP_ENDPOINT", "http://localhost:9222")
-    BROWSER_HEADLESS: bool = os.getenv("BROWSER_HEADLESS", "false").lower() == "true"
-    AGENT_MAX_ITERATIONS: int = int(os.getenv("AGENT_MAX_ITERATIONS", "30"))
+    INTERPRETATION_REQUEST_TIMEOUT_SECONDS: float = max(1.0, _env_float("INTERPRETATION_REQUEST_TIMEOUT_SECONDS", 10))
+    REASONING_REQUEST_TIMEOUT_SECONDS: float = max(1.0, _env_float("REASONING_REQUEST_TIMEOUT_SECONDS", 12))
 
 settings = Settings()

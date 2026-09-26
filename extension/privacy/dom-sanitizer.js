@@ -166,7 +166,20 @@ export class DOMSanitizer {
       if (sanitized.context) sanitized.context = this.sanitizeUserPrompt(sanitized.context);
       if (sanitized.href) sanitized.href = this.sanitizeLink(sanitized.href);
       if (Array.isArray(sanitized.options)) {
-        sanitized.options = sanitized.options.map((o) => this.sanitizeUserPrompt(o));
+        // Options are {text, value, selected} objects; sanitizeUserPrompt
+        // returns non-strings unchanged, so scrub each text field directly.
+        // PII in option text must never reach the server. Values are kept
+        // because the executor matches the live option by value.
+        sanitized.options = sanitized.options.map((o) => {
+          if (typeof o === 'string') return this.sanitizeUserPrompt(o);
+          if (o && typeof o === 'object') {
+            const clean = { ...o };
+            if (typeof clean.text === 'string') clean.text = this.sanitizeUserPrompt(clean.text);
+            if (typeof clean.label === 'string') clean.label = this.sanitizeUserPrompt(clean.label);
+            return clean;
+          }
+          return o;
+        });
       }
 
       // 5. Clean up any internal raw references

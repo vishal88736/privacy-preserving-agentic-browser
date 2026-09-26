@@ -136,15 +136,13 @@ export class GPTOSSClient {
     validateReasonPayload(payload);
 
     try {
-      // A rejected payload is never sent. Treat the rejection like an
-      // unavailable remote reasoner and continue with the grounded local
-      // planner, which can fill configured form fields without network data.
+      // A rejected payload is never sent. A privacy block is surfaced (flag +
+      // thought) while the grounded local planner keeps the task alive; other
+      // failures fall back to the local planner as well.
       this.policyEngine.enforceOutboundSafety(payload);
-      const response = await fetch(`${this.baseUrl}${ServerDefaults.REASON_ENDPOINT}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
+      // AbortController via post(): a hung backend must not block the agent
+      // loop indefinitely (the loop is awaiting this request).
+      const response = await this.post(ServerDefaults.REASON_ENDPOINT, payload);
 
       if (!response.ok) {
         throw new Error(`Reasoning server returned status: ${response.status} ${response.statusText}`);
@@ -165,6 +163,25 @@ export class GPTOSSClient {
       }
       return this.actionParser.parse(data.raw_response || JSON.stringify(data));
     } catch (err) {
+      if (err?.name === 'OutboundPolicyViolationError') {
+        // The payload was never sent. Surface the privacy block (category
+        // names only, never matched values) and continue with the local
+        // planner, which fills configured fields without network data.
+        console.warn('[GPTOSSClient] Outbound privacy block; using grounded local planner.');
+        try {
+          const local = this._localPlannerFallback(task, fusedObservation, taskHistory, taskState);
+          local.privacyBlocked = String(err.message || 'Outbound privacy block').slice(0, 200);
+          local.thought = `[local-fallback] ${local.privacyBlocked} — continuing with the local planner.`;
+          return local;
+        } catch (fallbackErr) {
+          return {
+            thought: `Outbound privacy block: ${err.message}`,
+            action: { action: ActionType.WAIT, risk: RiskLevel.LOW, requires_confirmation: false },
+            isTerminal: false,
+            privacyBlocked: String(err.message || 'Outbound privacy block').slice(0, 200)
+          };
+        }
+      }
       console.warn(`[GPTOSSClient] Remote reasoning unavailable (${err.message}). Using grounded local planner.`);
       try {
         return this._localPlannerFallback(task, fusedObservation, taskHistory, taskState);

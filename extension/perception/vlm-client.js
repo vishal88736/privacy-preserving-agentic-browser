@@ -35,16 +35,35 @@ export class VLMClient {
       // 2. Strict policy engine scan (guarantee no raw secrets leave browser).
       // Vision is optional: on a local policy rejection, continue with the
       // sanitized DOM-only observation instead of aborting the browser task.
+      // The block is flagged so callers/metrics can surface it.
       this.policyEngine.enforceOutboundSafety(payload);
+    } catch (err) {
+      if (err?.name === 'OutboundPolicyViolationError') {
+        console.warn('[VLMClient] Outbound privacy block; using DOM-only observation.');
+        const fallback = this._domOnlyObservation(sanitizedDom);
+        fallback._source = 'DOM_ONLY';
+        fallback._error = String(err?.message || err).slice(0, 200);
+        fallback.privacyBlocked = true;
+        return fallback;
+      }
+      throw err;
+    }
+    try {
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(), 20000);
-      const response = await fetch(`${this.baseUrl}${ServerDefaults.VISION_ENDPOINT}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal: ac.signal
-      });
-      clearTimeout(timer);
+      let response;
+      try {
+        response = await fetch(`${this.baseUrl}${ServerDefaults.VISION_ENDPOINT}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal: ac.signal
+        });
+      } finally {
+        // Always clear the abort timer, even when fetch throws: an uncleared
+        // timer keeps the service worker awake briefly.
+        clearTimeout(timer);
+      }
 
       if (!response.ok) {
         throw new Error(`VLM server responded with status: ${response.status} ${response.statusText}`);

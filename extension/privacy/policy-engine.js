@@ -75,15 +75,22 @@ export class PolicyEngine {
     }
 
     // Use the same registry as the local DOM sanitizer for identifiers,
-    // payment data, and date formats.
-    const piiMatch = findPIIMatches(scannable, scannable).find((candidate) => {
-      if (candidate.id !== 'PHONE_IN') return true;
-      const nearby = scannable.slice(Math.max(0, candidate.index - 24), candidate.index);
-      return /phone|mobile|telephone|tel|contact|LOCAL_PHONE/i.test(nearby) || candidate.value.startsWith('+91');
-    });
+    // payment data, and date formats. Bare Indian mobile numbers and IFSC
+    // codes are unconditional registry rules (no context gating), so they
+    // are blocked even when the payload omits a trigger word.
+    const piiMatch = findPIIMatches(scannable, scannable)[0];
     if (piiMatch) {
+      // Title-case display label: the UI parses this message, and tests
+      // assert /Aadhaar/ (not the uppercase category constant).
+      const labels = {
+        AADHAAR: 'Aadhaar', PAN: 'PAN', SSN: 'SSN', SIN: 'SIN', NIN: 'NIN',
+        NHS: 'NHS', IBAN: 'IBAN', CREDIT_CARD: 'payment card',
+        EMAIL: 'email address', PHONE: 'phone number', DOB: 'date of birth',
+        IFSC: 'IFSC code', PASSWORD: 'password'
+      };
+      const label = labels[piiMatch.category] || String(piiMatch.category || 'sensitive').toLowerCase();
       throw new OutboundPolicyViolationError(
-        `Outbound policy blocked payload: Unredacted ${piiMatch.category} pattern found in request body`,
+        `Outbound policy blocked payload: Unredacted ${label} pattern found in request body`,
         { category: piiMatch.category }
       );
     }

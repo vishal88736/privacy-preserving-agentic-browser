@@ -105,14 +105,26 @@ export class AgentController {
   }
 
   async startTask(userPrompt, tabId) {
-    // Invalidate any previous loop
+    // Invalidate any previous loop. Disarm its pending user prompts first so
+    // the superseded loop's await resolves and it exits via the token check
+    // instead of hanging as a zombie promise or cancelling this new task.
     this.runToken++;
     const token = this.runToken;
     this.activeTabId = tabId;
     this.isPaused = false;
     this.isCancelled = false;
-    this.pendingUserConfirmationResolver = null;
-    this.pendingUserInputResolver = null;
+    if (this.pendingUserConfirmationResolver) {
+      const staleResolve = this.pendingUserConfirmationResolver;
+      this.pendingUserConfirmationResolver = null;
+      staleResolve(false);
+    }
+    if (this.pendingUserInputResolver) {
+      const staleResolve = this.pendingUserInputResolver;
+      this.pendingUserInputResolver = null;
+      staleResolve({ cancelled: true });
+    }
+    taskManager.clearPendingConfirmation();
+    taskManager.clearPendingUserInput();
 
     // Apply current settings to network clients (privacy: same sanitized payloads, new host only)
     const settings = taskManager.settings || {};
@@ -126,6 +138,8 @@ export class AgentController {
     const sanitizedPrompt = defaultDOMSanitizer.sanitizeUserPrompt(userPrompt);
 
     const task = taskManager.createTask(sanitizedPrompt, tabId);
+    // Tag ownership so a stale loop can tell its own task from a newer one.
+    task.runToken = token;
     task.taskState = new TaskState(sanitizedPrompt);
     if (settings.maxSteps) task.maxSteps = settings.maxSteps;
     this.notify('TASK_STARTED', task);
@@ -186,9 +200,15 @@ export class AgentController {
 
     while (task.state !== AgentState.COMPLETED && task.state !== AgentState.FAILED && task.state !== AgentState.CANCELLED) {
       if (token !== this.runToken || this.isCancelled) {
-        taskManager.cancelTask();
-        this.clearOverlays(task.tabId);
-        this.notify('TASK_CANCELLED', task);
+        // A newer task took over (or an explicit cancel already ran). Cancel
+        // the task only if this loop still owns the CURRENT task — cancelling
+        // unconditionally would kill the newer task that just started.
+        const current = taskManager.getTask();
+        if (current && current.runToken === token && current.state !== AgentState.CANCELLED) {
+          taskManager.cancelTask();
+          this.clearOverlays(current.tabId);
+          this.notify('TASK_CANCELLED', current);
+        }
         break;
       }
 
@@ -222,7 +242,7 @@ export class AgentController {
       }
 
       try {
-        const shouldContinue = await this.runSingleStep(task);
+        const shouldContinue = await this.runSingleStep(task, token);
         if (!shouldContinue) break;
       } catch (stepErr) {
         // Deterministic privacy failure: retrying cannot help (same redacted
@@ -240,9 +260,10 @@ export class AgentController {
           this.notify('TASK_FAILED', { error: task.error, hint: stepErr.message });
           break;
         }
-        // Fail fast on restricted URLs
+        // Fail fast on restricted URLs and the extension's own panel tab
         if (stepErr?.message?.includes('Chrome does not permit extensions on internal') ||
-            stepErr?.message?.includes('browser internal page')) {
+            stepErr?.message?.includes('browser internal page') ||
+            stepErr?.message?.includes('cannot run inside its own panel tab')) {
           taskManager.failTask(stepErr.message);
           this.clearOverlays(task.tabId);
           this.notify('TASK_FAILED', { error: task.error, hint: task.hint });
@@ -268,8 +289,10 @@ export class AgentController {
 
   /**
    * Runs one OBSERVE→VERIFY cycle. Returns false when the loop should stop.
+   * `token` is the owning loop's run token; a mismatch after an await means a
+   * newer task took over and this step must not act on (or cancel) it.
    */
-  async runSingleStep(task) {
+  async runSingleStep(task, token = this.runToken) {
     // Check current tab URL and classify what this page allows.
     let currentTab = null;
     try {
@@ -489,7 +512,8 @@ export class AgentController {
       sanitizedDOM,
       {
         viewport: rawDOM.viewport,
-        title: rawDOM.title,
+        // Sanitized copy: the raw title never leaves the device.
+        title: sanitizedDOM.title,
         url: defaultDOMSanitizer.sanitizeUrl(rawDOM.url),
         privacy_redaction_summary: {
           dom_regions: sensitiveCount,
@@ -504,6 +528,9 @@ export class AgentController {
     if (visualObservation._source !== 'DOM_ONLY') {
       taskManager.updatePrivacyMetrics({ serverCallsCount: 1 });
     }
+    if (visualObservation?.privacyBlocked) {
+      taskManager.updatePrivacyMetrics({ privacyBlocks: 1 });
+    }
 
     const objectSummary = localVision.objectDetections.slice(0, 12).map((item) => item.label).join(', ');
     const localVisionNote = `Local ${localVision.model} and OCR checks completed in ${localVision.totalMs} ms; detected objects: ${objectSummary || 'none'}. Masked ${localVision.people.length} people and ${localVision.piiRegions.length} OCR-identified sensitive regions. OCR text was discarded locally.`;
@@ -517,7 +544,8 @@ export class AgentController {
       {
         domain: defaultDOMSanitizer.sanitizeUrl(rawDOM.url),
         url: defaultDOMSanitizer.sanitizeUrl(rawDOM.url),
-        title: rawDOM.title,
+        // Sanitized copy: the raw title never leaves the device.
+        title: sanitizedDOM.title,
         viewport: rawDOM.viewport,
         scroll: extras.scroll,
         headings: extras.headings,
@@ -575,6 +603,7 @@ export class AgentController {
     }
 
     if (planResult.remoteCallMade !== false) taskManager.updatePrivacyMetrics({ serverCallsCount: 1 });
+    if (planResult?.privacyBlocked) taskManager.updatePrivacyMetrics({ privacyBlocks: 1 });
     let proposedAction = planResult.action;
 
     // A model's DONE is not evidence that a form is complete. Reconcile the
@@ -665,6 +694,10 @@ export class AgentController {
         }, 5 * 60 * 1000);
       });
 
+      // Superseded by a newer task: the new loop owns the task state now.
+      // Acting here (clearing its state or cancelling) would kill it.
+      if (token !== this.runToken) return false;
+
       taskManager.clearPendingConfirmation();
 
       if (!userApproved) {
@@ -707,6 +740,9 @@ export class AgentController {
           }
         }, 5 * 60 * 1000);
       });
+
+      // Superseded by a newer task: the new loop owns the task state now.
+      if (token !== this.runToken) return false;
 
       taskManager.clearPendingUserInput();
 
@@ -832,6 +868,14 @@ export class AgentController {
       stepNumber: task.currentStep,
       thought: planResult.thought,
       action: proposedAction,
+      result: execResult,
+      diagnostic: {
+        task_understanding: planResult.task_understanding,
+        page_understanding: planResult.page_understanding,
+        current_state: planResult.current_state,
+        task_state: task.taskState?.toPayload(),
+        page_state: task.pageState,
+      },
       success: true,
       timestamp: Date.now()
     });

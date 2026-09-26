@@ -66,10 +66,6 @@ await Promise.all([
 
 const tfBundle = path.join(transformerDir, 'transformers.web.min.js');
 let tfContent = await readFile(tfBundle, 'utf8');
-const targetToken = 'Mistral' + '3ForConditionalGeneration';
-if (tfContent.includes(targetToken)) {
-  tfContent = tfContent.replaceAll(targetToken, 'Mistral3_ForConditionalGeneration');
-}
 tfContent = tfContent.replaceAll('from"onnxruntime-web/webgpu"', 'from"../onnxruntime-web/ort.all.bundle.min.mjs"');
 tfContent = tfContent.replaceAll('from"onnxruntime-common"', 'from"../onnxruntime-web/ort.all.bundle.min.mjs"');
 await writeFile(tfBundle, tfContent, 'utf8');
