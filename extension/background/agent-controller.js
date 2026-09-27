@@ -671,6 +671,17 @@ export class AgentController {
               people_regions: localVision?.people.length || 0,
               screenshot_withheld: defaultScreenshotSanitizer.lastRedactionStatus === 'withheld',
               unresolved_sensitive_categories: localVision?.unlocatedSensitiveCategories || []
+            },
+            // Attestation for the bytes actually attached to this request. The
+            // outbound policy engine blocks the image unless this record says
+            // redaction covered it and local visual analysis audited it, so a
+            // silent upstream redaction failure cannot reach the wire.
+            redaction_audit: {
+              screenshot_withheld: defaultScreenshotSanitizer.lastRedactionStatus === 'withheld',
+              coverage_established: screenshotPrivacyAudit.coverageEstablished === true,
+              local_vision_completed: screenshotPrivacyAudit.localVisionCompleted === true,
+              unlocated_sensitive_text: screenshotPrivacyAudit.unlocatedSensitiveText === true,
+              masked_regions: screenshotPrivacyAudit.maskedCount || 0
             }
           }
       )))
@@ -735,6 +746,10 @@ export class AgentController {
 
     // STEP 4.5: TASK-CONDITIONAL PAGE STATE MODELING
     task.pageState = pageState;
+    // Retained for the ASK_USER answer path, which runs a step later and must
+    // gate the user's own answer against the same observation the prompt was
+    // built from rather than re-deriving one.
+    this._lastFusedObservation = fusedObservation;
     console.log("[PAGE_OBSERVED]", JSON.stringify(pageState));
 
     // STEP 5: REASONING & PLANNING
@@ -987,6 +1002,16 @@ export class AgentController {
                 };
               } else {
                 answerAction = { action: ActionType.TYPE, target: { element_id: fieldId }, value: String(val) };
+              }
+              // Answers used to go straight to the executor, bypassing both the
+              // grounding validator and the risk gate. That made this the one
+              // path where an irreversible action could be dispatched with no
+              // risk evaluation: the ambiguity modal offers a dropdown of
+              // semantically-equivalent candidates, which the page and the VLM
+              // both influence, and picking "Pay ₹49,999" from it executed a
+              // bare click that the risk gate would have required approval for.
+              if (!(await this._gateUserAnswer(task, token, answerAction, fieldId, fieldMeta))) {
+                continue;
               }
               const answerResult = await this._awaitOwned(task, token, defaultActionExecutor.execute(task.tabId, answerAction));
               if (answerResult?.success) resolvedFieldIds.push(fieldId);
@@ -1557,6 +1582,82 @@ export class AgentController {
         });
       }
     } catch { /* non-fatal */ }
+  }
+
+  /**
+   * Run a user's own answer to an ASK_USER prompt through the same two gates a
+   * model-proposed action goes through.
+   *
+   * The answer arrives as a plain element id and a string, and it used to be
+   * dispatched directly to the executor. That made it the only path capable of
+   * performing an irreversible action with no grounding check and no risk
+   * evaluation, and the answer is not purely user-authored either: the
+   * ambiguity modal's candidate list is built from page and VLM output, so
+   * "click the one the page offered" can select a payment button.
+   *
+   * Returns true when the answer may be executed.
+   */
+  async _gateUserAnswer(task, token, answerAction, fieldId, fieldMeta) {
+    const preValidation = defaultActionValidator.validatePreExecution(answerAction, this._lastFusedObservation || {}, task?.taskState);
+    if (!preValidation.valid) {
+      console.warn(`[AgentController] User answer for "${fieldId}" failed validation: ${preValidation.reason}`);
+      taskManager.recordStep({
+        thought: `The answer for "${fieldId}" no longer matches the page.`,
+        action: answerAction,
+        success: false,
+        error: preValidation.reason
+      }, task);
+      return false;
+    }
+
+    const targetDom = (this._lastFusedObservation?.elements || [])
+      .find((element) => element.id === answerAction.target?.element_id)?.dom || null;
+    const riskAssessment = defaultRiskGate.evaluate(answerAction, {
+      targetElement: answerAction.target,
+      targetDom,
+      observationElements: this._lastFusedObservation?.elements || []
+    });
+
+    if (!riskAssessment.allowed) {
+      taskManager.failTask(`Safety Gate Blocked Action: ${riskAssessment.reason}`, task);
+      this.clearOverlays(task.tabId);
+      this.notify('TASK_FAILED', { error: task.error, hint: task.hint });
+      return false;
+    }
+
+    // An answer the user typed is not the same as an action the model chose,
+    // so a high-risk answer is applied directly: the user just saw the field
+    // and supplied the value themselves. What the gate must catch is an action
+    // the answer merely *selects* — a candidate click — because that one is
+    // chosen from page-influenced options and is never something the user
+    // reviewed the consequences of.
+    const isCandidateSelection = answerAction.action === ActionType.CLICK;
+    if (isCandidateSelection && (riskAssessment.requiresConfirmation || riskAssessment.risk === RiskLevel.CRITICAL)) {
+      const confirmationId = globalThis.crypto?.randomUUID?.() || `confirm_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+      taskManager.setPendingConfirmation(answerAction, riskAssessment.reason, { confirmationId, taskId: task.id }, task);
+      this.notify('STATE_CHANGED', { state: AgentState.WAITING_FOR_USER });
+      this.notify('CONFIRMATION_REQUIRED', {
+        confirmationId,
+        taskId: task.id,
+        action: { ...answerAction, risk: riskAssessment.risk },
+        reason: riskAssessment.reason,
+        privacySummary: {
+          dataKeptLocal: 'No secrets disclosed',
+          dataSharedWithServer: 'Sanitized layout metadata only'
+        }
+      });
+      const approved = await this._awaitOwned(task, token, new Promise((resolve) => {
+        this.pendingUserConfirmationResolver = resolve;
+      }));
+      taskManager.clearPendingConfirmation(task);
+      if (!approved) {
+        taskManager.cancelTask(task);
+        this.clearOverlays(task.tabId);
+        this.notify('TASK_CANCELLED', { reason: 'User declined the selected action' });
+        return false;
+      }
+    }
+    return true;
   }
 
   handleUserConfirmation(payload = {}) {

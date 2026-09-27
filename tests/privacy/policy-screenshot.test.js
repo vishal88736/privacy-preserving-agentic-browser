@@ -16,10 +16,19 @@ function fakeScreenshotDataUrl(chars = 60000, seed = 42) {
   return `data:image/png;base64,${out}`;
 }
 
+// A payload that would actually be sent: the image carries the redaction
+// attestation the policy engine now requires. Without it the engine rejects
+// the image outright rather than skipping it, so a screenshot can no longer
+// ride along unverified.
 function visionPayload(shot, extra = {}) {
   return {
     task_id: 'task_1',
     sanitized_screenshot: shot,
+    redaction_audit: {
+      screenshot_withheld: false,
+      coverage_established: true,
+      local_vision_completed: true
+    },
     sanitized_dom: { elements: [{ id: 'el_1', tag: 'input', label: 'Search' }] },
     metadata: { timestamp: 0, title: 'Test', url: 'https://example.com/' },
     timestamp: 0,
@@ -60,5 +69,29 @@ test('PolicyEngine - raw vault secret in text is still blocked beside a screensh
   assert.throws(
     () => engine.enforceOutboundSafety(visionPayload(shot, { text: `leak ${secrets[firstKey]} end` })),
     /raw value/
+  );
+});
+
+test('PolicyEngine - an unredacted screenshot cannot ride along in a vision payload', () => {
+  // The screenshot is the largest artifact in the request and the one most
+  // likely to carry PII. It used to be deleted from the scanned string before
+  // any check ran, so a silent upstream redaction failure still reached the
+  // wire. It must now arrive with proof, or not at all.
+  const engine = new PolicyEngine();
+  const shot = fakeScreenshotDataUrl();
+  const { redaction_audit, ...withoutAttestation } = visionPayload(shot);
+  assert.throws(
+    () => engine.enforceOutboundSafety(withoutAttestation),
+    /without a local redaction attestation/
+  );
+});
+
+test('PolicyEngine - a withheld screenshot is never transmitted', () => {
+  const engine = new PolicyEngine();
+  assert.throws(
+    () => engine.enforceOutboundSafety(visionPayload(fakeScreenshotDataUrl(), {
+      redaction_audit: { screenshot_withheld: true, coverage_established: true, local_vision_completed: true }
+    })),
+    /withheld/
   );
 });

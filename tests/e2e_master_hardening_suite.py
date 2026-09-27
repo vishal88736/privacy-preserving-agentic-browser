@@ -11,10 +11,31 @@ import time
 import json
 import re
 import tempfile
-from playwright.sync_api import sync_playwright
+from pathlib import Path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from e2e_support import (MissingPrerequisite, require_browser, require_backend,
+                          require_playwright, resolve_extension_path, run_or_skip)
 
-EXT_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "extension"))
-BROWSER_BIN = os.environ.get("PRIVAGENT_BROWSER_BIN")
+# Resolved eagerly so the paths are plain module constants for the rest of the
+# suite, but a missing browser must not abort the import: CI needs to reach the
+# __main__ block to report an explicit skip. _PREREQ holds the reason and the
+# entry point re-raises it inside run_or_skip().
+_PREREQ = None
+try:
+    EXT_PATH = resolve_extension_path()
+    BROWSER_BIN = require_browser()
+    CHROMIUM_EXEC = BROWSER_BIN
+except MissingPrerequisite as _exc:
+    _PREREQ = _exc
+    EXT_PATH = str(Path(__file__).resolve().parents[1] / "extension")
+    BROWSER_BIN = None
+    CHROMIUM_EXEC = None
+
+
+def _ensure_prereqs():
+    """Re-raise a deferred prerequisite failure at call time."""
+    if _PREREQ is not None:
+        raise _PREREQ
 
 SENSITIVE_TEST_VALUES = [
     "4821 7392 0184",       # Aadhaar
@@ -56,7 +77,7 @@ def setup_browser(p):
 
 def test_1_build_and_loading():
     print("\n[TEST 1] Build & Extension Loading...")
-    with sync_playwright() as p:
+    with require_playwright()() as p:
         context, ext_id = setup_browser(p)
         assert ext_id, "Extension ID could not be detected"
         print(f"  ✔ Extension loaded successfully with ID: {ext_id}")
@@ -88,7 +109,7 @@ def test_1_build_and_loading():
 
 def test_2_normal_form():
     print("\n[TEST 2] Normal Form Loop (Page A)...")
-    with sync_playwright() as p:
+    with require_playwright()() as p:
         context, ext_id = setup_browser(p)
         page = context.pages[0] if context.pages else context.new_page()
         page.goto("http://localhost:5000/page-a-normal-form.html")
@@ -130,7 +151,7 @@ def test_2_normal_form():
 
 def test_3_sensitive_form():
     print("\n[TEST 3] Empty vault requests user input and leaves sensitive form fields untouched...")
-    with sync_playwright() as p:
+    with require_playwright()() as p:
         context, ext_id = setup_browser(p)
         page = context.pages[0] if context.pages else context.new_page()
         page.goto("http://localhost:5000/page-b-sensitive-form.html")
@@ -154,7 +175,7 @@ def test_3_sensitive_form():
 
 def test_4_visual_ui():
     print("\n[TEST 4] Visual UI Grounding (Page C)...")
-    with sync_playwright() as p:
+    with require_playwright()() as p:
         context, ext_id = setup_browser(p)
         page = context.pages[0] if context.pages else context.new_page()
         page.goto("http://localhost:5000/page-c-visual-ui.html")
@@ -188,7 +209,7 @@ def test_4_visual_ui():
 
 def test_5_document_upload():
     print("\n[TEST 5] Document Upload asks user to select a real local file directly...")
-    with sync_playwright() as p:
+    with require_playwright()() as p:
         context, ext_id = setup_browser(p)
         page = context.pages[0] if context.pages else context.new_page()
         page.goto("http://localhost:5000/page-d-document-upload.html")
@@ -209,7 +230,7 @@ def test_5_document_upload():
 
 def test_6_prompt_injection():
     print("\n[TEST 6] Prompt Injection Defense (Page E)...")
-    with sync_playwright() as p:
+    with require_playwright()() as p:
         context, ext_id = setup_browser(p)
         page = context.pages[0] if context.pages else context.new_page()
         page.goto("http://localhost:5000/page-e-prompt-injection.html")
@@ -254,7 +275,7 @@ def test_6_prompt_injection():
 
 def test_7_stop_and_take_control():
     print("\n[TEST 7] Stop Agent & Manual Take Control...")
-    with sync_playwright() as p:
+    with require_playwright()() as p:
         context, ext_id = setup_browser(p)
         page = context.pages[0] if context.pages else context.new_page()
         page.goto("http://localhost:5000/page-a-normal-form.html")
@@ -286,7 +307,7 @@ def test_7_stop_and_take_control():
 
 def test_8_page_navigation():
     print("\n[TEST 8] Page Navigation & State Synchronization...")
-    with sync_playwright() as p:
+    with require_playwright()() as p:
         context, ext_id = setup_browser(p)
         page = context.pages[0] if context.pages else context.new_page()
         page.goto("http://localhost:5000/page-a-normal-form.html")
@@ -310,7 +331,7 @@ def test_8_page_navigation():
 
 def test_9_service_worker_resilience():
     print("\n[TEST 9] Service Worker Resilience & Session State Check...")
-    with sync_playwright() as p:
+    with require_playwright()() as p:
         context, ext_id = setup_browser(p)
         sp = context.new_page()
         sp.goto(f"chrome-extension://{ext_id}/sidepanel/index.html")
@@ -331,7 +352,7 @@ def test_9_service_worker_resilience():
 def test_10_network_privacy_audit():
     print("\n[TEST 10] Extension-to-Backend Synthetic Privacy Sentinel Audit...")
     outbound_payloads = []
-    with sync_playwright() as p:
+    with require_playwright()() as p:
         context, ext_id = setup_browser(p)
 
         def handle_request(req):
@@ -427,7 +448,7 @@ def wait_for_state_or_input(panel, timeout_seconds=50):
 
 def test_11_complex_forms():
     print("\n[TEST 11] Empty profile requests user input and does not loop on SCROLL...")
-    with sync_playwright() as p:
+    with require_playwright()() as p:
         context, ext_id = setup_browser(p)
         page = context.pages[0] if context.pages else context.new_page()
         page.goto("http://localhost:5000/complex-forms.html")
@@ -471,7 +492,7 @@ def test_12_saved_profile_mixed_form():
         "LOCAL_GENDER": "Male",
         "LOCAL_TERMS": "yes"
     }
-    with sync_playwright() as p:
+    with require_playwright()() as p:
         context, ext_id = setup_browser(p)
         page = context.pages[0] if context.pages else context.new_page()
         page.goto("http://localhost:5000/complex-forms.html")
@@ -597,6 +618,11 @@ def run_master_suite():
     return results
 
 if __name__ == "__main__":
-    res = run_master_suite()
-    all_pass = all(v == "PASS" for v in res.values())
-    sys.exit(0 if all_pass else 1)
+    def _main():
+        _ensure_prereqs()
+        # These assertions are about real model calls, so the backend must be up.
+        require_backend()
+        res = run_master_suite()
+        all_pass = all(v == "PASS" for v in res.values())
+        return 0 if all_pass else 1
+    sys.exit(run_or_skip(_main, "e2e_master_hardening_suite"))

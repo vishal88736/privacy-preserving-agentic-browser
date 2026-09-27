@@ -34,29 +34,67 @@ export class PolicyEngine {
     // Strip machine-generated numeric metadata that is never PII so the
     // phone/card patterns cannot false-positive on it (e.g. Date.now()
     // timestamps are 13 digits and contain 10-digit substrings starting 6-9).
-    // Also strip embedded base64 image bytes (screenshots): pattern-matching
-    // PAN/phone/card shapes inside base64 is meaningless — the bytes are an
-    // encoding, not text — and randomly matches (e.g. "QaYvq1115D" tripping
-    // the PAN pattern), killing benign tasks. Screenshot secrecy is enforced
-    // by the fail-closed canvas redaction before this point, and every DOM /
-    // text / metadata field below remains fully scanned.
-    const scannable = serialized
-      .replace(/"timestamp"\s*:\s*\d+/g, '"timestamp":0')
-      .replace(/"timestamp"\s*:\s*"\d+"/g, '"timestamp":"0"')
-      .replace(/data:[a-z]+\/[^"\\]*;base64,[A-Za-z0-9+/=]+/gi, 'data:image/omitted');
+    const scannable = serialized.replace(/"timestamp"\s*:\s*\d+/g, '"timestamp":0')
+      .replace(/"timestamp"\s*:\s*"\d+"/g, '"timestamp":"0"');
+
+    // Screenshots are NOT excluded from this check.
+    //
+    // Base64 bytes cannot be pattern-matched for PAN/card/phone shapes — they
+    // are an encoding, not text, and matching them randomly trips rules like
+    // "QaYvq1115D" and kills benign tasks. That part is still true, and it is
+    // why pixel secrecy cannot be re-derived here.
+    //
+    // But the old behaviour was to *delete* the screenshot from the scanned
+    // string and proceed, which made the largest and highest-risk artifact in
+    // every payload the one thing with zero verification on the final local
+    // gate. If upstream redaction silently failed, nothing here would notice.
+    //
+    // Instead every image is now required to carry an explicit redaction
+    // attestation, and a payload containing an unattested image is rejected
+    // outright. The claim travels with the bytes instead of being assumed.
+    const images = collectImageDataUrls(payload);
+    if (images.size) {
+      const attestations = collectRedactionAttestations(payload);
+      for (const image of images) {
+        const attestation = attestations.get(image);
+        if (!attestation) {
+          throw new OutboundPolicyViolationError(
+            'Outbound policy blocked payload: an image was included without a local redaction attestation.',
+            { reason: 'unattested_image' }
+          );
+        }
+        if (attestation.withheld) {
+          throw new OutboundPolicyViolationError(
+            'Outbound policy blocked payload: local redaction withheld this image; it must not be transmitted.',
+            { reason: 'withheld_image' }
+          );
+        }
+        if (!attestation.coverageEstablished) {
+          throw new OutboundPolicyViolationError(
+            'Outbound policy blocked payload: local redaction could not establish coverage over this image.',
+            { reason: 'incomplete_coverage' }
+          );
+        }
+        if (!attestation.localVisionCompleted) {
+          throw new OutboundPolicyViolationError(
+            'Outbound policy blocked payload: this image was not audited by local visual analysis.',
+            { reason: 'unaudited_image' }
+          );
+        }
+      }
+    }
 
     const textLeaves = [];
     const collectText = (value) => {
       if (typeof value === 'string') {
-        // Encoded screenshot bytes are opaque to text patterns. Screenshot
-        // coverage is enforced locally by OCR, redaction, and fail-closed
-        // withholding before the payload reaches this policy check.
+        // Base64 image bytes are opaque to text patterns; the checks above
+        // establish instead that each image was redacted and audited.
         if (!/^data:image\/[^;]+;base64,/i.test(value)) textLeaves.push(value);
       }
       else if (Array.isArray(value)) value.forEach(collectText);
       else if (value && typeof value === 'object') Object.values(value).forEach(collectText);
     };
-    collectText(typeof payload === 'string' ? scannable : payload);
+    collectText(payload);
     const normalizeSecretText = (value) => String(value).normalize('NFKC')
       .replace(/[\p{Cf}]/gu, '').toLowerCase().replace(/\s+/g, ' ').trim();
     const escapePattern = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -122,6 +160,62 @@ export class PolicyEngine {
 
     return true;
   }
+}
+
+/**
+ * Find every inline base64 image in a payload, keyed by the exact string.
+ * @returns {Set<string>}
+ */
+function collectImageDataUrls(payload) {
+  const found = new Set();
+  const walk = (value) => {
+    if (typeof value === 'string') {
+      if (/^data:image\/[^;]+;base64,/i.test(value)) found.add(value);
+    } else if (Array.isArray(value)) {
+      value.forEach(walk);
+    } else if (value && typeof value === 'object') {
+      Object.values(value).forEach(walk);
+    }
+  };
+  walk(payload);
+  return found;
+}
+
+/**
+ * Collect the redaction attestation that must accompany each image.
+ *
+ * The controller records the local privacy audit it actually performed, and
+ * the VLM client attaches that record next to the bytes it is about to send.
+ * Requiring it here means the final local gate verifies the upstream claim
+ * instead of assuming redaction succeeded.
+ *
+ * @returns {Map<string, {withheld: boolean, coverageEstablished: boolean, localVisionCompleted: boolean}>}
+ */
+function collectRedactionAttestations(payload) {
+  const attestations = new Map();
+  const walk = (value) => {
+    if (Array.isArray(value)) {
+      value.forEach(walk);
+      return;
+    }
+    if (!value || typeof value !== 'object') return;
+    const audit = value.redaction_audit || value.privacy_redaction_summary;
+    if (audit && typeof audit === 'object') {
+      const image = value.image || value.sanitized_screenshot || value.screenshot;
+      if (typeof image === 'string' && /^data:image\/[^;]+;base64,/i.test(image)) {
+        attestations.set(image, {
+          // An explicit `screenshot_withheld` flag means the sanitizer replaced
+          // the image with a placeholder; those bytes must never be sent.
+          withheld: audit.screenshot_withheld === true || audit.withheld === true,
+          coverageEstablished: audit.coverage_established !== false,
+          localVisionCompleted: audit.local_vision_completed !== false
+        });
+      }
+    }
+    Object.values(value).forEach(walk);
+  };
+  walk(payload);
+  return attestations;
 }
 
 export const defaultPolicyEngine = new PolicyEngine();

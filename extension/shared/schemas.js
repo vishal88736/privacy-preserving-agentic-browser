@@ -24,8 +24,11 @@ export function validateAction(action) {
     throw new ValidationError(`Invalid action type: ${action.action}. Allowed types: ${Object.values(ActionType).join(', ')}`);
   }
 
-  // Reject arbitrary script execution or eval immediately
-  if ('eval' in action || 'script' in action || 'function' in action) {
+  // Reject arbitrary script execution or eval immediately.
+  // Object.hasOwn, not `in`: `in` walks the prototype chain, so a polluted
+  // Object.prototype would both trip this check spuriously and let an action
+  // with no own `action` property validate against inherited fields.
+  if (['eval', 'script', 'function'].some((key) => Object.hasOwn(action, key))) {
     throw new ValidationError('Security violation: Arbitrary script execution is strictly forbidden');
   }
 
@@ -45,8 +48,21 @@ export function validateAction(action) {
     if (!action.target || typeof action.target !== 'object') {
       throw new ValidationError(`Action ${action.action} requires a valid target object`);
     }
-    if (!action.target.element_id && !action.target.coordinates) {
-      throw new ValidationError(`Target must provide element_id or coordinates`);
+    // A target must be an identified element. Accepting raw viewport
+    // coordinates as an alternative would skip every grounding check: there is
+    // no element to compare against the observation, so the semantic
+    // compatibility gate, the disabled check, the staleness check and the risk
+    // gate's DOM inspection are all bypassed, and the executor clicks whatever
+    // occupies those pixels. Coordinates may accompany an element_id as a hint
+    // for scrolling, but they can never stand in for one.
+    if (!action.target.element_id || typeof action.target.element_id !== 'string') {
+      throw new ValidationError(`Target must provide an element_id identifying a page element`);
+    }
+    if (action.target.coordinates !== undefined) {
+      const coords = action.target.coordinates;
+      if (!Array.isArray(coords) || coords.length !== 2 || !coords.every((n) => typeof n === 'number' && Number.isFinite(n))) {
+        throw new ValidationError('Target coordinates must be a finite [x, y] pair when present');
+      }
     }
   }
 

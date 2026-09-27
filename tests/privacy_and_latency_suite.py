@@ -10,11 +10,30 @@ import sys
 import time
 import json
 import re
-from playwright.sync_api import sync_playwright
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from e2e_support import (MissingPrerequisite, require_browser, require_backend,
+                          require_playwright, resolve_extension_path, run_or_skip)
 
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-EXT_PATH = os.path.join(REPO_ROOT, "extension")
-BROWSER_BIN = os.environ.get("PRIVAGENT_BROWSER_BIN")
+# Resolved eagerly so the paths are plain module constants for the rest of the
+# suite, but a missing browser must not abort the import: CI needs to reach the
+# __main__ block to report an explicit skip. _PREREQ holds the reason and the
+# entry point re-raises it inside run_or_skip().
+_PREREQ = None
+try:
+    EXT_PATH = resolve_extension_path()
+    BROWSER_BIN = require_browser()
+    CHROMIUM_EXEC = BROWSER_BIN
+except MissingPrerequisite as _exc:
+    _PREREQ = _exc
+    EXT_PATH = str(REPO_ROOT / "extension") if "REPO_ROOT" in dir() else ""
+    BROWSER_BIN = None
+    CHROMIUM_EXEC = None
+
+
+def _ensure_prereqs():
+    """Re-raise a deferred prerequisite failure at call time."""
+    if _PREREQ is not None:
+        raise _PREREQ
 USER_DATA = "/tmp/test_chrome_profile_privagent_audit"
 
 SENSITIVE_TEST_VALUES = [
@@ -36,7 +55,7 @@ def run_privacy_and_latency_audit():
     requests_by_identity = {}
     latencies = {}
 
-    with sync_playwright() as p:
+    with require_playwright()() as p:
         context = p.chromium.launch_persistent_context(
             user_data_dir=USER_DATA,
             executable_path=BROWSER_BIN,
@@ -211,5 +230,4 @@ def run_privacy_and_latency_audit():
     return True
 
 if __name__ == "__main__":
-    ok = run_privacy_and_latency_audit()
-    sys.exit(0 if ok else 1)
+    sys.exit(run_or_skip(lambda: (_ensure_prereqs(), require_backend(), 0 if run_privacy_and_latency_audit() else 1)[2], "privacy_and_latency_suite"))

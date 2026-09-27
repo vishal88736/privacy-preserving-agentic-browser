@@ -33,3 +33,76 @@ jobs:
           cache-dependency-path: backend/requirements.txt
       - run: python -m pip install -r backend/requirements.txt
       - run: python -m unittest discover -s tests/security -p 'test_*.py'
+
+  # The Playwright suites need a real Chromium and (for the model-backed ones) a
+  # running backend with a provider key. Both are secrets or heavy downloads, so
+  # this job runs only when the repository secrets are present, and each suite
+  # reports an explicit skip rather than a traceback when something is missing.
+  #
+  # The browser-only suite (visual_qa_sidepanel) needs neither the backend nor a
+  # key, so it is safe to run on every push.
+  e2e-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: python -m pip install -r backend/requirements.txt
+      - run: python -m playwright install --with-deps chromium
+      - name: Side panel visual QA (no backend required)
+        run: python tests/visual_qa_sidepanel.py
+
+  e2e-model:
+    needs: backend-security
+    if: ${{ secrets.GROQ_API_KEY != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PRIVAGENT_BACKEND_URL: http://localhost:8000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: python -m pip install -r backend/requirements.txt
+      - run: python -m playwright install --with-deps chromium
+      - name: Start the backend
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          REASONING_MODEL: ${{ vars.REASONING_MODEL || 'gpt-oss-120b' }}
+          VLM_MODEL: ${{ vars.VLM_MODEL || 'qwen/qwen2.5-vl-72b-instruct' }}
+          # The suites drive the extension against localhost; CORS and the shared
+          # secret are both satisfied by loopback binding plus this token.
+          BACKEND_SHARED_SECRET: ${{ secrets.BACKEND_SHARED_SECRET }}
+          HOST: 127.0.0.1
+          PORT: '8000'
+        run: |
+          python backend/server.py &
+          for _ in $(seq 1 30); do
+            if curl -fsS http://localhost:8000/health >/dev/null 2>&1; then
+              echo "backend up"; exit 0
+            fi
+            sleep 1
+          done
+          echo "backend did not become healthy"; exit 1
+      - name: Start the local test-page server
+        run: python test-server/app.py &
+      - name: Privacy and latency audit
+        run: python tests/privacy_and_latency_suite.py
+      - name: Master hardening suite
+        run: python tests/e2e_master_hardening_suite.py
+      - name: Full e2e suite
+        run: python tests/e2e_full_suite.py
+      - name: Upload QA screenshots
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-screenshots
+          path: tests/qa_screenshots/
+          if-no-files-found: ignore

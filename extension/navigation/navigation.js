@@ -178,7 +178,53 @@ export function validateNavigationUrl(url) {
   if (parsed.username || parsed.password) {
     return { valid: false, normalizedUrl: null, host: null, reason: 'Credentialed URLs are not allowed.' };
   }
+  const internalReason = internalHostReason(host);
+  if (internalReason) {
+    return { valid: false, normalizedUrl: null, host: null, reason: internalReason };
+  }
   return { valid: true, normalizedUrl: parsed.toString(), host, reason: null };
+}
+
+/**
+ * Reject destinations that are not public internet hosts.
+ *
+ * The agent navigates with the user's own network position and cookies, so a
+ * model-supplied or page-influenced URL is a server-side request forgery
+ * primitive against everything the user can reach: the cloud instance metadata
+ * service hands out credentials to anything on the link, and a LAN address
+ * reaches the user's router, NAS, and admin panels. Neither is something a user
+ * asking the agent to "open example.com" ever intends.
+ *
+ * Returns a rejection reason, or null when the host is a public one.
+ */
+function internalHostReason(host) {
+  // Bracketed IPv6 literals survive URL parsing in host; [::1] is loopback.
+  const bare = host.replace(/^\[|\]$/g, '');
+  if (bare === 'localhost' || bare.endsWith('.localhost') || bare.endsWith('.local') || bare.endsWith('.internal') || bare.endsWith('.home.arpa')) {
+    return 'Navigation to a local or internal hostname is not allowed.';
+  }
+  // IPv6 unique-local (fc00::/7) and link-local (fe80::/10).
+  if (/^f[cd][0-9a-f]{2}:/i.test(bare) || /^fe[89ab][0-9a-f]:/i.test(bare)) {
+    return 'Navigation to a private IPv6 address is not allowed.';
+  }
+  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(bare)) {
+    // Not an IPv4 literal. Any other single-label host is a local-network name.
+    if (!bare.includes('.')) return 'Navigation to a local hostname is not allowed.';
+    return null;
+  }
+  const octets = bare.split('.').map((part) => Number(part));
+  if (octets.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return null;
+  const [a, b] = octets;
+  if (a === 0) return 'Navigation to a 0.0.0.0/8 address is not allowed.';
+  if (a === 10) return 'Navigation to a private 10.0.0.0/8 address is not allowed.';
+  if (a === 127) return 'Navigation to a loopback 127.0.0.0/8 address is not allowed.';
+  if (a === 169 && b === 254) return 'Navigation to a link-local 169.254.0.0/16 address is not allowed.';
+  if (a === 172 && b >= 16 && b <= 31) return 'Navigation to a private 172.16.0.0/12 address is not allowed.';
+  if (a === 192 && b === 168) return 'Navigation to a private 192.168.0.0/16 address is not allowed.';
+  if (a === 100 && b >= 64 && b <= 127) return 'Navigation to a carrier-grade NAT 100.64.0.0/10 address is not allowed.';
+  if (a === 192 && b === 0) return 'Navigation to a 192.0.0.0/24 special-purpose address is not allowed.';
+  if (a === 198 && (b === 18 || b === 19)) return 'Navigation to a benchmarking 198.18.0.0/15 address is not allowed.';
+  return null;
 }
 
 function normalizeHostForCompare(url) {

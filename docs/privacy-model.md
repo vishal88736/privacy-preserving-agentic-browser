@@ -39,7 +39,21 @@ The background sends each captured screenshot to the open extension side panel f
 
 ## Vault and documents
 
-Vault values are user-configured and stored in `chrome.storage.local`. This module does not encrypt them at rest, derive a key from a PIN, or guarantee memory erasure. The vault starts empty, accepts built-in values and `LOCAL_CUSTOM_*` text keys, and rejects other key formats and non-text values. Custom rule registration is code-configured through `registerPIIRule` in `extension/privacy/pii-rules.js`.
+Vault values are user-configured and held in memory as plaintext, because the executor needs the real value at the moment it writes into a page. What is written to `chrome.storage.local`, however, is AES-256-GCM ciphertext.
+
+The key is generated once as a **non-extractable** `CryptoKey` and persisted in IndexedDB. IndexedDB can hold the key handle but cannot serialise its material, so the key bytes exist in no readable form — not in IndexedDB, not in `chrome.storage.local`, not in the profile directory on disk. Each value gets a fresh 12-byte IV per write, because GCM under a reused IV leaks plaintext relationships. A pre-existing plaintext vault is migrated on first load and the plaintext record is deleted.
+
+What this does and does not cover:
+
+- **Covers** a stolen profile directory, a backup or synced copy, and any other process reading those files as the same OS user.
+- **Does not cover** malware, or a devtools session on the extension's own origin. A key that cannot be exported is not a key that cannot be used: anything that can run code as this extension can ask the browser to decrypt. The honest claim is "not readable as data at rest", not "unbreakable".
+- **No user passphrase.** The key is not derived from a PIN, so there is nothing for a user to forget and no separate secret to protect. That is a deliberate trade: it buys key-material safety at the cost of the passphrase-based protection that would also resist code running as this extension.
+- If Web Crypto or IndexedDB is unavailable, the vault **refuses to persist** rather than silently falling back to plaintext writes.
+- A failed decrypt (tampered or corrupted record) is reported and the whole vault is withheld, rather than returning a partial set that could be mistaken for a complete profile.
+
+The backend shared secret is stored the same way, in its own encrypted record, and is never written into the settings blob.
+
+The vault starts empty, accepts `LOCAL_CUSTOM_*` text keys, and rejects other key formats and non-text values. Custom rule registration is code-configured through `registerPIIRule` in `extension/privacy/pii-rules.js`.
 
 Real local-document selection is not implemented. A `LOCAL_DOCUMENT` action fails closed. A user can select a file directly on the website; that file is handled by the website and is outside this extension's document-privacy guarantee. The old backend `/agent` file/screenshot route is removed.
 
@@ -60,7 +74,7 @@ The controller captures a screenshot on every observation, requires the local vi
 | Sensitive data never leaves the device | **NOT SUPPORTED** as an absolute claim. Known patterns and fields are redacted; unknown PII can escape. |
 | VLM receives only sanitized screenshots | **PARTIALLY SUPPORTED** for the normal trusted-extension route; detection is best-effort and there is no server-side visual proof. |
 | Webpages cannot approve actions or change settings | **SUPPORTED** for router messages: only the extension side panel is authorized. |
-| Vault values are encrypted | **NOT SUPPORTED**. Values are stored in extension-scoped storage without encryption by this code. |
+| Vault values are encrypted at rest | **SUPPORTED** for data at rest. AES-256-GCM under a non-extractable key held in IndexedDB, so the bytes are unreadable in the profile directory, in backups, and to another process reading those files. **NOT** resistant to code executing as this extension. No user passphrase. |
 | The VLM endpoint is requested on every observation | **SUPPORTED** by the normal controller path; backend/provider failures can return an explicitly labeled DOM fallback. |
 | Zero plaintext transmission | **NOT SUPPORTED** as an absolute guarantee. |
 | Real local document handling | **NOT SUPPORTED** by the extension. |

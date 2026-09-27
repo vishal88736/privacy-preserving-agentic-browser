@@ -127,11 +127,15 @@ test('PolicyEngine - does NOT block JS timestamps (13-digit numbers)', () => {
   assert.doesNotThrow(() => engine.enforceOutboundSafety(ts));
 });
 
-test('PolicyEngine - does NOT scan inside base64 image data (screenshot exemption)', () => {
+test('PolicyEngine - does NOT pattern-match inside base64 image bytes', () => {
   const engine = makeEngine();
-  // A base64 payload that contains PAN-shaped alphanumeric sequences
+  // Base64 is an encoding, not text: a PAN-shaped sequence inside it is a
+  // coincidence, and matching it would block benign tasks. Image bytes are
+  // therefore excluded from the *text* scan, and instead gated by the
+  // attestation requirement above.
   const payload = {
-    screenshot: 'data:image/png;base64,ABCDE1234FGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=='
+    sanitized_screenshot: 'data:image/png;base64,ABCDE1234FGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/==',
+    redaction_audit: { screenshot_withheld: false, coverage_established: true, local_vision_completed: true }
   };
   assert.doesNotThrow(() => engine.enforceOutboundSafety(payload));
 });
@@ -155,4 +159,95 @@ test('PolicyEngine - returns true when payload is clean', () => {
   const engine = makeEngine();
   const result = engine.enforceOutboundSafety({ query: 'cheapest laptop under 60000' });
   assert.equal(result, true);
+});
+
+// ── Screenshot attestation ─────────────────────────────────────────────────
+//
+// The screenshot is the largest artifact in any payload and the one most
+// likely to carry PII. It used to be stripped from the scanned string before
+// any check ran, so it was the only thing on the final local gate with zero
+// verification. Images now have to arrive with a record of the redaction
+// that was actually performed on them.
+
+const IMAGE = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==';
+
+test('PolicyEngine - rejects an image with no redaction attestation', () => {
+  const engine = makeEngine();
+  assert.throws(
+    () => engine.enforceOutboundSafety({
+      sanitized_screenshot: IMAGE,
+      sanitized_dom: { elements: [] }
+    }),
+    (e) => e instanceof OutboundPolicyViolationError && /without a local redaction attestation/.test(e.message)
+  );
+});
+
+test('PolicyEngine - rejects an image the sanitizer withheld', () => {
+  const engine = makeEngine();
+  assert.throws(
+    () => engine.enforceOutboundSafety({
+      sanitized_screenshot: IMAGE,
+      redaction_audit: { screenshot_withheld: true, coverage_established: true, local_vision_completed: true },
+      sanitized_dom: { elements: [] }
+    }),
+    (e) => e instanceof OutboundPolicyViolationError && /withheld/.test(e.message)
+  );
+});
+
+test('PolicyEngine - rejects an image whose redaction coverage was never established', () => {
+  const engine = makeEngine();
+  assert.throws(
+    () => engine.enforceOutboundSafety({
+      sanitized_screenshot: IMAGE,
+      redaction_audit: { screenshot_withheld: false, coverage_established: false, local_vision_completed: true },
+      sanitized_dom: { elements: [] }
+    }),
+    (e) => e instanceof OutboundPolicyViolationError && /coverage/.test(e.message)
+  );
+});
+
+test('PolicyEngine - rejects an image local vision never audited', () => {
+  const engine = makeEngine();
+  assert.throws(
+    () => engine.enforceOutboundSafety({
+      sanitized_screenshot: IMAGE,
+      redaction_audit: { screenshot_withheld: false, coverage_established: true, local_vision_completed: false },
+      sanitized_dom: { elements: [] }
+    }),
+    (e) => e instanceof OutboundPolicyViolationError && /audited/.test(e.message)
+  );
+});
+
+test('PolicyEngine - accepts a fully attested image', () => {
+  const engine = makeEngine();
+  const result = engine.enforceOutboundSafety({
+    sanitized_screenshot: IMAGE,
+    redaction_audit: { screenshot_withheld: false, coverage_established: true, local_vision_completed: true },
+    sanitized_dom: { elements: [{ id: 'el_1', label: 'Search' }] }
+  });
+  assert.equal(result, true);
+});
+
+test('PolicyEngine - base64 bytes still do not trip text patterns', () => {
+  // Stripping image bytes from the *text* scan is still correct: matching
+  // PAN/card shapes inside base64 is meaningless and randomly fires.
+  const engine = makeEngine();
+  const result = engine.enforceOutboundSafety({
+    sanitized_screenshot: 'data:image/png;base64,QaYvq1115DxMBI0abcdefGHIJK',
+    redaction_audit: { screenshot_withheld: false, coverage_established: true, local_vision_completed: true },
+    sanitized_dom: { elements: [] }
+  });
+  assert.equal(result, true, 'a PAN-shaped string inside base64 must not block a task');
+});
+
+test('PolicyEngine - an attested image does not excuse PII in the text fields', () => {
+  const engine = makeEngine();
+  assert.throws(
+    () => engine.enforceOutboundSafety({
+      sanitized_screenshot: IMAGE,
+      redaction_audit: { screenshot_withheld: false, coverage_established: true, local_vision_completed: true },
+      sanitized_dom: { elements: [{ id: 'el_1', label: 'PAN', value: 'ABCDE1234F' }] }
+    }),
+    (e) => e instanceof OutboundPolicyViolationError && /PAN/.test(e.message)
+  );
 });

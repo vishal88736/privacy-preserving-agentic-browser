@@ -14,9 +14,10 @@ function makeController(profile) {
 
 function termsElement(checked) {
   return [{
-    id: 'el_terms',
+      id: 'el_terms',
     dom: {
       id: 'el_terms', tag: 'input', type: 'checkbox', name: 'terms', label: 'Agree to terms',
+      required: true,
       checked, in_form: true, form_id: 'form_1', disabled: false, value: 'yes'
     }
   }];

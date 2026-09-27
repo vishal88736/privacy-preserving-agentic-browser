@@ -33,9 +33,29 @@ test('validateAction - accepts valid CLICK with element_id', () => {
   assert.equal(validateAction(action), true);
 });
 
-test('validateAction - accepts CLICK with coordinates', () => {
-  const action = { action: 'CLICK', target: { coordinates: { x: 100, y: 200 } } };
+test('validateAction - rejects CLICK whose only target is coordinates', () => {
+  // Raw coordinates cannot stand in for an element_id: without an element
+  // there is nothing to ground the action against, so every downstream safety
+  // check is skipped while the click still happens.
+  assert.throws(
+    () => validateAction({ action: 'CLICK', target: { coordinates: [100, 200] } }),
+    ValidationError
+  );
+});
+
+test('validateAction - accepts coordinates as a hint alongside element_id', () => {
+  const action = { action: 'CLICK', target: { element_id: 'el_1', coordinates: [100, 200] } };
   assert.equal(validateAction(action), true);
+});
+
+test('validateAction - rejects malformed coordinates', () => {
+  for (const coordinates of [[100], [1, 2, 3], ['a', 'b'], [NaN, 5], [Infinity, 1], { x: 1, y: 2 }]) {
+    assert.throws(
+      () => validateAction({ action: 'CLICK', target: { element_id: 'el_1', coordinates } }),
+      ValidationError,
+      `coordinates ${JSON.stringify(coordinates)} must be rejected`
+    );
+  }
 });
 
 test('validateAction - accepts DONE (no target required)', () => {
@@ -131,7 +151,7 @@ test('validateAction - throws if CLICK has no target', () => {
   assert.throws(() => validateAction({ action: 'CLICK' }), ValidationError);
 });
 
-test('validateAction - throws if CLICK target has neither element_id nor coordinates', () => {
+test('validateAction - throws if CLICK target has no element_id', () => {
   assert.throws(() => validateAction({ action: 'CLICK', target: { label: 'Button' } }), ValidationError);
 });
 

@@ -1,15 +1,37 @@
 import os
+import sys
 import time
-from playwright.sync_api import sync_playwright
+from pathlib import Path
 
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-EXT_PATH = os.path.join(REPO_ROOT, "extension")
-CHROMIUM_EXEC = os.environ.get("PRIVAGENT_BROWSER_BIN")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from e2e_support import (MissingPrerequisite, require_browser, require_backend,
+                          require_playwright, resolve_extension_path, run_or_skip)
+
+# Resolved eagerly so the paths are plain module constants for the rest of the
+# suite, but a missing browser must not abort the import: CI needs to reach the
+# __main__ block to report an explicit skip. _PREREQ holds the reason and the
+# entry point re-raises it inside run_or_skip().
+_PREREQ = None
+try:
+    EXT_PATH = resolve_extension_path()
+    BROWSER_BIN = require_browser()
+    CHROMIUM_EXEC = BROWSER_BIN
+except MissingPrerequisite as _exc:
+    _PREREQ = _exc
+    EXT_PATH = str(REPO_ROOT / "extension") if "REPO_ROOT" in dir() else ""
+    BROWSER_BIN = None
+    CHROMIUM_EXEC = None
+
+
+def _ensure_prereqs():
+    """Re-raise a deferred prerequisite failure at call time."""
+    if _PREREQ is not None:
+        raise _PREREQ
 OUT_DIR = os.path.join(os.path.dirname(__file__), "qa_screenshots")
 os.makedirs(OUT_DIR, exist_ok=True)
 
 def run_visual_qa():
-    with sync_playwright() as p:
+    with require_playwright()() as p:
         context = p.chromium.launch_persistent_context(
             "",
             executable_path=CHROMIUM_EXEC,
@@ -205,4 +227,4 @@ def run_visual_qa():
         print("\nALL 12 VISUAL QA TESTS COMPLETED SUCCESSFULLY!")
 
 if __name__ == "__main__":
-    run_visual_qa()
+    sys.exit(run_or_skip(lambda: (_ensure_prereqs(), 0 if run_visual_qa() else 1)[1], "visual_qa_sidepanel"))

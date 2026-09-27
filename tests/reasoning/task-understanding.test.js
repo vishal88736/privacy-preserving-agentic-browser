@@ -64,7 +64,7 @@ test('Diagnostic output: page_understanding included', () => {
   const observation = {
     page: { page_type: 'login', title: 'Login' },
     elements: [
-      { id: 'el_1', dom: { tag: 'input', type: 'text', label: 'Username', name: 'name' }, interaction: { clickable: false, typeable: true, uploadable: false } }
+      { id: 'el_1', dom: { tag: 'input', type: 'text', label: 'Full name', name: 'fullname' }, interaction: { clickable: false, typeable: true, uploadable: false } }
     ]
   };
 
@@ -80,6 +80,25 @@ test('Diagnostic output: page_understanding included', () => {
   // so a single-field form yields FILL_FORM_PLAN, not per-field TYPE.
   assert.strictEqual(result.action.action, 'FILL_FORM_PLAN', 'Should bulk-fill the field');
   assert.ok((result.action.value.fields || []).some((f) => f.field_id === 'el_1'));
+});
+
+test('FormAnalyzer - a field labelled Username is never filled with the full name', () => {
+  // "Username"/name="name" used to classify as full_name and receive the user's
+  // legal name. An account identifier is not a personal detail, so the field
+  // must go to the user instead of being silently populated.
+  const client = new GPTOSSClient('http://localhost:9999');
+  const observation = {
+    page: { page_type: 'login', title: 'Login' },
+    elements: [
+      { id: 'el_1', dom: { tag: 'input', type: 'text', label: 'Username', name: 'user_name' }, interaction: { clickable: false, typeable: true, uploadable: false } }
+    ]
+  };
+
+  const result = client._localPlannerFallback('Fill my name.', observation, []);
+  const filled = result.action.value?.fields || [];
+  const el1 = filled.find((f) => f.field_id === 'el_1');
+  assert.ok(!el1, 'a username field must not be filled from the vault');
+  assert.ok(!JSON.stringify(result.action.value?.fields || []).includes('LOCAL_FULL_NAME'));
 });
 
 test('Simple click task produces correct action', () => {

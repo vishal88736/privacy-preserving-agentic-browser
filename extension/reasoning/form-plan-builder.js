@@ -76,6 +76,11 @@ export class FormPlanBuilder {
       el.id || el.element_id || el.dom?.id,
       el.dom || el
     ]).filter(([id]) => Boolean(id)));
+    // Which fields the user's own words ask for. An optional field nobody
+    // mentioned is not filled: a marketing phone number or a newsletter opt-in
+    // sitting next to a required email is exactly the case where a vault value
+    // would leave the device unasked.
+    const requestedText = String(userTask || '').toLowerCase();
     const { resolvedIds, skippedIds } = this._handledUserFields(taskHistory);
     const verifiedIds = this._verifiedPlanFields(taskHistory);
     const actionable = [];
@@ -110,6 +115,15 @@ export class FormPlanBuilder {
         continue;
       }
       if (this._matchesCurrent(field, resolved, fieldsById.get(field.field_id), verifiedIds.has(field.field_id))) continue;
+      // Optional, unmentioned fields are skipped rather than filled. The user
+      // asked for something specific; a form offering extra identity fields is
+      // not consent to disclose them. Skipped fields are recorded so the plan
+      // stays honest about what it left alone.
+      const dom = fieldsById.get(field.field_id) || {};
+      if (!this._isRequested(field, dom, requestedText)) {
+        skippedIds.add(field.field_id);
+        continue;
+      }
       // The target value exists only in this local stack frame. The returned
       // plan carries its symbolic source, never the resolved plaintext.
       actionable.push(field);
@@ -186,6 +200,32 @@ export class FormPlanBuilder {
       status: resolved?.status || 'AMBIGUOUS',
       reason: resolved?.unavailable_reason || field.reason || 'No unambiguous saved profile value is available.'
     };
+  }
+
+  /**
+   * Is this field one the user actually asked to fill?
+   *
+   * Required fields always qualify: the form cannot be submitted without them,
+   * so leaving them empty fails the task the user did ask for. An optional field
+   * qualifies only when the request text names it. A signup form carrying an
+   * optional phone number next to a required email must not receive the user's
+   * phone number just because the vault has one.
+   */
+  _isRequested(field, dom, requestedText) {
+    if (dom.required === true || field.required === true) return true;
+    // No required flag at all: the observation did not carry one. Treat the
+    // field as in scope rather than silently skipping it — absence of evidence
+    // that a field is optional is not evidence that it is.
+    if (dom.required === undefined && field.required === undefined) return true;
+    if (!requestedText) return false;
+    const evidence = [
+      field.label, field.semantic_type, field.control_type,
+      dom.label, dom.placeholder, dom.name, dom.type, field.field_id
+    ].filter(Boolean).join(' ').toLowerCase();
+    // Word-level match only, so "name" does not satisfy "username" and
+    // "address" does not satisfy "email address" by accident.
+    return evidence.split(/[^a-z0-9]+/).filter(Boolean)
+      .some((word) => word.length >= 4 && requestedText.includes(word));
   }
 
   _handledUserFields(history) {

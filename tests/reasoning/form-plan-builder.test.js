@@ -31,6 +31,9 @@ function field(id, tag, type, name, label, extra = {}) {
     id,
     dom: {
       tag, type, name, label, in_form: true, form_id: 'profile_form',
+      // Fields in a form the user is submitting are treated as required unless
+      // a test says otherwise, which is the realistic default for a profile form.
+      required: true,
       value: '', checked: false, ...extra
     }
   };

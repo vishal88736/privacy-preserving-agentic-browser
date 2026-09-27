@@ -10,6 +10,11 @@ const MODEL_ID = 'Xenova/yolos-tiny';
 const MODEL_REVISION = 'e2f9c7673f0fa61849efe2b56a0d7774779ebb9d';
 const PERSON_THRESHOLD = 0.35;
 const LOCAL_VISION_MESSAGE = 'LOCAL_VISION_ANALYZE';
+// OCR sanity floor. A real page screenshot always yields a substantial amount
+// of text; a screenshot where OCR returns almost nothing is a screenshot whose
+// text the OCR simply could not read, which is exactly the case where a
+// canvas- or image-rendered secret is sitting in the pixels unmasked.
+const MIN_OCR_CHARACTERS = 24;
 
 function extensionApi() {
   return globalThis.browser || globalThis.chrome;
@@ -259,8 +264,26 @@ export class LocalVisionEngine {
       ocrLines.length ? ocrLines : groupWordsByLine(ocrResult?.data?.words || []),
       imageWidth, imageHeight, viewport
     );
-    const unableToLocateSensitiveText = missingBoxes ||
-      (!(ocrLines.length || ocrResult?.data?.words?.length) && sensitiveSpans(ocrResult?.data?.text || '').length > 0);
+    const ocrText = String(ocrResult?.data?.text || '').replace(/\s+/g, ' ').trim();
+    const ocrWordCount = (ocrLines.length ? 0 : (ocrResult?.data?.words || []).length) + ocrText.length;
+    // "OCR ran and found nothing" is not evidence that the page holds no
+    // sensitive text. A page that renders a card number into a canvas, an SVG
+    // <text>, or a background image — and styles it so OCR cannot read it —
+    // produces zero spans and zero expected counts (the DOM audit reads
+    // innerText, which contains none of those), so the category reconciliation
+    // below stays silent and the raw screenshot would be uploaded.
+    //
+    // The test used is an absolute floor rather than a comparison against the
+    // DOM's text volume: OCR reads the whole viewport while the DOM audit reads
+    // only main.innerText, so the two are not scope-matched and a ratio check
+    // either direction withholds every normal page. A real page always yields
+    // far more than MIN_OCR_CHARACTERS of readable text, so the floor catches
+    // total OCR defeat without that false-positive risk. Partial OCR defeat on
+    // a specific secret is caught by the category reconciliation instead.
+    const ocrReadNothing = ocrWordCount < MIN_OCR_CHARACTERS;
+    const unableToLocateSensitiveText = missingBoxes
+      || (ocrReadNothing && sensitiveSpans(ocrText).length > 0)
+      || ocrReadNothing;
     const observedCounts = {};
     for (const region of piiRegions) observedCounts[region.category] = (observedCounts[region.category] || 0) + 1;
     const categoryAliases = { CREDENTIAL: ['CREDENTIAL', 'OTP', 'ACCOUNT'] };

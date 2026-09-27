@@ -5,6 +5,14 @@
  */
 
 import { AgentState } from '../shared/constants.js';
+import {
+  BACKEND_TOKEN_STORAGE_KEY,
+  deleteEncryptedSecret,
+  readEncryptedSecret,
+  writeEncryptedSecret
+} from '../privacy/vault-crypto.js';
+
+const SETTINGS_STORAGE_KEY = 'privagent_settings';
 
 export const DEFAULT_SETTINGS = Object.freeze({
   backendUrl: 'http://localhost:8000',
@@ -117,10 +125,17 @@ export class TaskManager {
   async _loadSettings() {
     try {
       if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-        const stored = await chrome.storage.local.get('privagent_settings');
-        if (stored?.privagent_settings) {
-          this.settings = { ...DEFAULT_SETTINGS, ...stored.privagent_settings };
+        const stored = await chrome.storage.local.get(SETTINGS_STORAGE_KEY);
+        if (stored?.[SETTINGS_STORAGE_KEY]) {
+          this.settings = { ...DEFAULT_SETTINGS, ...stored[SETTINGS_STORAGE_KEY] };
         }
+        // The backend shared secret authenticates every model call. It is a
+        // credential, not a preference, so it is kept out of the settings blob
+        // and stored under its own encrypted record instead — otherwise it
+        // would sit in plaintext in the profile directory, which is exactly
+        // what the vault encryption exists to prevent.
+        const tokenRecord = await readEncryptedSecret(BACKEND_TOKEN_STORAGE_KEY);
+        if (tokenRecord) this.settings.backendToken = tokenRecord;
       }
     } catch { /* keep defaults */ }
   }
@@ -128,9 +143,18 @@ export class TaskManager {
   async updateSettings(patch) {
     this.settings = { ...this.settings, ...(patch || {}) };
     this.settings.maxSteps = Math.min(50, Math.max(1, Number(this.settings.maxSteps) || DEFAULT_SETTINGS.maxSteps));
+    const token = typeof patch?.backendToken === 'string' ? patch.backendToken.trim() : null;
     try {
       if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-        await chrome.storage.local.set({ privagent_settings: this.settings });
+        if (token !== null) {
+          // Keep it in memory for this session either way; persist it encrypted.
+          if (token) await writeEncryptedSecret(BACKEND_TOKEN_STORAGE_KEY, token);
+          else await deleteEncryptedSecret(BACKEND_TOKEN_STORAGE_KEY);
+        }
+        // Never write the token into the settings record.
+        const { backendToken, ...persisted } = this.settings;
+        this.settings.backendToken = backendToken;
+        await chrome.storage.local.set({ [SETTINGS_STORAGE_KEY]: persisted });
       }
     } catch { /* non-fatal */ }
     return this.settings;

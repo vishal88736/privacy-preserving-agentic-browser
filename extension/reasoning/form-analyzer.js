@@ -12,7 +12,7 @@ const SEMANTIC_PATTERNS = [
   // "Enter the code we sent" must never be scored as a password field: routing
   // it to LOCAL_PASSWORD writes the user's account password into a bank/payment
   // OTP box. They resolve to no vault source (ASK_USER) instead.
-  { type: 'otp', regex: /\b(?:otp|one[\s_.-]?time[\s_.-]?(?:code|password|pin)?|verification[\s_.-]?code|security[\s_.-]?code|auth(?:entication)?[\s_.-]?code|2fa|mfa|confirm(?:ation)?[\s_.-]?code|pin[\s_.-]?number|atm[\s_.-]?pin)\b/i, weight: 1.0 },
+  { type: 'otp', regex: /\b(?:otp|one[\s_.-]?time[\s_.-]?(?:code|password|pin)?|verification[\s_.-]?code|security[\s_.-]?code|auth(?:entication)?[\s_.-]?code|2fa|mfa|confirm(?:ation)?[\s_.-]?code|pin(?!\s*code)|atm[\s_.-]?(?:pin|card))\b/i, weight: 1.0 },
   { type: 'captcha', regex: /\b(?:captcha|recaptcha|hcaptcha|captcha[\s_.-]?challenge|are[\s_.-]?you[\s_.-]?a[\s_.-]?robot|i'?m[\s_.-]?not[\s_.-]?a[\s_.-]?robot)\b/i, weight: 1.0 },
   { type: 'security_answer', regex: /\b(?:security[\s_.-]?(?:answer|question)|mother'?s?[\s_.-]?maiden[\s_.-]?name|first[\s_.-]?(?:pet|school))\b/i, weight: 1.0 },
   { type: 'cvv', regex: /\b(?:cvv2?|cvc2?|cid|card[\s_.-]?(?:verification|security)[\s_.-]?(?:code|number))\b/i, weight: 1.0 },
@@ -34,7 +34,7 @@ const SEMANTIC_PATTERNS = [
   { type: 'address_line1', regex: /\b(address.?1|street.?address|address.?line.?1|address)\b/i, weight: 0.9 },
   { type: 'city', regex: /\b(city|town)\b/i, weight: 1.0 },
   { type: 'state', regex: /\b(state|province|region)\b/i, weight: 1.0 },
-  { type: 'zip_code', regex: /\b(zip|postal.?code|pincode|postcode)\b/i, weight: 1.0 },
+  { type: 'zip_code', regex: /\b(zip|postal.?code|pincode|pin[\s_.-]?code|postcode)\b/i, weight: 1.0 },
   { type: 'country', regex: /\b(country|nation)\b/i, weight: 1.0 },
   { type: 'gender', regex: /\b(gender|sex)\b/i, weight: 1.0 },
   { type: 'newsletter', regex: /\b(newsletter|subscribe|opt.?in|updates|promotions)\b/i, weight: 0.9 },
@@ -67,6 +67,9 @@ const SEMANTIC_PATTERNS = [
 const NEVER_FROM_VAULT = new Set([
   'otp', 'captcha', 'security_answer', 'cvv', 'card_number', 'username'
 ]);
+
+/** Form key used for fields with no form owner (search boxes, filter strips). */
+const FLOATING_FORM_KEY = 'floating';
 
 
 export class FormAnalyzer {
@@ -129,7 +132,7 @@ export class FormAnalyzer {
     });
 
     if (floatingFields.length > 0) {
-      forms.set('floating', floatingFields);
+      forms.set(FLOATING_FORM_KEY, floatingFields);
     }
 
     const plans = [];
@@ -188,9 +191,30 @@ export class FormAnalyzer {
               current_state: this.currentState(field, controlType),
               options: field.options,
               label: String(field.label || field.placeholder || field.name || '').slice(0, 80),
-              reason: `No saved value for "${classification.semantic_type}" — needs user clarification.`
+              reason: this.ambiguousReason(classification.semantic_type)
             });
           }
+        } else if (formId !== FLOATING_FORM_KEY) {
+          // An unrecognised field used to vanish here, so the user was never
+          // told a form needed input the agent silently skipped. Surface it so
+          // the planner can ask instead of leaving the form half-empty.
+          //
+          // Only for real forms. A standalone control with no form owner — a
+          // site search box, a filter strip, a newsletter input — is not a field
+          // a form is waiting on, and marking it ambiguous would pull it out of
+          // the planner's typeable set and break ordinary search tasks.
+          plan.ambiguous.push({
+            field_id: field.id,
+            semantic_type: 'unknown',
+            control_type: this.controlType(field),
+            confidence: 0,
+            element_type: field.tag,
+            input_type: field.type,
+            current_state: this.currentState(field),
+            options: field.options,
+            label: String(field.label || field.placeholder || field.name || '').slice(0, 80),
+            reason: 'Unrecognised field — needs user clarification.'
+          });
         }
       });
 
@@ -299,7 +323,10 @@ export class FormAnalyzer {
     // profile blob either.
     if (key && NEVER_FROM_VAULT.has(key)) return null;
     const map = {
-      'first_name': SymbolicSecretSource.LOCAL_FULL_NAME, // A better resolver would split this
+      // The vault stores one name. LocalValueResolver splits it at fill time
+      // by semantic_type (first token for first_name, remainder for last_name),
+      // so no separate first/last value is ever needed.
+      'first_name': SymbolicSecretSource.LOCAL_FULL_NAME,
       'last_name': SymbolicSecretSource.LOCAL_FULL_NAME,
       'full_name': SymbolicSecretSource.LOCAL_FULL_NAME,
       'email': SymbolicSecretSource.LOCAL_EMAIL,
@@ -333,12 +360,30 @@ export class FormAnalyzer {
     // NOTE: null is a meaningful "needs user" signal (newsletter/comments),
     // so test key presence — ?? and || would both swallow it into
     // LOCAL_PROFILE.
-    const key = semanticType?.toLowerCase();
     if (key && Object.hasOwn(map, key)) return map[key];
     const customKey = `LOCAL_CUSTOM_${String(key || '').toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 48)}`;
     if (key && this.vault.resolveSecret(customKey)) return customKey;
     if (['passport', 'driver_license', 'national_id', 'tax_id'].includes(key)) return null;
     return SymbolicSecretSource.LOCAL_PROFILE;
+  }
+
+  /**
+   * Why a field cannot be filled from the vault. Distinct wording for the
+   * never-from-vault semantics so the confirmation dialog does not imply the
+   * agent is about to paste a saved value into a field it must not touch.
+   */
+  ambiguousReason(semanticType) {
+    const key = semanticType?.toLowerCase();
+    const reasons = {
+      otp: 'One-time code — the agent has no way to know this, so it must come from you.',
+      captcha: 'Human-verification challenge — the agent will not attempt this.',
+      security_answer: 'Security answer — the agent has no way to know this, so it must come from you.',
+      cvv: 'Card security code — the agent has no way to know this, so it must come from you.',
+      card_number: 'Card number — the agent has no way to know this, so it must come from you.',
+      username: 'Account identifier — the agent will not guess a username from your personal details.'
+    };
+    if (key && Object.hasOwn(reasons, key)) return reasons[key];
+    return `No saved value for "${semanticType}" — needs user clarification.`;
   }
 
   /**

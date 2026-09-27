@@ -76,13 +76,16 @@ export class ActionValidator {
       return { valid: true };
     }
 
-    // Target-requiring actions must name a real element (or coordinates).
-    // Previously a missing target fell through to valid:true and failed
-    // opaquely in the content script.
-    if (!action.target?.element_id && !action.target?.coordinates) {
+    // Target-requiring actions must name a real element. Previously a missing
+    // target fell through to valid:true and failed opaquely in the content
+    // script. Raw coordinates are rejected too: a coordinate-only target has no
+    // element to ground against, so it would skip the semantic gate, the
+    // disabled check, the staleness check, and the risk gate's DOM inspection
+    // while still clicking whatever occupies those pixels.
+    if (!action.target?.element_id || typeof action.target.element_id !== 'string') {
       return {
         valid: false,
-        reason: `Action "${action.action}" requires a target element from the current page observation.`
+        reason: `Action "${action.action}" requires an element_id from the current page observation; raw coordinates are not an acceptable target.`
       };
     }
 

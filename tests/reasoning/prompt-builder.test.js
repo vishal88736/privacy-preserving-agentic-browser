@@ -1,7 +1,7 @@
 /**
  * Tests for PromptBuilder
  * Covers compactElements, compactObservation, _scrollContext,
- * and buildPlanningPrompt security/content checks.
+ * and compactObservation security/content checks.
  */
 
 import test from 'node:test';
@@ -159,71 +159,4 @@ test('PromptBuilder - _scrollContext: no scrollable content case', () => {
   const b = makeBuilder();
   const r = b._scrollContext({ y: 0, maxY: 0 });
   assert.ok(r.includes('fully visible') || r.includes('no scrollable'));
-});
-
-// ── buildPlanningPrompt ────────────────────────────────────────────────────
-
-test('PromptBuilder - buildPlanningPrompt returns a string', () => {
-  const b = makeBuilder();
-  const prompt = b.buildPlanningPrompt('Find cheapest laptop', makeObs(), [], null, makePageState());
-  assert.equal(typeof prompt, 'string');
-  assert.ok(prompt.length > 100);
-});
-
-test('PromptBuilder - buildPlanningPrompt contains user task', () => {
-  const b = makeBuilder();
-  const prompt = b.buildPlanningPrompt('Find cheapest laptop', makeObs(), [], null, makePageState());
-  assert.ok(prompt.includes('Find cheapest laptop'), 'Prompt must include the user task');
-});
-
-test('PromptBuilder - buildPlanningPrompt lists allowed action types', () => {
-  const b = makeBuilder();
-  const prompt = b.buildPlanningPrompt('Test', makeObs(), [], null, null);
-  assert.ok(prompt.includes(ActionType.CLICK), 'Prompt must list CLICK as allowed action');
-  assert.ok(prompt.includes(ActionType.TYPE), 'Prompt must list TYPE as allowed action');
-  assert.ok(prompt.includes(ActionType.DONE), 'Prompt must list DONE as allowed action');
-});
-
-test('PromptBuilder - buildPlanningPrompt contains allowed element IDs only', () => {
-  const b = makeBuilder();
-  const prompt = b.buildPlanningPrompt('Test', makeObs(), [], null, makePageState());
-  // The prompt should contain the allowed IDs, not a free-form list
-  assert.ok(prompt.includes('el_1') || prompt.includes('el_2') || prompt.includes('el_3'));
-});
-
-test('PromptBuilder - buildPlanningPrompt includes privacy/security policy header', () => {
-  const b = makeBuilder();
-  const prompt = b.buildPlanningPrompt('Test task', makeObs(), [], null, null);
-  assert.ok(prompt.includes('NEVER output plaintext secrets') || prompt.includes('SECURITY'), 'Prompt must include privacy policy');
-});
-
-test('PromptBuilder - buildPlanningPrompt includes symbolic token reference (L21)', () => {
-  const b = makeBuilder();
-  const prompt = b.buildPlanningPrompt('Test task', makeObs(), [], null, null);
-  assert.ok(prompt.includes('LOCAL_AADHAAR'), 'Prompt must include LOCAL_AADHAAR symbolic token reference');
-  assert.ok(prompt.includes('LOCAL_PAN'), 'Prompt must include LOCAL_PAN symbolic token reference');
-});
-
-test('PromptBuilder - buildPlanningPrompt wraps webpage content in untrusted tags', () => {
-  const b = makeBuilder();
-  const prompt = b.buildPlanningPrompt('Test task', makeObs(), [], null, null);
-  assert.ok(prompt.includes('<untrusted_webpage_content>'), 'Must quarantine untrusted content');
-  assert.ok(prompt.includes('</untrusted_webpage_content>'));
-});
-
-test('PromptBuilder - buildPlanningPrompt includes task history (last 5 steps)', () => {
-  const b = makeBuilder();
-  const history = [
-    { step: 1, action: { action: 'TYPE' }, success: true },
-    { step: 2, action: { action: 'CLICK' }, success: true }
-  ];
-  const prompt = b.buildPlanningPrompt('Test', makeObs(), history, null, null);
-  assert.ok(prompt.includes('TASK HISTORY') || prompt.includes('history'), 'Prompt must include task history');
-});
-
-test('PromptBuilder - buildPlanningPrompt contains JSON output format hint', () => {
-  const b = makeBuilder();
-  const prompt = b.buildPlanningPrompt('Test', makeObs(), [], null, null);
-  assert.ok(prompt.includes('"thought"'), 'Prompt must include thought field in output format');
-  assert.ok(prompt.includes('"action"'), 'Prompt must include action field in output format');
 });

@@ -23,6 +23,11 @@ export class VLMClient {
       task_id: taskId,
       sanitized_screenshot: sanitizedScreenshot,
       sanitized_dom: sanitizedDom,
+      // The outbound policy engine refuses to transmit an image that does not
+      // carry a record of the local redaction that was actually performed on
+      // it. `metadata.redaction_audit` is that record: it is set by the
+      // controller from the sanitizer's own audit, never synthesised here.
+      ...(metadata.redaction_audit ? { redaction_audit: metadata.redaction_audit } : {}),
       metadata: {
         timestamp: Date.now(),
         ...metadata

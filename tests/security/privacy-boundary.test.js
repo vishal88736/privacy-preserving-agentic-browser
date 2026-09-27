@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { ScreenshotSanitizer } from '../../extension/privacy/screenshot-sanitizer.js';
 import { DOMSanitizer } from '../../extension/privacy/dom-sanitizer.js';
 import { LocalVault } from '../../extension/privacy/local-vault.js';
 import { VLMClient } from '../../extension/perception/vlm-client.js';
-import { BrowserExecutor } from '../../extension/content/browser-executor.js';
 
 test('screenshot sanitizer masks known DOM region and never returns original bytes in non-canvas runtime', async () => {
   const raw = 'data:image/png;base64,U0VDUkVU';
@@ -50,9 +51,17 @@ test('VLM request receives the masked screenshot and redacted DOM value', async 
   };
   try {
     const client = new VLMClient('http://localhost:8000');
-    const result = await client.processVisuals('task', safeShot, { elements: [{ sensitive: true, value: '[REDACTED]', semantic_type: 'PAN' }], visible_text: '' });
+    const result = await client.processVisuals(
+      'task',
+      safeShot,
+      { elements: [{ sensitive: true, value: '[REDACTED]', semantic_type: 'PAN' }], visible_text: '' },
+      // The outbound policy engine refuses an image that carries no record of
+      // the redaction performed on it, so a real request states the audit.
+      { redaction_audit: { screenshot_withheld: false, coverage_established: true, local_vision_completed: true } }
+    );
     assert.notEqual(sent.sanitized_screenshot, raw);
     assert.equal(sent.sanitized_dom.elements[0].value, '[REDACTED]');
+    assert.ok(sent.redaction_audit, 'the request must carry the screenshot redaction attestation');
     assert.equal(result._source, 'DOM_PLUS_REAL_VLM');
   } finally { globalThis.fetch = originalFetch; }
 });
@@ -141,7 +150,90 @@ test('local vault starts empty and cannot store unsupported document blobs', asy
   assert.equal(vault.resolveSecret('LOCAL_DOCUMENT'), null);
 });
 
-test('real document upload payload is rejected; synthetic demo is separately marked', async () => {
-  const executor = Object.create(BrowserExecutor.prototype);
-  await assert.rejects(executor._executeUpload({ files: null }, { name: 'passport.pdf', content: 'real bytes' }), /not supported|synthetic/i);
+test('the shipped content script rejects real document uploads; only the synthetic demo is allowed', async () => {
+  // The upload guard must hold in the file the manifest actually injects.
+  // This test used to import a parallel BrowserExecutor module that no
+  // manifest ever registered, so it passed while proving nothing about
+  // production — and the two copies had already drifted.
+  const guard = extractMethod(readFileSync(CONTENT_SCRIPT_PATH, 'utf8'), '_executeUpload');
+  assert.ok(guard, '_executeUpload must exist in the shipped content script');
+
+  // Arbitrary bytes are never uploaded, whatever the file is named.
+  assert.match(guard, /[Rr]eal document upload is not supported/);
+  // The synthetic path needs an explicit flag AND an exact literal body, so
+  // neither a truthy-looking object nor caller-supplied bytes get through.
+  assert.match(guard, /demo\s*!==\s*true/, 'upload must require demo === true');
+  assert.match(guard, /content\s*!==\s*['"][^'"]{1,200}['"]/, 'the body must be compared against a fixed literal');
+  // The name and MIME type are constants, never derived from the request.
+  const names = [...guard.matchAll(/fileName\s*=\s*['"]([^'"]+)['"]/g)].map((m) => m[1]);
+  assert.deepEqual(names, ['synthetic-demo.txt'], 'the uploaded filename must be a fixed constant');
+  const mimes = [...guard.matchAll(/mimeType\s*=\s*['"]([^'"]+)['"]/g)].map((m) => m[1]);
+  assert.ok(mimes.every((m) => m === 'text/plain'), 'only text/plain may be constructed');
 });
+
+test('the shipped content script never resolves an action target from a page-controlled id', () => {
+  // A page can ship <input id="el_7"> to capture a secret meant for another
+  // field. The executor must resolve only through the extension's own registry.
+  const source = readFileSync(CONTENT_SCRIPT_PATH, 'utf8');
+  const execute = extractMethod(source, 'execute');
+  assert.ok(execute, 'BrowserExecutor.execute must exist in the shipped content script');
+  assert.doesNotMatch(
+    execute,
+    /getElementById\s*\(/,
+    'the executor must not fall back to getElementById for a field target'
+  );
+  assert.doesNotMatch(
+    execute,
+    /querySelector\s*\(\s*`\[name=/,
+    'the executor must not fall back to a [name=] selector for a field target'
+  );
+  assert.doesNotMatch(
+    execute,
+    /elementFromPoint\s*\(/,
+    'a raw coordinate hit must not be able to stand in for an identified element'
+  );
+});
+
+test('the shipped form plan resolves every target before awaiting', () => {
+  // Re-resolving a field id after an await lets a re-render redirect a vault
+  // value into a different control, so all resolution must happen up front.
+  const body = extractMethod(readFileSync(CONTENT_SCRIPT_PATH, 'utf8'), '_executeFormPlan');
+  assert.ok(body, '_executeFormPlan must exist in the shipped content script');
+  const firstAwait = body.search(/await\s/);
+  const lastLookup = Math.max(
+    body.lastIndexOf('registry.getElement('),
+    body.lastIndexOf('_controlTypeOf(el)')
+  );
+  assert.ok(
+    lastLookup < firstAwait,
+    'every target lookup and control-type check must precede the first await'
+  );
+  assert.match(body, /isConnected/, 'a detached target must be rejected');
+  assert.match(body, /control_type/, 'the control type must be re-verified before writing a value');
+});
+
+// ── Shipped-content-script helpers ────────────────────────────────────────
+//
+// content.js is a self-contained IIFE that evaluates against `window`,
+// `document` and `chrome.runtime` on injection, so a Node test cannot import
+// it. These helpers read the file that the manifest actually registers and
+// pull out a named method's body, so assertions target production code.
+
+const CONTENT_SCRIPT_PATH = fileURLToPath(new URL('../../extension/content/content.js', import.meta.url));
+
+/** Extract a `name(...) { ... }` method body by brace matching. */
+function extractMethod(source, name) {
+  const start = source.search(new RegExp(`\\b${name}\\s*\\([^)]*\\)\\s*\\{`));
+  if (start === -1) return null;
+  const open = source.indexOf('{', start);
+  let depth = 0;
+  for (let i = open; i < source.length; i++) {
+    const ch = source[i];
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) return source.slice(open + 1, i);
+    }
+  }
+  return null;
+}

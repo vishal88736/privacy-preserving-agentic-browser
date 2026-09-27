@@ -10,10 +10,31 @@ import time
 import json
 import re
 import tempfile
-from playwright.sync_api import sync_playwright
+from pathlib import Path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from e2e_support import (MissingPrerequisite, require_browser, require_backend,
+                          require_playwright, resolve_extension_path, run_or_skip)
 
-EXT_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "extension"))
-BROWSER_BIN = os.environ.get("PRIVAGENT_BROWSER_BIN")
+# Resolved eagerly so the paths are plain module constants for the rest of the
+# suite, but a missing browser must not abort the import: CI needs to reach the
+# __main__ block to report an explicit skip. _PREREQ holds the reason and the
+# entry point re-raises it inside run_or_skip().
+_PREREQ = None
+try:
+    EXT_PATH = resolve_extension_path()
+    BROWSER_BIN = require_browser()
+    CHROMIUM_EXEC = BROWSER_BIN
+except MissingPrerequisite as _exc:
+    _PREREQ = _exc
+    EXT_PATH = str(Path(__file__).resolve().parents[1] / "extension")
+    BROWSER_BIN = None
+    CHROMIUM_EXEC = None
+
+
+def _ensure_prereqs():
+    """Re-raise a deferred prerequisite failure at call time."""
+    if _PREREQ is not None:
+        raise _PREREQ
 
 def setup_browser(p):
     user_data = tempfile.mkdtemp(prefix="privagent-e2e-suite-")
@@ -47,7 +68,7 @@ def setup_browser(p):
 
 def test_1_build_and_extension_loading():
     print("\n--- TEST 1: Build & Extension Loading ---")
-    with sync_playwright() as p:
+    with require_playwright()() as p:
         context, ext_id = setup_browser(p)
         assert ext_id, "Extension ID could not be detected"
         print(f"✔ Extension loaded successfully with ID: {ext_id}")
@@ -84,7 +105,7 @@ def test_1_build_and_extension_loading():
 
 def test_2_page_a_normal_form_loop():
     print("\n--- TEST 2: Page A — Normal Form Complete Agent Loop ---")
-    with sync_playwright() as p:
+    with require_playwright()() as p:
         context, ext_id = setup_browser(p)
         
         page = context.pages[0] if context.pages else context.new_page()
@@ -138,7 +159,7 @@ def test_2_page_a_normal_form_loop():
 
 def test_3_page_b_sensitive_form_privacy_resolution():
     print("\n--- TEST 3: Page B — Sensitive Form (Symbolic Resolution + Redaction) ---")
-    with sync_playwright() as p:
+    with require_playwright()() as p:
         context, ext_id = setup_browser(p)
 
         page = context.pages[0] if context.pages else context.new_page()
@@ -177,7 +198,7 @@ def test_3_page_b_sensitive_form_privacy_resolution():
 
 def test_4_page_c_visual_ui():
     print("\n--- TEST 4: Page C — Visual UI (DOM + VLM Grounding) ---")
-    with sync_playwright() as p:
+    with require_playwright()() as p:
         context, ext_id = setup_browser(p)
         backend_routes = []
         backend_responses = []
@@ -248,7 +269,7 @@ def test_4_page_c_visual_ui():
 
 def test_5_page_d_document_upload():
     print("\n--- TEST 5: Page D — Real document selection remains user controlled ---")
-    with sync_playwright() as p:
+    with require_playwright()() as p:
         context, ext_id = setup_browser(p)
 
         page = context.pages[0] if context.pages else context.new_page()
@@ -283,7 +304,7 @@ def test_5_page_d_document_upload():
 
 def test_6_page_e_prompt_injection_defense():
     print("\n--- TEST 6: Page E — Adversarial Prompt Injection Defense ---")
-    with sync_playwright() as p:
+    with require_playwright()() as p:
         context, ext_id = setup_browser(p)
         backend_routes = []
         backend_responses = []
@@ -361,7 +382,7 @@ def test_6_page_e_prompt_injection_defense():
 
 def test_7_stop_and_take_control():
     print("\n--- TEST 7: Stop Agent and Take Control ---")
-    with sync_playwright() as p:
+    with require_playwright()() as p:
         context, ext_id = setup_browser(p)
 
         page = context.pages[0] if context.pages else context.new_page()
@@ -396,7 +417,7 @@ def test_7_stop_and_take_control():
 
 def test_8_page_navigation():
     print("\n--- TEST 8: Page Navigation & Content Script Re-sync ---")
-    with sync_playwright() as p:
+    with require_playwright()() as p:
         context, ext_id = setup_browser(p)
 
         page = context.pages[0] if context.pages else context.new_page()
@@ -449,6 +470,11 @@ def run_all():
     return results
 
 if __name__ == "__main__":
-    res = run_all()
-    all_pass = all(v == "PASS" for v in res.values())
-    sys.exit(0 if all_pass else 1)
+    def _main():
+        _ensure_prereqs()
+        # These assertions are about real model calls, so the backend must be up.
+        require_backend()
+        res = run_all()
+        all_pass = all(v == "PASS" for v in res.values())
+        return 0 if all_pass else 1
+    sys.exit(run_or_skip(_main, "e2e_full_suite"))

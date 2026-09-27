@@ -1,53 +1,80 @@
 /**
  * Local Secret Vault
- * User-configured values stored in chrome.storage.local. Chrome storage is
- * extension-scoped but NOT encrypted at rest by this module.
+ * User-configured values, encrypted at rest.
+ *
+ * Values live in memory as plaintext (the executor needs them), but everything
+ * written to chrome.storage.local is AES-GCM ciphertext under a non-extractable
+ * key held in IndexedDB. See vault-crypto.js for the threat model.
+ *
+ * If encryption is unavailable the vault refuses to persist anything rather
+ * than silently writing plaintext back — a user who cannot tell the difference
+ * would assume protection they are not getting.
  *
  * L11: getAllSecretsForUI now filters out non-string entries (like document blobs)
  *      to prevent policy engine false positives and memory bloat.
  */
 
 import { SymbolicSecretSource } from '../shared/constants.js';
+import {
+  isEncryptionSupported,
+  migrateLegacyVault,
+  readEncryptedVault,
+  writeEncryptedVault
+} from './vault-crypto.js';
 
 export class LocalVault {
   constructor() {
     this.memoryStore = {};
+    /** Set when at-rest encryption is impossible; surfaced in the UI. */
+    this.storageError = null;
     this.ready = this._loadFromStorage();
   }
 
   async _loadFromStorage() {
-    if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-      try {
-        const stored = await chrome.storage.local.get('agent_local_vault');
-        if (stored && stored.agent_local_vault) {
-          const safe = {};
-          for (const [key, value] of Object.entries(stored.agent_local_vault)) {
-            if (isVaultKey(key) && typeof value === 'string') safe[key] = value;
-          }
-          // Remove old built-in demonstration values without shipping those
-          // values in readable source. Hashes are used only for this one-time
-          // exact migration comparison.
-          for (const [key, digest] of Object.entries(LEGACY_DEMO_VALUE_HASHES)) {
-            if (safe[key] && await sha256Hex(safe[key]) === digest) delete safe[key];
-          }
-          this.memoryStore = safe;
-          if (Object.keys(safe).length !== Object.keys(stored.agent_local_vault).length) {
-            await chrome.storage.local.set({ agent_local_vault: safe });
-          }
-        }
-      } catch (e) {
-        console.warn('Could not read from chrome.storage.local:', e);
+    if (typeof chrome === 'undefined' || !chrome.storage?.local) return;
+    if (!isEncryptionSupported()) {
+      this.storageError = 'This browser cannot encrypt the vault at rest, so values will not be saved.';
+      return;
+    }
+    try {
+      // One-time migration from the pre-encryption plaintext layout.
+      const migrated = await migrateLegacyVault();
+      const result = await readEncryptedVault();
+      if (!result.ok) {
+        this.storageError = result.reason;
+        return;
       }
+      const safe = {};
+      for (const [key, value] of Object.entries(result.values)) {
+        if (isVaultKey(key) && typeof value === 'string') safe[key] = value;
+      }
+      // Remove old built-in demonstration values without shipping those
+      // values in readable source. Hashes are used only for this one-time
+      // exact migration comparison.
+      for (const [key, digest] of Object.entries(LEGACY_DEMO_VALUE_HASHES)) {
+        if (safe[key] && await sha256Hex(safe[key]) === digest) delete safe[key];
+      }
+      this.memoryStore = safe;
+      const removedDemo = Object.keys(safe).length !== Object.keys(result.values).length;
+      if (removedDemo) await writeEncryptedVault(safe);
+    } catch (e) {
+      this.storageError = `The vault could not be read: ${e?.message || 'unknown error'}`;
+      console.warn('Could not read the encrypted vault:', e);
     }
   }
 
   async saveToStorage() {
-    if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-      try {
-        await chrome.storage.local.set({ agent_local_vault: this.memoryStore });
-      } catch (e) {
-        console.warn('Could not save to chrome.storage.local:', e);
-      }
+    if (typeof chrome === 'undefined' || !chrome.storage?.local) return;
+    if (!isEncryptionSupported()) {
+      this.storageError = 'This browser cannot encrypt the vault at rest, so values will not be saved.';
+      console.warn('[LocalVault] Refusing to write an unencrypted vault.');
+      return;
+    }
+    try {
+      await writeEncryptedVault(this.memoryStore);
+    } catch (e) {
+      this.storageError = `The vault could not be saved: ${e?.message || 'unknown error'}`;
+      console.warn('Could not save the encrypted vault:', e);
     }
   }
 

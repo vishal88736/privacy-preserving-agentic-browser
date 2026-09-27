@@ -79,7 +79,7 @@ test('ActionValidator - CLICK without target is invalid', () => {
   const v = makeValidator();
   const r = v.validatePreExecution({ action: ActionType.CLICK }, makeObs());
   assert.equal(r.valid, false);
-  assert.ok(r.reason.includes('requires a target element'));
+  assert.ok(r.reason.includes('requires an element_id'));
 });
 
 test('ActionValidator - TYPE without target is invalid', () => {
@@ -209,11 +209,25 @@ test('ActionValidator - CLICK on item_ id resolves to primary_action_id', () => 
 
 // ── Coordinate-based target ───────────────────────────────────────────────
 
-test('ActionValidator - CLICK with coordinates (no element_id) is valid', () => {
+test('ActionValidator - CLICK with coordinates (no element_id) is rejected', () => {
+  // A coordinate-only target has no element to ground against, so it would
+  // skip the semantic gate, the disabled check, the staleness check, and the
+  // risk gate's DOM inspection while still clicking whatever is at those
+  // pixels. It previously passed as valid.
   const v = makeValidator();
   const r = v.validatePreExecution(
-    { action: ActionType.CLICK, target: { coordinates: { x: 300, y: 200 } } },
+    { action: ActionType.CLICK, target: { coordinates: [300, 200] } },
     makeObs()
+  );
+  assert.equal(r.valid, false);
+  assert.ok(r.reason.includes('element_id'));
+});
+
+test('ActionValidator - element_id with a coordinate hint stays valid', () => {
+  const v = makeValidator();
+  const r = v.validatePreExecution(
+    { action: ActionType.CLICK, target: { element_id: 'el_1', coordinates: [300, 200] } },
+    makeObs([{ id: 'el_1', dom: { tag: 'button', type: 'button', label: 'Go' }, interaction: { clickable: true } }])
   );
   assert.equal(r.valid, true);
 });
