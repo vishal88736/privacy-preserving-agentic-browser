@@ -14,7 +14,7 @@ import tempfile
 from playwright.sync_api import sync_playwright
 
 EXT_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "extension"))
-BROWSER_BIN = os.environ.get("PRIVAGENT_BROWSER_BIN", "/home/vishal/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome")
+BROWSER_BIN = os.environ.get("PRIVAGENT_BROWSER_BIN")
 
 SENSITIVE_TEST_VALUES = [
     "4821 7392 0184",       # Aadhaar

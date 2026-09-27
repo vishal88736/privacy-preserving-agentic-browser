@@ -12,7 +12,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Dict, Any, List, Optional
 import re
+import hmac
+import threading
+import time
 import uvicorn
+from starlette.responses import JSONResponse
 
 from vlm_service import vlm_service
 from gpt_oss_service import gpt_oss_service
@@ -20,6 +24,11 @@ from config import settings
 
 _EXTENSION_ORIGIN_REGEX = r"^(?:chrome-extension://[a-p]{32}|moz-extension://[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
 _MODEL_ENDPOINTS = {"/vision", "/reason", "/interpret"}
+_MAX_REQUEST_BYTES = 5 * 1024 * 1024
+_BUCKET_CAPACITY = 60.0
+_BUCKET_REFILL_PER_SECOND = 1.5
+_rate_buckets = {}
+_rate_lock = threading.Lock()
 
 app = FastAPI(
     title="Privacy-Preserving Browser Agent Backend",
@@ -31,6 +40,99 @@ app = FastAPI(
 # captured raw screenshots and auto-proceeded through high-risk actions, so it
 # cannot share the extension's local privacy and confirmation boundary.
 
+def _security_response(scope, receive, send, status_code, detail):
+    return JSONResponse({"detail": detail}, status_code=status_code)(scope, receive, send)
+
+
+class RequestGuardMiddleware:
+    """Authenticate model calls and cap request bytes before JSON parsing."""
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            return await self.app(scope, receive, send)
+
+        path = scope.get("path", "")
+        if len(path) > 1 and path.endswith("/"):
+            path = path.rstrip("/")
+        method = scope.get("method", "GET").upper()
+        if path not in _MODEL_ENDPOINTS or method == "OPTIONS":
+            return await self.app(scope, receive, send)
+
+        headers = {key.decode("latin1").lower(): value.decode("latin1") for key, value in scope.get("headers", [])}
+        origin = headers.get("origin", "")
+        if not re.fullmatch(_EXTENSION_ORIGIN_REGEX, origin):
+            return await _security_response(scope, receive, send, 403, "Extension origin required.")
+        if settings.EXTENSION_ORIGINS and origin not in settings.EXTENSION_ORIGINS:
+            return await _security_response(scope, receive, send, 403, "This extension origin is not allowed.")
+
+        configured_secret = settings.BACKEND_SHARED_SECRET
+        if len(configured_secret) < 32:
+            return await _security_response(scope, receive, send, 503, "Backend shared secret is not configured.")
+        supplied_secret = headers.get("x-privagent-token", "")
+        if not supplied_secret or not hmac.compare_digest(supplied_secret, configured_secret):
+            return await _security_response(scope, receive, send, 401, "Backend access token is invalid.")
+
+        client = scope.get("client") or ("unknown", 0)
+        now = time.monotonic()
+        rate_limited = False
+        with _rate_lock:
+            tokens, last_time = _rate_buckets.get(client[0], (_BUCKET_CAPACITY, now))
+            tokens = min(_BUCKET_CAPACITY, tokens + max(0.0, now - last_time) * _BUCKET_REFILL_PER_SECOND)
+            if tokens < 1.0:
+                _rate_buckets[client[0]] = (tokens, now)
+                rate_limited = True
+            else:
+                _rate_buckets[client[0]] = (tokens - 1.0, now)
+            if len(_rate_buckets) > 256:
+                stale_before = now - 300
+                for key, (_, timestamp) in list(_rate_buckets.items()):
+                    if timestamp < stale_before:
+                        _rate_buckets.pop(key, None)
+        if rate_limited:
+            return await _security_response(scope, receive, send, 429, "Too many model requests. Try again shortly.")
+
+        if method in {"POST", "PUT", "PATCH"}:
+            try:
+                content_length = int(headers.get("content-length", "0"))
+            except ValueError:
+                return await _security_response(scope, receive, send, 400, "Invalid Content-Length header.")
+            if content_length > _MAX_REQUEST_BYTES:
+                return await _security_response(scope, receive, send, 413, "Request body is too large.")
+
+            body_parts = []
+            body_size = 0
+            while True:
+                message = await receive()
+                if message["type"] == "http.disconnect":
+                    return
+                if message["type"] != "http.request":
+                    continue
+                part = message.get("body", b"")
+                body_size += len(part)
+                if body_size > _MAX_REQUEST_BYTES:
+                    return await _security_response(scope, receive, send, 413, "Request body is too large.")
+                body_parts.append(part)
+                if not message.get("more_body", False):
+                    break
+
+            body = b"".join(body_parts)
+            delivered = False
+
+            async def replay_body():
+                nonlocal delivered
+                if delivered:
+                    return {"type": "http.request", "body": b"", "more_body": False}
+                delivered = True
+                return {"type": "http.request", "body": body, "more_body": False}
+
+            return await self.app(scope, replay_body, send)
+
+        return await self.app(scope, receive, send)
+
+
+app.add_middleware(RequestGuardMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[],
@@ -40,37 +142,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.middleware("http")
-async def require_extension_origin(request, call_next):
-    # CORS alone does not reject simple cross-origin requests. Explicitly
-    # reject webpage-originated calls to model endpoints as well. Normalize
-    # the path so trailing-slash variants cannot slip past the exact match.
-    path = request.url.path
-    if len(path) > 1 and path.endswith("/"):
-        path = path.rstrip("/")
-    if path in _MODEL_ENDPOINTS:
-        origin = request.headers.get("origin", "")
-        allowed_extension_origin = re.fullmatch(_EXTENSION_ORIGIN_REGEX, origin)
-        if not allowed_extension_origin:
-            from starlette.responses import JSONResponse
-            return JSONResponse({"detail": "Extension origin required."}, status_code=403)
-    return await call_next(request)
-
 class VisionRequest(BaseModel):
-    task_id: str
-    sanitized_screenshot: str
-    sanitized_dom: Dict[str, Any]
-    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
+    task_id: str = Field(min_length=1, max_length=128)
+    sanitized_screenshot: str = Field(min_length=1, max_length=1_600_000)
+    sanitized_dom: Dict[str, Any] = Field(max_length=128)
+    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict, max_length=64)
 
 class ReasonRequest(BaseModel):
-    task: str
-    task_state: Optional[Dict[str, Any]] = None
-    page_state: Optional[Dict[str, Any]] = None
-    fused_observation: Dict[str, Any]
-    task_history: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
+    task: str = Field(min_length=1, max_length=3500)
+    task_state: Optional[Dict[str, Any]] = Field(default=None, max_length=64)
+    page_state: Optional[Dict[str, Any]] = Field(default=None, max_length=64)
+    fused_observation: Dict[str, Any] = Field(max_length=128)
+    task_history: Optional[List[Dict[str, Any]]] = Field(default_factory=list, max_length=50)
 
 class InterpretRequest(BaseModel):
-    task: str
+    task: str = Field(min_length=1, max_length=3500)
 
 
 @app.get("/health")

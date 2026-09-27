@@ -4,6 +4,7 @@ import unittest
 import json
 from unittest.mock import patch
 from requests.exceptions import Timeout
+from starlette.responses import JSONResponse
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'backend'))
@@ -178,21 +179,114 @@ class BackendBoundaryTests(unittest.TestCase):
         finally:
             settings.API_KEY = previous_key
 
-    def test_model_routes_reject_webpage_origin(self):
+    # --- Request guard middleware -------------------------------------------------
+    #
+    # The guard is a pure ASGI middleware, so it is driven the way a server would
+    # drive it: a scope in, a send collector out. Asserting on the downstream
+    # "was it reached" flag is what makes these boundary tests meaningful — a
+    # rejected request must never reach a model endpoint.
+
+    @staticmethod
+    def _drive(path, headers, method='POST', client=('test-client', 1234)):
+        """Run one request through RequestGuardMiddleware; return (status, reached, body)."""
         import asyncio
-        from starlette.requests import Request
+
+        reached = []
+        sent = []
+
+        async def downstream(scope, receive, send):
+            reached.append(True)
+            await JSONResponse({'detail': 'reached'}, status_code=200)(scope, receive, send)
+
+        async def send(message):
+            sent.append(message)
+
+        async def receive():
+            return {'type': 'http.request', 'body': b'{}', 'more_body': False}
+
+        raw_headers = [(k.lower().encode(), v.encode()) for k, v in headers.items()]
         scope = {
-            'type': 'http', 'method': 'POST', 'path': '/vision', 'raw_path': b'/vision',
-            'query_string': b'', 'headers': [(b'origin', b'https://evil.example')],
-            'server': ('test', 80), 'client': ('test', 1234), 'scheme': 'http',
+            'type': 'http', 'method': method, 'path': path, 'raw_path': path.encode(),
+            'query_string': b'', 'headers': raw_headers,
+            'server': ('test', 80), 'client': client, 'scheme': 'http',
         }
-        called = []
-        async def call_next(_request):
-            called.append(True)
-            return None
-        response = asyncio.run(server.require_extension_origin(Request(scope), call_next))
-        self.assertEqual(response.status_code, 403)
-        self.assertEqual(called, [])
+        asyncio.run(server.RequestGuardMiddleware(downstream)(scope, receive, send))
+        status = next((m['status'] for m in sent if m['type'] == 'http.response.start'), None)
+        return status, bool(reached)
+
+    def test_model_routes_reject_webpage_origin(self):
+        status, reached = self._drive('/vision', {'origin': 'https://evil.example'})
+        self.assertEqual(status, 403)
+        self.assertFalse(reached, 'a webpage-originated call must not reach the endpoint')
+
+    def test_model_routes_require_a_valid_extension_origin_shape(self):
+        # Origin shape is necessary but not sufficient: a valid-looking origin
+        # still has to present the shared secret.
+        for origin in ('chrome-extension://' + 'a' * 32, 'moz-extension://0123abcd-0123-0123-0123-0123456789ab'):
+            status, reached = self._drive('/reason', {'origin': origin})
+            self.assertEqual(status, 401, f'{origin} without a token must be rejected')
+            self.assertFalse(reached)
+
+    def test_model_routes_reject_a_missing_or_wrong_shared_secret(self):
+        origin = 'chrome-extension://' + 'a' * 32
+        with patch.object(server.settings, 'BACKEND_SHARED_SECRET', 's' * 32):
+            status, reached = self._drive('/vision', {'origin': origin, 'x-privagent-token': 'wrong' + 's' * 26})
+            self.assertEqual(status, 401)
+            self.assertFalse(reached)
+
+            status, reached = self._drive('/vision', {'origin': origin, 'x-privagent-token': 's' * 32})
+            self.assertEqual(status, 200)
+            self.assertTrue(reached, 'a correctly authenticated call must be allowed through')
+
+    def test_model_routes_fail_closed_when_no_secret_is_configured(self):
+        # A deployment that forgot to set BACKEND_SHARED_SECRET must not fall
+        # open to unauthenticated callers.
+        origin = 'chrome-extension://' + 'a' * 32
+        with patch.object(server.settings, 'BACKEND_SHARED_SECRET', ''):
+            status, reached = self._drive('/vision', {'origin': origin})
+            self.assertEqual(status, 503)
+            self.assertFalse(reached)
+
+    def test_model_routes_reject_an_oversized_declared_body(self):
+        origin = 'chrome-extension://' + 'a' * 32
+        with patch.object(server.settings, 'BACKEND_SHARED_SECRET', 's' * 32):
+            status, reached = self._drive(
+                '/vision',
+                {'origin': origin, 'x-privagent-token': 's' * 32, 'content-length': str(64 * 1024 * 1024)},
+            )
+            self.assertEqual(status, 413)
+            self.assertFalse(reached)
+
+    def test_repeated_calls_from_one_client_are_rate_limited(self):
+        # The bucket is per client address, so a caller cannot spend an
+        # unmetered provider key by simply authenticating correctly.
+        origin = 'chrome-extension://' + 'a' * 32
+        client = ('rate-limit-client', 5555)
+        server._rate_buckets.pop(client[0], None)
+        with patch.object(server.settings, 'BACKEND_SHARED_SECRET', 's' * 32):
+            headers = {'origin': origin, 'x-privagent-token': 's' * 32}
+            allowed = 0
+            limited = 0
+            for _ in range(int(server._BUCKET_CAPACITY) + 5):
+                status, reached = self._drive('/reason', headers, client=client)
+                if status == 200 and reached:
+                    allowed += 1
+                elif status == 429:
+                    limited += 1
+        server._rate_buckets.pop(client[0], None)
+        self.assertEqual(allowed, int(server._BUCKET_CAPACITY),
+                         'the bucket must allow exactly its capacity before throttling')
+        self.assertGreater(limited, 0, 'requests beyond the capacity must be throttled')
+
+    def test_non_model_routes_are_not_guarded(self):
+        status, reached = self._drive('/health', {}, method='GET')
+        self.assertEqual(status, 200)
+        self.assertTrue(reached)
+
+    def test_trailing_slash_cannot_bypass_the_model_endpoint_guard(self):
+        status, reached = self._drive('/reason/', {'origin': 'https://evil.example'})
+        self.assertEqual(status, 403)
+        self.assertFalse(reached)
 
 
 if __name__ == '__main__':

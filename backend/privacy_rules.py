@@ -1,5 +1,6 @@
 """Defense-in-depth patterns for rejecting unsanitized extension payloads."""
 import re
+import unicodedata
 
 
 def _luhn(value):
@@ -45,6 +46,15 @@ def find_sensitive_category(text):
     """Return a category for a high-confidence sensitive pattern, else None."""
     if not isinstance(text, str) or not text:
         return None
+    # Match the extension's NFKC/format-character policy. Remove zero-width
+    # and other Unicode format characters, then map every decimal digit to
+    # ASCII so Python's Unicode-aware \d cannot disagree with JavaScript.
+    text = "".join(
+        str(unicodedata.decimal(char)) if unicodedata.category(char) == "Nd"
+        else char
+        for char in unicodedata.normalize("NFKC", text)
+        if unicodedata.category(char) != "Cf"
+    )
     checks = [
         ("AADHAAR", re.compile(r"\b[2-9]\d{3}[\s-]?\d{4}[\s-]?\d{4}\b")),
         ("PAN", re.compile(r"\b[A-Z]{5}\d{4}[A-Z]\b", re.I)),
@@ -54,6 +64,10 @@ def find_sensitive_category(text):
         ("PHONE", re.compile(r"(?<!\w)\+\d{1,3}[ .-]?(?:\(\d{1,4}\)[ .-]?)?\d(?:[ .-]?\d){6,12}(?!\w)")),
         ("DOB", re.compile(r"\b(?:0[1-9]|[12]\d|3[01])[-/.](?:0[1-9]|1[0-2])[-/.](?:19|20)\d{2}\b")),
         ("DOB", re.compile(r"\b(?:0[1-9]|1[0-2])[-/.](?:0[1-9]|[12]\d|3[01])[-/.](?:19|20)\d{2}\b")),
+        ("OTP", re.compile(r"\b(?:otp|one[ -]?time(?:[ -]?(?:password|code))?|verification code|security code)\s*(?::|=|\bis\s+)?\d{4,10}\b", re.I)),
+        ("PASSWORD", re.compile(r"\b(?:password|passcode|passphrase)\s*(?::|=|\bis\s+)(?!required\b|incorrect\b|invalid\b|blank\b|empty\b|not\b)[A-Za-z0-9!@#$%^&*._+~-]{3,64}\b", re.I)),
+        ("CVV", re.compile(r"\b(?:cvv|cvc|card verification)\s*(?::|=|\bis\s+)?\d{3,4}\b", re.I)),
+        ("BANK_ACCOUNT", re.compile(r"\b(?:bank account|account number|acct(?:\s*(?:number|no\.?))?)\s*(?::|=|#|-)?\s*(?:\d[ -]?){8,18}\b", re.I)),
     ]
     for category, pattern in checks:
         if pattern.search(text):

@@ -17,3 +17,11 @@ python3 scripts/evaluate_agent_models.py path/to/cases.jsonl --models model-a,mo
 The report includes action and target accuracy where labels exist, clarification recall, unnecessary clarification rate, terminal accuracy, grounding repairs, forbidden-target selections, errors, and latency. Case details contain action names and element IDs only; model thoughts, task text, page text, and field values are omitted. The fixture itself must be sanitized before it is saved because the planner sends it to the configured model endpoint.
 
 This is a planner replay benchmark. It compares decisions on captured states; it does not measure browser execution success, page changes after actions, or full-task completion. Keep a separate end-to-end task suite for those outcomes, and use multiple real tasks per capability (navigation, search, filtering, forms, extraction, and clarification) before switching the default model.
+
+For actual browser runs, open the extension's debug panel and choose **Download task timing trace**. The JSONL export contains task intent, the agent's completion status, wall time, estimated agent time (wall time minus explicit user approval and clarification waits), per-step stage timings, action names, and model source names; it excludes prompts, page text, thoughts, and field values. Agent completion status is not an independent quality check. For an end-to-end comparison, fill in `case_id` and `reviewed_success` on each JSONL line after checking the result in the browser, then summarize the reviewed traces:
+
+```sh
+python3 scripts/evaluate_task_runs.py path/to/task-runs.jsonl
+```
+
+Use the same representative case IDs for each model configuration and compare reviewed success rate and agent time by case alongside the planner replay scores.

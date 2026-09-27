@@ -50,14 +50,16 @@ await mkdir(ortDir, { recursive: true });
 await mkdir(tesseractDir, { recursive: true });
 
 const npm = (relative) => path.join(root, 'node_modules', ...relative.split('/'));
+// Only the assets the extension actually loads are staged. ort.all.bundle.min.mjs
+// embeds the wasm loader and resolves ort-wasm-simd-threaded.jsep.wasm through
+// import.meta.url, so the non-jsep wasm pair is never fetched. A string
+// wasmPaths would instead trigger a dynamic import of the external jsep .mjs,
+// which fails in an extension context (see local-vision.js), so that file is
+// unused too. Shipping them added ~15 MiB of dead weight to every install.
 await Promise.all([
   copy(npm('@huggingface/transformers/dist/transformers.web.min.js'), path.join(transformerDir, 'transformers.web.min.js')),
-  copy(npm('onnxruntime-web/dist/ort-wasm-simd-threaded.mjs'), path.join(ortDir, 'ort-wasm-simd-threaded.mjs')),
-  copy(npm('onnxruntime-web/dist/ort-wasm-simd-threaded.wasm'), path.join(ortDir, 'ort-wasm-simd-threaded.wasm')),
-  copy(npm('onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.mjs'), path.join(ortDir, 'ort-wasm-simd-threaded.jsep.mjs')),
   copy(npm('onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.wasm'), path.join(ortDir, 'ort-wasm-simd-threaded.jsep.wasm')),
   copy(npm('onnxruntime-web/dist/ort.all.bundle.min.mjs'), path.join(ortDir, 'ort.all.bundle.min.mjs')),
-  copy(npm('onnxruntime-web/dist/ort.all.bundle.min.mjs'), path.join(ortDir, 'ort.min.mjs')),
   copy(npm('tesseract.js/dist/tesseract.esm.min.js'), path.join(tesseractDir, 'tesseract.esm.min.js')),
   copy(npm('tesseract.js/dist/worker.min.js'), path.join(tesseractDir, 'worker.min.js')),
   copy(npm('tesseract.js-core/tesseract-core-simd-lstm.wasm.js'), path.join(tesseractDir, 'tesseract-core-simd-lstm.wasm.js')),

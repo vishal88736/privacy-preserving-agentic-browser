@@ -8,7 +8,8 @@
     "sidePanel",
     "tabs",
     "scripting",
-    "storage"
+    "storage",
+    "alarms"
   ],
   "icons": {
     "16": "icons/icon16.png",

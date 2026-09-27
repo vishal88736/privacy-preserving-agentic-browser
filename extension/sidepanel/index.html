@@ -652,6 +652,11 @@
           <input id="settings-backend" inputmode="url" placeholder="http://localhost:8000">
         </label>
         <label class="vault-field">
+          <span>Backend access token</span>
+          <input id="settings-backend-token" type="password" autocomplete="off" placeholder="Copy BACKEND_SHARED_SECRET from backend .env">
+        </label>
+        <p class="muted small">Set the same secret in backend .env and here. Model requests are rejected without it.</p>
+        <label class="vault-field">
           <span>Max autonomous steps per task</span>
           <input id="settings-maxsteps" inputmode="numeric" placeholder="25">
         </label>

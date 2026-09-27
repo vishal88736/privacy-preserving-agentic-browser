@@ -4,7 +4,7 @@
  */
 
 import { ServerDefaults, ActionType, RiskLevel, SymbolicSecretSource } from '../shared/constants.js';
-import { validateReasonPayload } from '../shared/schemas.js';
+import { validateAction, validateReasonPayload } from '../shared/schemas.js';
 import { defaultPolicyEngine } from '../privacy/policy-engine.js';
 import { defaultActionParser } from './action-parser.js';
 import { localInterpretTask, parseTaskSemantics } from './task-understanding.js';
@@ -17,6 +17,7 @@ import { rankCandidates, ambiguousCandidates, requiredCapabilities, SemanticType
 export class GPTOSSClient {
   constructor(baseUrl = ServerDefaults.BACKEND_BASE_URL, formPlanBuilder = defaultFormPlanBuilder) {
     this.baseUrl = baseUrl;
+    this.authToken = '';
     this.policyEngine = defaultPolicyEngine;
     this.actionParser = defaultActionParser;
     this.formPlanBuilder = formPlanBuilder;
@@ -31,7 +32,10 @@ export class GPTOSSClient {
     try {
       const resp = await fetch(`${this.baseUrl}${endpoint}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(this.authToken ? { 'X-PrivAgent-Token': this.authToken } : {})
+        },
         body: JSON.stringify(data),
         signal: ac.signal
       });
@@ -123,7 +127,13 @@ export class GPTOSSClient {
       }
     }
 
-    const compactObs = defaultPromptBuilder.compactObservation(fusedObservation, pageState);
+    const compactObs = defaultPromptBuilder.compactObservation(fusedObservation, pageState, task);
+    const compactPageState = pageState ? {
+      ...pageState,
+      visible_text_excerpt: compactObs.visible_text,
+      visible_text_source_chars: compactObs.visible_text_source_chars,
+      visible_text_omitted_chars: compactObs.visible_text_omitted_chars
+    } : null;
     const history = (taskHistory || []).slice(-5).map((s) => ({
       thought: s.thought,
       action: s.action?.action,
@@ -138,7 +148,7 @@ export class GPTOSSClient {
     const payload = {
       task,
       task_state: taskState ? (taskState.toPayload ? taskState.toPayload() : taskState) : null,
-      page_state: pageState || null,
+      page_state: compactPageState,
       fused_observation: compactObs,
       task_history: history,
       timestamp: Date.now()
@@ -161,6 +171,16 @@ export class GPTOSSClient {
 
       const data = await response.json();
       if (data && data.action && typeof data.action === 'object') {
+        try {
+          validateAction(data.action);
+        } catch (validationError) {
+          console.warn('[GPTOSSClient] Remote action failed schema validation; using the grounded local planner.', validationError?.message);
+          const local = this._localPlannerFallback(task, fusedObservation, taskHistory, taskState, pageState);
+          local.remoteCallMade = true;
+          local.remoteCallAttempted = true;
+          local.model_trace = { component: 'reasoning', source: 'local', provider: null, model: null, planner: 'grounded_fallback', reason: 'invalid_action_schema' };
+          return local;
+        }
         const isDone = data.action?.action === 'DONE';
         return {
           task_understanding: data.task_understanding,

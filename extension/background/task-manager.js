@@ -8,6 +8,7 @@ import { AgentState } from '../shared/constants.js';
 
 export const DEFAULT_SETTINGS = Object.freeze({
   backendUrl: 'http://localhost:8000',
+  backendToken: '',
   maxSteps: 25,
   alwaysConfirm: true,
   showDebug: false
@@ -60,7 +61,9 @@ export function friendlyError(rawMessage) {
       SSN: 'Social Security number', SIN: 'Social Insurance number',
       NIN: 'National Insurance number', NHS: 'NHS number', IBAN: 'IBAN',
       AADHAAR: 'Aadhaar number', PAN: 'PAN number', DOB: 'date of birth',
-      CREDIT_CARD: 'payment card number', API_KEY: 'API key', TOKEN: 'access token'
+      CREDIT_CARD: 'payment card number', CVV: 'card security code',
+      OTP: 'one-time code', PASSWORD: 'password', BANK_ACCOUNT: 'bank account number',
+      API_KEY: 'API key', TOKEN: 'access token'
     };
     const detected = labels[category] || (category ? 'sensitive information' : null);
     return {
@@ -106,7 +109,9 @@ export class TaskManager {
   constructor() {
     this.currentTask = null;
     this.settings = { ...DEFAULT_SETTINGS };
-    this._loadSettings();
+    this._persistQueue = Promise.resolve();
+    this._persistPending = null;
+    this.ready = this._loadSettings().then(() => this.restorePersistedTask());
   }
 
   async _loadSettings() {
@@ -139,6 +144,10 @@ export class TaskManager {
       state: AgentState.IDLE,
       stateDetail: '',
       startTime: Date.now(),
+      activeStepStartedAt: null,
+      activeStepTimings: {},
+      lastStepTimings: null,
+      terminalStepTimings: null,
       steps: [],
       visionSamples: [],
       privacyMetrics: {
@@ -156,6 +165,7 @@ export class TaskManager {
         detectedCategories: []
       },
       currentStep: 0,
+      taskIntent: null,
       maxSteps: this.settings.maxSteps || DEFAULT_SETTINGS.maxSteps,
       pendingConfirmation: null,
       pendingUserInput: null,
@@ -172,15 +182,35 @@ export class TaskManager {
     return this.currentTask;
   }
 
-  updateState(newState, detail = '') {
-    if (this.currentTask) {
-      this.currentTask.state = newState;
-      if (detail) this.currentTask.stateDetail = detail;
-    }
+  _isCurrent(expectedTask) {
+    return !expectedTask || this.currentTask === expectedTask;
   }
 
-  recordStep(stepData) {
-    if (this.currentTask) {
+  _isTerminal(task) {
+    return [AgentState.COMPLETED, AgentState.FAILED, AgentState.CANCELLED].includes(task?.state);
+  }
+
+  updateState(newState, detail = '', expectedTask = null) {
+    const task = this.currentTask;
+    if (this._isCurrent(expectedTask) && task && !this._isTerminal(task)) {
+      task.state = newState;
+      if (detail) task.stateDetail = detail;
+      this.persist();
+      return true;
+    }
+    return false;
+  }
+
+  recordStep(stepData, expectedTask = null) {
+    const task = this.currentTask;
+    if (this._isCurrent(expectedTask) && task && !this._isTerminal(task)) {
+      const timingMs = this.captureStepTiming(task);
+      if (timingMs) {
+        stepData = {
+          ...stepData,
+          diagnostic: { ...(stepData.diagnostic || {}), timing_ms: timingMs }
+        };
+      }
       this.currentTask.currentStep++;
       this.currentTask.steps.push({
         stepNumber: this.currentTask.currentStep,
@@ -196,9 +226,10 @@ export class TaskManager {
     }
   }
 
-  updatePrivacyMetrics(metricsUpdate) {
-    if (this.currentTask) {
-      const pm = this.currentTask.privacyMetrics;
+  updatePrivacyMetrics(metricsUpdate, expectedTask = null) {
+    const task = this.currentTask;
+    if (this._isCurrent(expectedTask) && task && !this._isTerminal(task)) {
+      const pm = task.privacyMetrics;
       // Per-observation counts re-count ALL page fields on every step, so
       // accumulate the delta over the previous observation — otherwise
       // cumulative totals inflate by field-count × steps.
@@ -225,63 +256,116 @@ export class TaskManager {
         const set = new Set([...pm.detectedCategories, ...metricsUpdate.detectedCategories]);
         pm.detectedCategories = Array.from(set);
       }
-    }
-  }
-
-  setPendingConfirmation(action, reason) {
-    if (this.currentTask) {
-      this.currentTask.state = AgentState.WAITING_FOR_USER;
-      this.currentTask.pendingConfirmation = { action, reason, timestamp: Date.now() };
       this.persist();
     }
   }
 
-  clearPendingConfirmation() {
-    if (this.currentTask) {
+  setPendingConfirmation(action, reason, correlation = {}, expectedTask = null) {
+    const task = this.currentTask;
+    if (this._isCurrent(expectedTask) && task && !this._isTerminal(task)) {
+      // Derived here for the same reason as setPendingUserInput: an approval
+      // that cannot be correlated is an approval that can never be delivered.
+      const taskId = correlation.taskId || task.id;
+      task.state = AgentState.WAITING_FOR_USER;
+      task.pendingConfirmation = { action, reason, ...correlation, taskId, timestamp: Date.now() };
+      this.persist();
+      return true;
+    }
+    return false;
+  }
+
+  clearPendingConfirmation(expectedTask = null) {
+    if (this._isCurrent(expectedTask) && this.currentTask) {
       this.currentTask.pendingConfirmation = null;
-    }
-  }
-
-  setPendingUserInput(inputData) {
-    if (this.currentTask) {
-      this.currentTask.state = AgentState.WAITING_FOR_USER;
-      this.currentTask.pendingUserInput = { ...inputData, timestamp: Date.now() };
       this.persist();
+      return true;
     }
+    return false;
   }
 
-  clearPendingUserInput() {
-    if (this.currentTask) {
+  setPendingUserInput(inputData, correlation = {}, expectedTask = null) {
+    const task = this.currentTask;
+    if (this._isCurrent(expectedTask) && task && !this._isTerminal(task)) {
+      // taskId is derived here rather than trusted from the caller: a call site
+      // that forgot it would leave the prompt permanently unanswerable, because
+      // handleUserInput fails closed on a taskId mismatch.
+      const taskId = correlation.taskId || task.id;
+      task.state = AgentState.WAITING_FOR_USER;
+      task.pendingUserInput = { ...inputData, ...correlation, taskId, timestamp: Date.now() };
+      this.persist();
+      return true;
+    }
+    return false;
+  }
+
+  clearPendingUserInput(expectedTask = null) {
+    if (this._isCurrent(expectedTask) && this.currentTask) {
       this.currentTask.pendingUserInput = null;
-    }
-  }
-
-  completeTask(result = 'Task completed successfully') {
-    if (this.currentTask) {
-      this.currentTask.state = AgentState.COMPLETED;
-      this.currentTask.result = result;
-      this.currentTask.endTime = Date.now();
       this.persist();
+      return true;
     }
+    return false;
   }
 
-  failTask(rawError) {
-    if (this.currentTask) {
+  completeTask(result = 'Task completed successfully', expectedTask = null) {
+    const task = this.currentTask;
+    if (this._isCurrent(expectedTask) && task && !this._isTerminal(task)) {
+      if (Number.isFinite(task.activeStepStartedAt)) {
+        task.terminalStepTimings = this.captureStepTiming(task);
+      }
+      task.state = AgentState.COMPLETED;
+      task.pendingConfirmation = null;
+      task.pendingUserInput = null;
+      task.result = result;
+      task.endTime = Date.now();
+      this.persist();
+      return true;
+    }
+    return false;
+  }
+
+  failTask(rawError, expectedTask = null) {
+    const task = this.currentTask;
+    if (this._isCurrent(expectedTask) && task && !this._isTerminal(task)) {
+      if (Number.isFinite(task.activeStepStartedAt)) {
+        task.terminalStepTimings = this.captureStepTiming(task);
+      }
       const { error, hint } = friendlyError(rawError);
-      this.currentTask.state = AgentState.FAILED;
-      this.currentTask.error = error;
-      this.currentTask.hint = hint;
-      this.currentTask.rawError = String(rawError || '').slice(0, 300);
-      this.currentTask.endTime = Date.now();
+      task.state = AgentState.FAILED;
+      task.pendingConfirmation = null;
+      task.pendingUserInput = null;
+      task.error = error;
+      task.hint = hint;
+      task.endTime = Date.now();
       this.persist();
+      return true;
     }
+    return false;
+  }
+
+  captureStepTiming(task = this.currentTask) {
+    if (!task || !Number.isFinite(task.activeStepStartedAt)) return null;
+    const now = globalThis.performance?.now?.() ?? Date.now();
+    const timingMs = {
+      ...(task.activeStepTimings || {}),
+      total_ms: Math.max(0, Math.round(now - task.activeStepStartedAt))
+    };
+    task.lastStepTimings = timingMs;
+    task.activeStepStartedAt = null;
+    task.activeStepTimings = {};
+    return timingMs;
   }
 
   /**
-   * Restores the last persisted task snapshot after a service-worker
-   * restart. Pending confirmations / input prompts cannot be honored by a
-   * fresh worker (it has no resolvers), so a WAITING_FOR_USER snapshot is
-   * honestly downgraded to FAILED instead of showing dead confirm buttons.
+   * Restores the last persisted task snapshot after a service-worker restart.
+   *
+   * A fresh worker has no in-memory loop and no prompt resolvers, so a task
+   * that was mid-step cannot be resumed and is honestly downgraded to FAILED.
+   * A task that was WAITING_FOR_USER is different: nothing was executing, the
+   * decision is still the user's to make, and the pending prompt carries the
+   * correlation ids the panel needs to answer it. That prompt is therefore
+   * preserved instead of being nulled into a dead modal that silently accepts
+   * nothing.
    */
   async restorePersistedTask() {
     if (this.currentTask) return this.currentTask;
@@ -298,28 +382,46 @@ export class TaskManager {
         consecutiveFailures: 0,
         lastTargetKey: null
       };
-      if (restored.state === AgentState.WAITING_FOR_USER) {
-        restored.state = AgentState.FAILED;
-        restored.error = 'The browser restarted the agent service before you could respond.';
-        restored.hint = 'Start the task again to continue. Your saved vault values are still available.';
-        restored.pendingConfirmation = null;
-        restored.pendingUserInput = null;
+      if (!this._isTerminal(restored)) {
+        const awaitingUser = restored.state === AgentState.WAITING_FOR_USER
+          && Boolean(restored.pendingConfirmation || restored.pendingUserInput);
+        if (awaitingUser) {
+          // Keep the prompt live. AgentController.handleUserConfirmation /
+          // handleUserInput finalize the task directly when no resolver
+          // survives, so an answer is never silently dropped.
+          restored.interruptedWhileAwaitingUser = true;
+          restored.stateDetail = 'Waiting for your decision. The agent was restarted, but your approval is still required.';
+        } else {
+          restored.state = AgentState.FAILED;
+          restored.error = 'The browser restarted the agent service before the task finished.';
+          restored.hint = 'The interrupted task was stopped safely. Check the page before starting it again.';
+          restored.endTime = Date.now();
+          restored.pendingConfirmation = null;
+          restored.pendingUserInput = null;
+        }
       }
       this.currentTask = restored;
+      this.persist();
       return restored;
     } catch {
       return null;
     }
   }
 
-  cancelTask() {
-    if (this.currentTask) {
-      this.currentTask.state = AgentState.CANCELLED;
-      this.currentTask.pendingConfirmation = null;
-      this.currentTask.pendingUserInput = null;
-      this.currentTask.endTime = Date.now();
+  cancelTask(expectedTask = null) {
+    const task = this.currentTask;
+    if (this._isCurrent(expectedTask) && task && !this._isTerminal(task)) {
+      if (Number.isFinite(task.activeStepStartedAt)) {
+        task.terminalStepTimings = this.captureStepTiming(task);
+      }
+      task.state = AgentState.CANCELLED;
+      task.pendingConfirmation = null;
+      task.pendingUserInput = null;
+      task.endTime = Date.now();
       this.persist();
+      return true;
     }
+    return false;
   }
 
   /** Best-effort snapshot so the panel can restore after SW restart. */
@@ -327,23 +429,43 @@ export class TaskManager {
     try {
       if (typeof chrome !== 'undefined' && chrome.storage?.session) {
         const t = this.currentTask;
-        if (!t) return;
-        chrome.storage.session.set({
-          privagent_task: {
-            id: t.id, prompt: t.prompt, tabId: t.tabId, state: t.state,
-            currentStep: t.currentStep, maxSteps: t.maxSteps,
-            result: t.result || null, error: t.error || null, hint: t.hint || null,
-            rawError: t.rawError || null,
-            pendingConfirmation: t.pendingConfirmation || null,
-            pendingUserInput: t.pendingUserInput || null,
-            privacyMetrics: t.privacyMetrics,
-            lastLLMPayload: t.lastLLMPayload || null,
-            visionSamples: (t.visionSamples || []).slice(-40),
-            steps: (t.steps || []).slice(-20)
-          }
-        }).catch(() => {});
+        if (!t) return this._persistQueue;
+        // Capture a fresh snapshot at write time and serialize writes. The
+        // previous fire-and-forget calls could complete out of order and
+        // replace a terminal task with an older EXECUTING snapshot.
+        this._persistPending = t;
+        this._persistQueue = this._persistQueue.catch(() => {}).then(async () => {
+          const latest = this._persistPending;
+          this._persistPending = null;
+          if (!latest || latest !== this.currentTask) return;
+          const snapshot = {
+            id: latest.id, prompt: latest.prompt, tabId: latest.tabId, state: latest.state,
+            stateDetail: latest.stateDetail || '',
+            currentStep: latest.currentStep, maxSteps: latest.maxSteps,
+            result: latest.result || null, error: latest.error || null, hint: latest.hint || null,
+            pendingConfirmation: latest.pendingConfirmation || null,
+            pendingUserInput: latest.pendingUserInput || null,
+            privacyMetrics: latest.privacyMetrics,
+            lastLLMPayload: latest.lastLLMPayload || null,
+            taskIntent: latest.taskIntent || null,
+            startTime: latest.startTime,
+            endTime: latest.endTime || null,
+            // Heartbeat: written on every persist so a restore can tell a task
+            // that was waiting on the user (recoverable across a worker restart)
+            // from one that was interrupted mid-step (not recoverable).
+            lastProgressAt: Date.now(),
+            lastStepTimings: latest.lastStepTimings || null,
+            terminalStepTimings: latest.terminalStepTimings || null,
+            visionSamples: (latest.visionSamples || []).slice(-40),
+            steps: (latest.steps || []).slice(-20)
+          };
+          await chrome.storage.session.set({ privagent_task: snapshot });
+          if (this._persistPending && this._persistPending !== latest) this.persist();
+        });
+        return this._persistQueue.catch(() => {});
       }
     } catch { /* non-fatal */ }
+    return Promise.resolve();
   }
 }
 

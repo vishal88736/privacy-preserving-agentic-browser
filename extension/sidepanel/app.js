@@ -20,6 +20,7 @@ const FRIENDLY_STATE = {
   [AgentState.EXECUTING]: { label: 'Acting', detail: 'Executing local action on page…', band: 'active', dot: 'active' },
   [AgentState.VERIFYING]: { label: 'Verifying', detail: 'Confirming action outcome on DOM…', band: 'active', dot: 'active' },
   [AgentState.WAITING_FOR_USER]: { label: 'Needs approval', detail: 'High-risk action awaits confirmation…', band: 'waiting', dot: 'waiting' },
+  [AgentState.PAUSED]: { label: 'Paused', detail: 'Paused. Resume to continue the task.', band: 'waiting', dot: 'waiting' },
   [AgentState.COMPLETED]: { label: 'Completed', detail: 'Goal reached safely.', band: 'done', dot: 'done' },
   [AgentState.FAILED]: { label: 'Attention needed', detail: 'Step requires your attention.', band: 'error', dot: 'error' },
   [AgentState.CANCELLED]: { label: 'Stopped', detail: 'The browser is now under your control.', band: 'idle', dot: 'idle' }
@@ -48,6 +49,7 @@ function stageForState(state) {
     case AgentState.VALIDATING_ACTION: return 3;
     case AgentState.EXECUTING:
     case AgentState.WAITING_FOR_USER: return 4;
+    case AgentState.PAUSED: return 4;
     case AgentState.VERIFYING: return 5;
     case AgentState.COMPLETED: return 6;
     default: return -1;
@@ -308,6 +310,9 @@ class SidePanelApp {
         this.task = res.task;
         this.lastPrompt = res.task.prompt || this.lastPrompt;
         this.renderAll();
+        if (res.task.state === AgentState.FAILED) this.showError(res.task.error, res.task.hint);
+        else if (res.task.state === AgentState.COMPLETED) this.showDone({ result: res.task.result });
+        else if (res.task.state === AgentState.CANCELLED) this.showStopped();
       }
       if (res?.settings) this.reflectSettings(res.settings);
     });
@@ -378,8 +383,14 @@ class SidePanelApp {
   }
 
   confirm(approved) {
+    const pending = this.currentConfirmationData || {};
+    this.currentConfirmationData = null;
     this.closeModal(this.confirmModal);
-    this.send(MessageType.USER_CONFIRM_ACTION, { approved });
+    this.send(MessageType.USER_CONFIRM_ACTION, {
+      approved,
+      taskId: pending.taskId,
+      confirmationId: pending.confirmationId
+    });
   }
 
   setControls(mode) {
@@ -447,6 +458,10 @@ class SidePanelApp {
     }
     if (state === AgentState.COMPLETED || state === AgentState.FAILED || state === AgentState.CANCELLED) {
       this.stopElapsed();
+      this.setControls(state === AgentState.COMPLETED ? 'done' : state === AgentState.FAILED ? 'failed' : 'idle');
+    } else if (t && state !== AgentState.IDLE) {
+      this.setControls('running');
+      this.pauseBtn.textContent = state === AgentState.PAUSED ? 'Resume' : 'Pause';
     }
   }
 
@@ -559,7 +574,7 @@ class SidePanelApp {
     if (this.llmElCount) this.llmElCount.textContent = payload ? String(payload.elementsSent ?? 0) : '0';
     if (this.llmRedacted) this.llmRedacted.textContent = String(payload ? (payload.redactedCount ?? redacted) : redacted);
     if (this.llmScreenshot) {
-      const screenshotLabels = { withheld: 'Withheld', masked: 'Masked', checked: 'Checked' };
+      const screenshotLabels = { withheld: 'Withheld', masked: 'Masked', checked: 'Checked', skipped: 'Skipped' };
       this.llmScreenshot.textContent = !payload ? '—'
         : screenshotLabels[payload.screenshotStatus] || 'Unknown';
     }
@@ -583,6 +598,15 @@ class SidePanelApp {
     lines.push(`elements_sent: ${payload ? payload.elementsSent : 0} (roles + redacted labels only)`);
     lines.push(`sensitive fields redacted: ${payload ? payload.redactedCount : redacted}`);
     lines.push(`screenshot: ${payload ? payload.screenshot : 'sanitized before upload'}`);
+    const timings = t?.lastStepTimings;
+    if (timings) {
+      lines.push(`last_step_ms: ${timings.total_ms ?? '—'}`);
+      const stageSummary = Object.entries(timings)
+        .filter(([name]) => name !== 'total_ms')
+        .map(([name, duration]) => `${name}=${duration}`)
+        .join(', ');
+      if (stageSummary) lines.push(`stage_ms: ${stageSummary}`);
+    }
     const traces = payload?.modelTrace;
     if (traces?.vision || traces?.reasoning) {
       const describe = (trace) => {
@@ -685,6 +709,7 @@ class SidePanelApp {
 
   showConfirmation(data) {
     if (!data?.action) return;
+    this.currentConfirmationData = data;
     this.closeModal(this.userInputModal);
     this.$('confirm-reason').textContent = data.reason || 'This action needs your approval.';
     this.$('confirm-action-verb').textContent = data.action.action || 'ACTION';
@@ -822,7 +847,9 @@ class SidePanelApp {
     this.send(MessageType.USER_PROVIDE_INPUT, {
       cancelled: false,
       answers,
-      saveToVault
+      saveToVault,
+      taskId: this.currentAskData?.taskId,
+      requestId: this.currentAskData?.requestId
     });
   }
 
@@ -832,7 +859,9 @@ class SidePanelApp {
       cancelled: false,
       skipped: true,
       answers: {},
-      saveToVault: []
+      saveToVault: [],
+      taskId: this.currentAskData?.taskId,
+      requestId: this.currentAskData?.requestId
     });
   }
 
@@ -978,8 +1007,13 @@ class SidePanelApp {
 
   reflectSettings(s) {
     if (!s) return;
-    try { localStorage.setItem('privagent_settings', JSON.stringify(s)); } catch { /* ignore */ }
+    try {
+      const cached = { ...s };
+      delete cached.backendToken;
+      localStorage.setItem('privagent_settings', JSON.stringify(cached));
+    } catch { /* ignore */ }
     this.$('settings-backend').value = s.backendUrl || '';
+    this.$('settings-backend-token').value = s.backendToken || '';
     this.$('settings-maxsteps').value = s.maxSteps || '';
     this.$('settings-confirm').checked = s.alwaysConfirm !== false;
     this.$('settings-debug').checked = !!s.showDebug;
@@ -996,6 +1030,7 @@ class SidePanelApp {
   saveSettings() {
     const settings = {
       backendUrl: this.$('settings-backend').value.trim(),
+      backendToken: this.$('settings-backend-token').value.trim(),
       maxSteps: Math.min(50, Math.max(1, parseInt(this.$('settings-maxsteps').value, 10) || 25)),
       alwaysConfirm: this.$('settings-confirm').checked,
       showDebug: this.$('settings-debug').checked
@@ -1059,6 +1094,7 @@ class SidePanelApp {
       ['step', `${t.currentStep ?? 0}/${t.maxSteps ?? 25}`],
       ['tab id', String(t.tabId ?? '—')],
       ['server calls', String(t.privacyMetrics?.serverCallsCount ?? 0)],
+      ['last step time', `${t.lastStepTimings?.total_ms ?? '—'} ms`],
       ['local vision time', `${t.privacyMetrics?.localVisionLatencyMs ?? 0} ms total`],
       ['OCR regions masked', String(t.privacyMetrics?.localOcrPiiRegions ?? 0)],
       ['people masked', String(t.privacyMetrics?.localPeopleMasked ?? 0)],
@@ -1076,6 +1112,66 @@ class SidePanelApp {
     exportButton.disabled = !(t.visionSamples || []).length;
     exportButton.addEventListener('click', () => this.downloadVisionEvaluation());
     this.debugBody.appendChild(exportButton);
+    const taskTraceButton = el('button', 'btn btn-secondary', 'Download task timing trace');
+    taskTraceButton.type = 'button';
+    taskTraceButton.disabled = !(t.steps || []).length && !t.terminalStepTimings;
+    taskTraceButton.addEventListener('click', () => this.downloadTaskTimingTrace());
+    this.debugBody.appendChild(taskTraceButton);
+  }
+
+  downloadTaskTimingTrace() {
+    const task = this.task;
+    if (!task) return;
+    const now = Date.now();
+    const reasoningModels = new Set();
+    const visionModels = new Set();
+    const finalTrace = task.lastLLMPayload?.modelTrace || {};
+    if (finalTrace.reasoning?.model) reasoningModels.add(finalTrace.reasoning.model);
+    if (finalTrace.vision?.model) visionModels.add(finalTrace.vision.model);
+    const steps = (task.steps || []).map((step) => {
+      const trace = step.diagnostic?.model_trace || {};
+      if (trace.reasoning?.model) reasoningModels.add(trace.reasoning.model);
+      if (trace.vision?.model) visionModels.add(trace.vision.model);
+      return {
+        step: step.stepNumber,
+        action: step.action?.action || null,
+        success: step.success !== false,
+        timings_ms: step.diagnostic?.timing_ms || null,
+        model_sources: {
+          reasoning: trace.reasoning?.source || null,
+          vision: trace.vision?.source || null
+        }
+      };
+    });
+    const elapsedMs = Math.max(0, (task.endTime || now) - (task.startTime || now));
+    const humanWaitMs = [
+      ...steps.map((step) => step.timings_ms),
+      task.terminalStepTimings
+    ].reduce((total, timings) => total + (timings?.user_wait_ms || 0) + (timings?.confirmation_wait_ms || 0), 0);
+    const run = {
+      task_id: task.id,
+      case_id: null,
+      intent: task.taskIntent || null,
+      status: task.state,
+      success: task.state === AgentState.COMPLETED ? true
+        : [AgentState.FAILED, AgentState.CANCELLED].includes(task.state) ? false : null,
+      reviewed_success: null,
+      elapsed_ms: elapsedMs,
+      agent_elapsed_ms: Math.max(0, elapsedMs - humanWaitMs),
+      human_wait_ms: humanWaitMs,
+      remote_calls: task.privacyMetrics?.serverCallsCount ?? null,
+      terminal_step_timings_ms: task.terminalStepTimings || null,
+      reasoning_models: [...reasoningModels],
+      vision_models: [...visionModels],
+      steps
+    };
+    const blob = new Blob([`${JSON.stringify(run)}\n`], { type: 'application/x-ndjson' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `${task.id || 'browser-agent'}-task-timing.jsonl`;
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
   downloadVisionEvaluation() {

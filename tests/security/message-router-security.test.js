@@ -9,7 +9,11 @@ function harness() {
   const calls = [];
   const chromeApi = { runtime: { id, onMessage: { addListener(fn) { listener = fn; } }, sendMessage() {} } };
   const manager = { settings: {}, getTask: () => null, updateSettings: async x => { calls.push(['settings', x]); return x; } };
-  const controller = Object.fromEntries(['startTask','pauseTask','resumeTask','cancelTask','handleUserConfirmation','handleUserInput'].map(k => [k, (...args) => calls.push([k, ...args])]));
+  // The router's only job is to authenticate the sender and forward verbatim;
+  // correlation and approval decisions belong to the controller. These stubs
+  // therefore record the payload and report success.
+  const record = (k) => (...args) => { calls.push([k, ...args]); return true; };
+  const controller = Object.fromEntries(['startTask','pauseTask','resumeTask','cancelTask','handleUserConfirmation','handleUserInput'].map(k => [k, record(k)]));
   controller.subscribe = () => {};
   const vault = { getAllSecretsForUI: () => { calls.push(['vault-read']); return { LOCAL_TEST: 'secret' }; }, getAvailableKeysSummary: () => [], updateSecret: async (...x) => calls.push(['vault-write', ...x]) };
   setupMessageRouter(chromeApi, { agentController: controller, taskManager: manager, localVault: vault });
@@ -48,10 +52,25 @@ test('cross-origin, content script, foreign extension, extension page and servic
   assert.deepEqual(calls, []);
 });
 
-test('the legitimate side panel can approve a pending action', () => {
+test('the legitimate side panel can approve a pending action, forwarding correlation ids verbatim', () => {
+  const { listener, calls } = harness();
+  let response;
+  const payload = { taskId: 'task_1', confirmationId: 'confirm_9', approved: true };
+  listener({ type: MessageType.USER_CONFIRM_ACTION, payload }, sidePanel, x => response = x);
+  assert.deepEqual(response, { success: true });
+  // Correlation ids must reach the controller untouched: it is the only place
+  // that can reject an approval meant for a different task or a stale prompt.
+  assert.deepEqual(calls[0], ['handleUserConfirmation', payload]);
+});
+
+test('the side panel cannot read a different task by omitting correlation ids', () => {
+  // The router forwards whatever the authenticated panel sends; the guard
+  // against a cross-task approval lives in handleUserConfirmation, which
+  // refuses any payload without matching taskId/confirmationId. This test
+  // pins that the router is not itself the enforcement point.
   const { listener, calls } = harness();
   let response;
   listener({ type: MessageType.USER_CONFIRM_ACTION, payload: { approved: true } }, sidePanel, x => response = x);
   assert.deepEqual(response, { success: true });
-  assert.deepEqual(calls[0], ['handleUserConfirmation', true]);
+  assert.deepEqual(calls[0], ['handleUserConfirmation', { approved: true }]);
 });

@@ -24,9 +24,11 @@ export class LocalVault {
           for (const [key, value] of Object.entries(stored.agent_local_vault)) {
             if (isVaultKey(key) && typeof value === 'string') safe[key] = value;
           }
-          // Remove legacy built-in demonstration credentials on upgrade.
-          for (const [key, value] of Object.entries(LEGACY_DEMO_VALUES)) {
-            if (safe[key] === value) delete safe[key];
+          // Remove old built-in demonstration values without shipping those
+          // values in readable source. Hashes are used only for this one-time
+          // exact migration comparison.
+          for (const [key, digest] of Object.entries(LEGACY_DEMO_VALUE_HASHES)) {
+            if (safe[key] && await sha256Hex(safe[key]) === digest) delete safe[key];
           }
           this.memoryStore = safe;
           if (Object.keys(safe).length !== Object.keys(stored.agent_local_vault).length) {
@@ -126,14 +128,25 @@ function isVaultKey(key) {
   return VAULT_KEYS.has(key) || /^LOCAL_CUSTOM_[A-Z0-9_]{1,48}$/.test(String(key || ''));
 }
 
-const LEGACY_DEMO_VALUES = {
-  LOCAL_AADHAAR: '4821 7392 0184', LOCAL_PAN: 'ABCDE1234F',
-  LOCAL_FULL_NAME: 'Vishal Agrawal', LOCAL_DOB: '15/08/2002',
-  LOCAL_PHONE: '9876543210', LOCAL_EMAIL: 'vishal.agrawal@example.com',
-  LOCAL_ADDRESS: 'Flat 402, Green Meadows, Baner, Pune, Maharashtra - 411045',
-  LOCAL_PASSWORD: 'SecureDemoPass#2026', LOCAL_PROFILE: 'Vishal Agrawal',
-  LOCAL_COUNTRY: 'us', LOCAL_GENDER: 'male', LOCAL_TERMS: 'yes',
-  LOCAL_SSN: '', LOCAL_SIN: '', LOCAL_NIN: '', LOCAL_NHS: '', LOCAL_IBAN: ''
-};
+async function sha256Hex(value) {
+  if (!globalThis.crypto?.subtle || typeof TextEncoder === 'undefined') return null;
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+const LEGACY_DEMO_VALUE_HASHES = Object.freeze({
+  LOCAL_AADHAAR: '63194b3251ceb3f9b8cd5058b7a6280b290b8eb3fa9f2e9307c6d93e3e66ccf9',
+  LOCAL_PAN: '6442fd73a940c1186d6268bd27f89233e12429902c7805037e8aab6e717be6d9',
+  LOCAL_FULL_NAME: '7554067a189dc3af0793145b2e4218b748d51c204f6e87b5fd7b507e626285c3',
+  LOCAL_DOB: 'a7f93df0154209611291f1524bcb0a488ec450445223d5c329c848fa03571f2f',
+  LOCAL_PHONE: '7619ee8cea49187f309616e30ecf54be072259b43760f1f550a644945d5572f2',
+  LOCAL_EMAIL: 'ed79ba7c86dbe2adb5b930124bac481465b8a77ab182f7819fd226d86fadefe7',
+  LOCAL_ADDRESS: '2a3ddd130f62c4e31499412ae92ec9bb4a23da993c9bd713438801a8c74e8069',
+  LOCAL_PASSWORD: '8687c59ab792afe5f9f8eb9a4ba434ed21ad91ff58dbb0f3c09a344b7d601aef',
+  LOCAL_PROFILE: '7554067a189dc3af0793145b2e4218b748d51c204f6e87b5fd7b507e626285c3',
+  LOCAL_COUNTRY: '79adb2a2fce5c6ba215fe5f27f532d4e7edbac4b6a5e09e1ef3a08084a904621',
+  LOCAL_GENDER: '0d248e82c62c9386878327d491c762a002152d42ab2c391a31c44d9f62675ddf',
+  LOCAL_TERMS: '8a798890fe93817163b10b5f7bd2ca4d25d84c52739a645a889c173eee7d9d3d'
+});
 
 export const defaultLocalVault = new LocalVault();

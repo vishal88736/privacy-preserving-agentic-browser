@@ -76,37 +76,32 @@ export function setupMessageRouter(chromeApi = chrome, deps = {}) {
         break;
 
       case MessageType.PAUSE_TASK:
-        controller.pauseTask();
-        sendResponse({ success: true });
+        sendResponse({ success: controller.pauseTask() });
         break;
 
       case MessageType.RESUME_TASK:
-        controller.resumeTask();
-        sendResponse({ success: true });
+        sendResponse({ success: controller.resumeTask() });
         break;
 
       case MessageType.CANCEL_TASK:
-        controller.cancelTask();
-        sendResponse({ success: true, task: manager.getTask() });
+        sendResponse({ success: controller.cancelTask(), task: manager.getTask() });
         break;
 
       case MessageType.USER_CONFIRM_ACTION:
-        controller.handleUserConfirmation(Boolean(payload?.approved));
-        sendResponse({ success: true });
+        sendResponse({ success: controller.handleUserConfirmation(payload || {}) });
         break;
 
       case MessageType.USER_PROVIDE_INPUT:
-        controller.handleUserInput(payload || {});
-        sendResponse({ success: true });
+        sendResponse({ success: controller.handleUserInput(payload || {}) });
         break;
 
       case MessageType.GET_AGENT_STATUS:
-        sendResponse({
+        manager.ready.then(() => sendResponse({
           task: manager.getTask(),
           settings: manager.settings,
           vaultSummary: vault.getAvailableKeysSummary()
-        });
-        break;
+        }));
+        return true;
 
       case MessageType.GET_VAULT:
         // Vault plaintext must never be exposed to webpage contexts.

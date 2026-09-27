@@ -19,7 +19,8 @@
     "build:firefox": "node scripts/package-extension.mjs firefox",
     "build:extensions": "npm run build:chrome && npm run build:firefox",
     "evaluate:vision": "python3 scripts/evaluate_vision.py",
-    "evaluate:agent": "python3 scripts/evaluate_agent_models.py"
+    "evaluate:agent": "python3 scripts/evaluate_agent_models.py",
+    "evaluate:task-runs": "python3 scripts/evaluate_task_runs.py"
   },
   "keywords": [
     "browser-extension",

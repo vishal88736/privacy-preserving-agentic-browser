@@ -61,6 +61,28 @@ export function validateAction(action) {
     }
   }
 
+  if (action.action === ActionType.FILL_FORM_PLAN) {
+    if (!action.value || !Array.isArray(action.value.fields) || action.value.fields.length === 0 || action.value.fields.length > 100) {
+      throw new ValidationError('FILL_FORM_PLAN requires a bounded, non-empty fields array');
+    }
+    const seen = new Set();
+    const allowedControls = new Set(['TEXT', 'EMAIL', 'PHONE', 'NUMBER', 'DATE', 'TEXTAREA', 'SELECT', 'CHECKBOX', 'RADIO']);
+    for (const field of action.value.fields) {
+      if (!field || typeof field !== 'object' || typeof field.field_id !== 'string' ||
+          !/^[A-Za-z0-9_\-:]{1,160}$/.test(field.field_id) || seen.has(field.field_id)) {
+        throw new ValidationError('FILL_FORM_PLAN contains a missing, invalid, or duplicate field target');
+      }
+      seen.add(field.field_id);
+      if (field.control_type && !allowedControls.has(field.control_type)) {
+        throw new ValidationError(`Invalid form control type: ${field.control_type}`);
+      }
+      if (field.value_source && !Object.values(SymbolicSecretSource).includes(field.value_source) &&
+          !/^LOCAL_CUSTOM_[A-Z0-9_]{1,48}$/.test(field.value_source)) {
+        throw new ValidationError(`Invalid form value_source: ${field.value_source}`);
+      }
+    }
+  }
+
   // Assign default risk if not provided
   if (!action.risk || !Object.values(RiskLevel).includes(action.risk)) {
     action.risk = RiskLevel.LOW;

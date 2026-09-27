@@ -204,6 +204,13 @@ class VLMService:
             "Black regions in the screenshot are local privacy masks: do not infer, reconstruct, or describe masked contents. "
             f"Known DOM summary: {heuristic.get('spatial_layout')}"
         )
+        visual_query = metadata.get("visual_query")
+        if isinstance(visual_query, str) and visual_query.strip():
+            prompt += (
+                " The user's visual question is: " + visual_query.strip()[:500] +
+                ". Answer only with visual details directly observable in unmasked regions; "
+                "say when the image does not provide enough evidence."
+            )
         redactions = metadata.get("privacy_redaction_summary") or {}
         if redactions:
             prompt += (

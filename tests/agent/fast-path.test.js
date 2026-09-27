@@ -18,7 +18,7 @@ function replaceMethod(target, name, value) {
   };
 }
 
-test('agent sends a locally sanitized screenshot to the VLM on every observation', async () => {
+test('agent skips screenshot work when the sanitized DOM is sufficient', async () => {
   const previousChrome = globalThis.chrome;
   const previousTask = taskManager.currentTask;
   const previousSettings = taskManager.settings;
@@ -107,11 +107,11 @@ test('agent sends a locally sanitized screenshot to the VLM on every observation
   try {
     const shouldContinue = await controller.runSingleStep(task);
     assert.equal(shouldContinue, false);
-    assert.equal(captureCalls, 1);
-    assert.equal(redactionCalls, 1);
-    assert.equal(visionArgs[1], safeScreenshot);
-    assert.equal(visionArgs[2].elements.some((element) => element.value === 'local-secret'), false);
-    assert.equal(visionArgs.length, 4);
+    assert.equal(captureCalls, 0);
+    assert.equal(redactionCalls, 0);
+    assert.equal(visionArgs, undefined);
+    assert.equal(task.lastLLMPayload.screenshotStatus, 'skipped');
+    assert.equal(task.lastLLMPayload.sampleElements[2].value, '[REDACTED]');
   } finally {
     for (const undo of restore.reverse()) undo();
     taskManager.currentTask = previousTask;

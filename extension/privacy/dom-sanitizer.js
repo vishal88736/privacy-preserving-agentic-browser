@@ -36,26 +36,34 @@ export class DOMSanitizer {
     return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
-  /**
-   * Replaces whole-token occurrences of a vault secret inside page-authored
-   * text. Word-boundary + case-sensitive matching prevents corrupting
-   * structural labels that merely contain the secret as a substring
-   * (e.g. vault "male" must not rewrite the label "Female").
-   */
-  _scrubVaultToken(out, secret, replacement) {
-    if (!secret || typeof secret !== 'string' || secret.length < 4) return out;
-    const variants = [secret];
-    const clean = secret.replace(/[\s-]/g, '');
-    if (clean.length >= 6 && clean !== secret) variants.push(clean);
-    for (const v of variants) {
-      if (!out.includes(v)) continue;
+  _vaultMinimumLength(key) {
+    return key === SymbolicSecretSource.LOCAL_CVV || key === SymbolicSecretSource.LOCAL_PASSWORD ? 3 : 4;
+  }
+
+  /** Case-insensitive whole-token matching tolerates whitespace and zero-width obfuscation. */
+  _scrubVaultToken(out, secret, replacement, minimumLength = 4) {
+    if (!secret || typeof secret !== 'string') return out;
+    const canonical = secret.normalize('NFKC').replace(/[\p{Cf}]/gu, '').trim();
+    const compact = canonical.replace(/[\s-]/g, '');
+    if (compact.length < minimumLength) return out;
+    const variants = [...new Set([canonical, compact])];
+    for (const variant of variants) {
+      if (!variant) continue;
+      const chunks = variant.split(/[\s-]+/).filter(Boolean);
+      if (!chunks.length) continue;
+      const chunkPattern = (chunk) => [...chunk].map((char) =>
+        `${this._escapeRegExp(char)}[\\p{Cf}]*`
+      ).join('');
+      const pattern = chunks.map(chunkPattern).join('[\\s-]+');
       try {
-        out = out.replace(new RegExp(`(?<!\\w)${this._escapeRegExp(v)}(?!\\w)`, 'g'), replacement);
+        const wholeToken = new RegExp(`(?<![\\p{L}\\p{N}])${pattern}(?![\\p{L}\\p{N}])`, 'giu');
+        out = out.replace(wholeToken, replacement);
       } catch {
-        // Lookbehind unsupported (very old engines): bounded match fallback.
+        // Keep privacy failure closed on older runtimes without Unicode property support.
         try {
-          out = out.replace(new RegExp(`(^|\\W)${this._escapeRegExp(v)}($|\\W)`, 'g'), (m, p1, p2) => `${p1}${replacement}${p2}`);
-        } catch { /* keep original text on regex failure */ }
+          const fallback = new RegExp(`(^|\\W)${this._escapeRegExp(variant)}($|\\W)`, 'gi');
+          out = out.replace(fallback, (match, prefix, suffix) => `${prefix}${replacement}${suffix}`);
+        } catch { /* retain input if the regular expression cannot be built */ }
       }
     }
     return out;
@@ -83,9 +91,12 @@ export class DOMSanitizer {
   scrubPlaceholderText(text, fieldContext = '') {
     if (!text || typeof text !== 'string') return text;
     let out = text;
-    for (const secret of this._vaultSecrets()) {
-      out = this._scrubVaultToken(out, secret, '[example]');
-    }
+    try {
+      const store = this.vault || defaultLocalVault;
+      for (const [key, secret] of Object.entries(store.getAllSecretsForUI())) {
+        out = this._scrubVaultToken(out, secret, '[example]', this._vaultMinimumLength(key));
+      }
+    } catch { /* keep page-authored hint if the vault is unavailable */ }
     return redactPII(out, fieldContext).replace(/\[REDACTED_[A-Z_]+\]/g, '[example]');
   }
 
@@ -95,14 +106,16 @@ export class DOMSanitizer {
    */
   sanitizeUserPrompt(text) {
     if (!text || typeof text !== 'string') return text;
-    let out = text;
+    // Canonicalize compatibility forms and discard invisible format
+    // characters before matching any identifiers or credentials.
+    let out = text.normalize('NFKC').replace(/[\p{Cf}]/gu, '');
     
     // 1. Vault secrets (whole-token only — see _scrubVaultToken: page text
     // like "Female" must not be corrupted by a "male" substring).
     try {
       const store = this.vault || defaultLocalVault;
       for (const [key, value] of Object.entries(store.getAllSecretsForUI())) {
-        out = this._scrubVaultToken(out, value, `[${key}]`);
+        out = this._scrubVaultToken(out, value, `[${key}]`, this._vaultMinimumLength(key));
       }
     } catch {
       // ignore vault errors
@@ -128,15 +141,17 @@ export class DOMSanitizer {
    */
   sanitizePageText(text) {
     if (!text || typeof text !== 'string') return text;
-    let out = text;
+    let out = text.normalize('NFKC').replace(/[\p{Cf}]/gu, '');
     try {
       const store = this.vault || defaultLocalVault;
       for (const [key, value] of Object.entries(store.getAllSecretsForUI())) {
-        out = this._scrubVaultToken(out, value, `[${key}]`);
+        out = this._scrubVaultToken(out, value, `[${key}]`, this._vaultMinimumLength(key));
       }
     } catch { /* ignore vault errors */ }
     out = out.replace(/\b(?:sk|pk|api)[-_][A-Za-z0-9_-]{16,}\b/gi, '[REDACTED_API_KEY]');
     out = out.replace(/\bBearer\s+[A-Za-z0-9._~+/-]{12,}={0,2}/gi, 'Bearer [REDACTED_TOKEN]');
+    out = out.replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, '[REDACTED_TOKEN]');
+    out = out.replace(/\b(?:reset|invite|token|auth|session|verify|verification|credential|secret|key|code)[-_]?[A-Za-z0-9_-]{12,}\b/gi, '[REDACTED_TOKEN]');
     return out;
   }
 
@@ -184,6 +199,19 @@ export class DOMSanitizer {
         // names). Blanket redaction of inputs longer than 20 chars destroyed
         // the task context the reasoner needs. PII in values is still caught
         // by detectPIIInText above and by the outbound policy engine.
+        if (typeof el.value === 'string' && el.value) {
+          const normalizedValue = el.value.normalize('NFKC').replace(/[\p{Cf}]/gu, '');
+          const scrubbedValue = this.sanitizeUserPrompt(el.value);
+          sanitized.value = scrubbedValue;
+          if (scrubbedValue !== normalizedValue) {
+            sanitized.sensitive = true;
+            const source = scrubbedValue.match(/\[(LOCAL_[A-Z0-9_]+)\]/)?.[1];
+            sanitized.value_source = source || SymbolicSecretSource.LOCAL_PROFILE;
+            sanitized.semantic_type = source?.replace(/^LOCAL_/, '') || 'CREDENTIAL';
+            sensitiveCount++;
+            detectedCategories.add(sanitized.semantic_type);
+          }
+        }
       }
 
       // 4. Scrub PII-shaped example text from placeholders (page-authored hints,
@@ -204,13 +232,13 @@ export class DOMSanitizer {
         // redacted and flagged so the executor matches the live option by
         // its text instead.
         sanitized.options = sanitized.options.map((o) => {
-          if (typeof o === 'string') return this.scrubPlaceholderText(o, fieldContext);
+          if (typeof o === 'string') return this.sanitizeUserPrompt(this.scrubPlaceholderText(o, fieldContext));
           if (o && typeof o === 'object') {
             const clean = { ...o };
-            if (typeof clean.text === 'string') clean.text = this.scrubPlaceholderText(clean.text, fieldContext);
-            if (typeof clean.label === 'string') clean.label = this.scrubPlaceholderText(clean.label, fieldContext);
+            if (typeof clean.text === 'string') clean.text = this.sanitizeUserPrompt(this.scrubPlaceholderText(clean.text, fieldContext));
+            if (typeof clean.label === 'string') clean.label = this.sanitizeUserPrompt(this.scrubPlaceholderText(clean.label, fieldContext));
             if (typeof clean.value === 'string' && clean.value.trim() &&
-                findPIIMatches(clean.value, fieldContext).length) {
+                (findPIIMatches(clean.value, fieldContext).length || this.sanitizeUserPrompt(clean.value) !== clean.value)) {
               clean.value = '[REDACTED]';
               clean.value_redacted = true;
             }
@@ -270,6 +298,7 @@ export class DOMSanitizer {
   getUnlocatedSensitiveCounts(rawDOM = {}) {
     const patterns = [
       ['CREDENTIAL', /\b(?:password|passcode|one[ .-]?time(?:[ .-]code|[ .-]password)?|otp|account number|bank account|api key|access token)\s*[:#-]\s*\S+/gi],
+      ['CREDENTIAL', /\b(?:cvv|cvc|card verification)\s*(?::|=|\bis\s+)?\d{3,4}\b/gi],
       ['CREDENTIAL', /\b(?:sk|pk|api)[-_][A-Za-z0-9_-]{16,}\b/gi],
       ['CREDENTIAL', /\bBearer\s+[A-Za-z0-9._~+/-]{12,}={0,2}/gi],
     ];
@@ -283,7 +312,7 @@ export class DOMSanitizer {
         if (!spansByCategory.has(category)) spansByCategory.set(category, []);
         spansByCategory.get(category).push({ start, end });
       };
-      for (const match of findPIIMatches(value, value)) addSpan(match.category, match.index, match.end);
+      for (const match of findPIIMatches(value, '')) addSpan(match.category, match.index, match.end);
       for (const [category, pattern] of patterns) {
         pattern.lastIndex = 0;
         for (const match of value.matchAll(pattern)) addSpan(category, match.index, match.index + match[0].length);
@@ -331,6 +360,11 @@ export class DOMSanitizer {
     return String(pathname || '').split('/').map((segment) => {
       if (!segment) return segment;
       if (findPIIMatches(segment).length) return '[REDACTED_PII]';
+      if (/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/.test(segment) ||
+          /(?:reset|invite|token|auth|session|verify|verification|credential|secret|key|code)[-_]?[A-Za-z0-9_-]{12,}/i.test(segment) ||
+          /^(?=[A-Za-z0-9_-]{24,}$)(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9_-]+$/.test(segment)) {
+        return '[REDACTED_TOKEN]';
+      }
       return this.sanitizePageText(segment);
     }).join('/');
   }
@@ -341,7 +375,7 @@ export class DOMSanitizer {
     try {
       const absolute = /^[a-z][a-z\d+.-]*:/i.test(href);
       const parsed = new URL(href, 'https://local.invalid');
-      const path = this.sanitizeUserPrompt(decodeURIComponent(parsed.pathname));
+      const path = this._sanitizePathSegments(decodeURIComponent(parsed.pathname));
       return absolute ? `${parsed.origin}${path}` : path;
     } catch {
       return '[LINK]';

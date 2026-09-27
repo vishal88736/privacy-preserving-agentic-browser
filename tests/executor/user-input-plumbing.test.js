@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { LocalVault } from '../../extension/privacy/local-vault.js';
 import { LocalValueResolver } from '../../extension/executor/local-value-resolver.js';
-import { TaskManager } from '../../extension/background/task-manager.js';
+import { TaskManager, taskManager } from '../../extension/background/task-manager.js';
 import { AgentController } from '../../extension/background/agent-controller.js';
 import { ActionValidator } from '../../extension/executor/action-validator.js';
 import { ActionType, AgentState, SymbolicSecretSource } from '../../extension/shared/constants.js';
@@ -90,23 +90,71 @@ test('TaskManager - cancelTask clears pendingUserInput', () => {
 });
 
 test('AgentController - handleUserInput resolves pending resolver', async () => {
-  const controller = new AgentController();
-  let resolvedPayload = null;
+  // AgentController.handleUserInput reads the module-level singleton, so the
+  // pending prompt has to be staged there. Restore it afterwards so the rest
+  // of the file still sees a clean manager.
+  const previousTask = taskManager.currentTask;
+  try {
+    const task = taskManager.createTask('Fill the ambiguous registration form', 123);
+    taskManager.setPendingUserInput({ prompt: 'Which newsletter do you want?' }, { requestId: 'req-1' });
+    const pending = taskManager.getTask().pendingUserInput;
+    assert.equal(pending.taskId, task.id, 'taskId must be derived by TaskManager');
+    assert.equal(pending.requestId, 'req-1');
 
-  const promise = new Promise((resolve) => {
-    controller.pendingUserInputResolver = resolve;
-  }).then((res) => {
-    resolvedPayload = res;
-  });
+    const controller = new AgentController();
+    let resolvedPayload = null;
 
-  controller.handleUserInput({ answers: { f_1: 'Value 1' }, saveToVault: [{ key: 'LOCAL_CITY', value: 'Delhi' }] });
-  await promise;
+    const promise = new Promise((resolve) => {
+      controller.pendingUserInputResolver = resolve;
+    }).then((res) => {
+      resolvedPayload = res;
+    });
 
-  assert.deepEqual(resolvedPayload, {
-    answers: { f_1: 'Value 1' },
-    saveToVault: [{ key: 'LOCAL_CITY', value: 'Delhi' }]
-  });
-  assert.equal(controller.pendingUserInputResolver, null);
+    controller.handleUserInput({
+      taskId: task.id,
+      requestId: 'req-1',
+      answers: { f_1: 'Value 1' },
+      saveToVault: [{ key: 'LOCAL_CITY', value: 'Delhi' }]
+    });
+    // Guard against a regression that leaves the resolver unsettled: a bare
+    // await here would hang the whole suite until the runner is killed.
+    await Promise.race([
+      promise,
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error('handleUserInput did not resolve the pending resolver')), 2000
+      ))
+    ]);
+
+    assert.deepEqual(resolvedPayload.answers, { f_1: 'Value 1' });
+    assert.deepEqual(resolvedPayload.saveToVault, [{ key: 'LOCAL_CITY', value: 'Delhi' }]);
+    assert.equal(controller.pendingUserInputResolver, null);
+  } finally {
+    taskManager.currentTask = previousTask;
+  }
+});
+
+test('AgentController - handleUserInput ignores a mismatched requestId', async () => {
+  const previousTask = taskManager.currentTask;
+  try {
+    taskManager.createTask('Fill the ambiguous registration form', 123);
+    taskManager.setPendingUserInput({ prompt: 'Which newsletter do you want?' }, { requestId: 'req-1' });
+
+    const controller = new AgentController();
+    let resolved = false;
+    controller.pendingUserInputResolver = () => { resolved = true; };
+
+    const accepted = controller.handleUserInput({
+      taskId: taskManager.getTask().id,
+      requestId: 'not-the-pending-request',
+      answers: { f_1: 'Value 1' }
+    });
+
+    assert.equal(accepted, false, 'a stale requestId must not resolve the pending prompt');
+    assert.equal(resolved, false);
+    assert.ok(controller.pendingUserInputResolver, 'resolver must survive a rejected answer');
+  } finally {
+    taskManager.currentTask = previousTask;
+  }
 });
 
 test('ActionValidator - ASK_USER requires no target element', () => {

@@ -8,13 +8,29 @@ import { SymbolicSecretSource } from '../shared/constants.js';
 import { defaultLocalVault } from '../privacy/local-vault.js';
 
 const SEMANTIC_PATTERNS = [
+  // One-time and verification codes come FIRST. A page chooses these labels, so
+  // "Enter the code we sent" must never be scored as a password field: routing
+  // it to LOCAL_PASSWORD writes the user's account password into a bank/payment
+  // OTP box. They resolve to no vault source (ASK_USER) instead.
+  { type: 'otp', regex: /\b(?:otp|one[\s_.-]?time[\s_.-]?(?:code|password|pin)?|verification[\s_.-]?code|security[\s_.-]?code|auth(?:entication)?[\s_.-]?code|2fa|mfa|confirm(?:ation)?[\s_.-]?code|pin[\s_.-]?number|atm[\s_.-]?pin)\b/i, weight: 1.0 },
+  { type: 'captcha', regex: /\b(?:captcha|recaptcha|hcaptcha|captcha[\s_.-]?challenge|are[\s_.-]?you[\s_.-]?a[\s_.-]?robot|i'?m[\s_.-]?not[\s_.-]?a[\s_.-]?robot)\b/i, weight: 1.0 },
+  { type: 'security_answer', regex: /\b(?:security[\s_.-]?(?:answer|question)|mother'?s?[\s_.-]?maiden[\s_.-]?name|first[\s_.-]?(?:pet|school))\b/i, weight: 1.0 },
+  { type: 'cvv', regex: /\b(?:cvv2?|cvc2?|cid|card[\s_.-]?(?:verification|security)[\s_.-]?(?:code|number))\b/i, weight: 1.0 },
+  { type: 'card_number', regex: /\b(?:card[\s_.-]?number|cc[\s_.-]?num(?:ber)?|credit[\s_.-]?card|debit[\s_.-]?card|account[\s_.-]?number)\b/i, weight: 1.0 },
+  // `pin` and a bare `secret` are deliberately absent: a PIN is an OTP, and
+  // "secret" matches "secret question", "secret sauce", and "top secret".
+  { type: 'password', regex: /\b(?:pass(?:word|wd|code|phrase)|pwd|pw)\b/i, weight: 1.0 },
+  { type: 'username', regex: /\b(?:user[\s_.-]?name|login[\s_.-]?id|handle|screen[\s_.-]?name|nick[\s_.-]?name)\b/i, weight: 1.0 },
   { type: 'first_name', regex: /\b(first.?name|fname|given.?name)\b/i, weight: 1.0 },
   { type: 'last_name', regex: /\b(last.?name|lname|surname|family.?name)\b/i, weight: 1.0 },
-  { type: 'full_name', regex: /\b(full.?name|your.?name|applicant|candidate.?name|\bname\b)\b/i, weight: 0.8 },
+  // Bare `name` is excluded. After normalization `user_name`, `file_name` and
+  // `customer_name` all collapse to a "name" token, which would send the user's
+  // legal name into a username or a file-upload field. A genuine full-name
+  // field must say so.
+  { type: 'full_name', regex: /\b(?:full[\s_.-]?name|your[\s_.-]?name|applicant|candidate|legal[\s_.-]?name|real[\s_.-]?name|two[\s_.-]?word[\s_.-]?name)\b/i, weight: 0.8 },
   { type: 'email', regex: /\b(email|e-mail|mail\s*address)\b/i, weight: 1.0 },
   { type: 'phone', regex: /\b(phone|mobile|tel|contact\s*number|cell)\b/i, weight: 1.0 },
   { type: 'date_of_birth', regex: /\b(dob|date.?of.?birth|birth.?date)\b/i, weight: 1.0 },
-  { type: 'password', regex: /\b(password|passcode|secret|pin)\b/i, weight: 1.0 },
   { type: 'address_line1', regex: /\b(address.?1|street.?address|address.?line.?1|address)\b/i, weight: 0.9 },
   { type: 'city', regex: /\b(city|town)\b/i, weight: 1.0 },
   { type: 'state', regex: /\b(state|province|region)\b/i, weight: 1.0 },
@@ -37,6 +53,21 @@ const SEMANTIC_PATTERNS = [
   { type: 'tax_id', regex: /\b(?:tax.?id|tax.?identification.?number)\b/i, weight: 0.95 },
   { type: 'terms', regex: /\b(terms|conditions|agree|accept)\b/i, weight: 1.0 }
 ];
+
+/**
+ * Semantics that must never be filled from the local vault.
+ *
+ * Two groups:
+ *  - Secrets the agent simply cannot know (one-time codes, card CVVs, security
+ *    answers). These route to ASK_USER so the user supplies the value.
+ *  - Identity strings where the vault holds the wrong thing (a username is not
+ *    the user's legal name).
+ *  - Human-verification challenges. Nothing here may be solved or bypassed.
+ */
+const NEVER_FROM_VAULT = new Set([
+  'otp', 'captcha', 'security_answer', 'cvv', 'card_number', 'username'
+]);
+
 
 export class FormAnalyzer {
   constructor(vault = defaultLocalVault) {
@@ -202,12 +233,22 @@ export class FormAnalyzer {
     // generic "Name" control should not become first_name just because the
     // surrounding form also has a separate first-name field.
     const directEvidence = normalizeEvidence([f.label, f.name, f.id, f.placeholder, f.ariaLabel, f.semantic_type]);
+    // `name` is only a full-name signal when it is not the tail of a compound
+    // identifier. The page controls `name`/`id`, and normalization has already
+    // turned `user_name` into "user name", so a bare match here would put the
+    // user's legal name into a username or file-upload control.
+    const compoundName = /\b(?:user|login|account|file|image|domain|host|table|column|row|class|style|script|collection|group|nick|display|project|product|item|page|site|app|company|brand|db|field|method|function|module|package|repo|table)\s?name\b/i.test(directEvidence);
     const specificName = directEvidence.match(/\b(first.?name|fname|given.?name)\b/i);
     if (specificName) return { semantic_type: 'first_name', confidence: 0.99 };
     const familyName = directEvidence.match(/\b(last.?name|lname|surname|family.?name)\b/i);
     if (familyName) return { semantic_type: 'last_name', confidence: 0.99 };
-    if (/\b(full.?name|your.?name|applicant.?name|candidate.?name|name)\b/i.test(directEvidence)) {
+    if (/\b(full.?name|your.?name|applicant|candidate|legal.?name)\b/i.test(directEvidence)) {
       return { semantic_type: 'full_name', confidence: 0.95 };
+    }
+    // A control literally captioned "Name" on a signup form is a real full-name
+    // field, but only when nothing qualifies it as part of another identifier.
+    if (!compoundName && /\bname\b/i.test(directEvidence)) {
+      return { semantic_type: 'full_name', confidence: 0.9 };
     }
     const evidence = normalizeEvidence([
       f.label,
@@ -251,6 +292,12 @@ export class FormAnalyzer {
   }
 
   mapToValueSource(semanticType) {
+    const key = semanticType?.toLowerCase();
+    // Hard refusal, checked before every other route including the
+    // LOCAL_PROFILE fallback. A one-time code, a CVV, a captcha, or a username
+    // must never receive a vault value, and must never be handed a generic
+    // profile blob either.
+    if (key && NEVER_FROM_VAULT.has(key)) return null;
     const map = {
       'first_name': SymbolicSecretSource.LOCAL_FULL_NAME, // A better resolver would split this
       'last_name': SymbolicSecretSource.LOCAL_FULL_NAME,

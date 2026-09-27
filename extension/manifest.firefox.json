@@ -3,7 +3,7 @@
   "name": "Privacy-Preserving Agentic Browser (SIH)",
   "version": "1.0.0",
   "description": "Browser agent with local OCR and object detection, client-side visual PII masking, and VLM reasoning over sanitized screenshots.",
-  "permissions": ["tabs", "scripting", "storage"],
+  "permissions": ["tabs", "scripting", "storage", "alarms"],
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",

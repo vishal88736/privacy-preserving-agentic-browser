@@ -11,6 +11,50 @@
 import { ActionType, SymbolicSecretSource } from '../shared/constants.js';
 
 export class PromptBuilder {
+  selectRelevantVisibleText(text, task, maxChars = 1200) {
+    const source = String(text || '').replace(/\s+/g, ' ').trim();
+    if (source.length <= maxChars) return { text: source, sourceChars: source.length, omittedChars: 0 };
+
+    const stopWords = new Set([
+      'the', 'and', 'for', 'from', 'with', 'that', 'this', 'then', 'than', 'into',
+      'open', 'click', 'find', 'show', 'get', 'please', 'page', 'site', 'website',
+      'use', 'using', 'want', 'need', 'have', 'has', 'are', 'was', 'were', 'what',
+      'where', 'when', 'which', 'who', 'how', 'you', 'your', 'not', 'but', 'all'
+    ]);
+    const terms = [...new Set((String(task || '').toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) || [])
+      .filter((term) => !stopWords.has(term)))];
+    const chunks = [];
+    for (let start = 0; start < source.length; start += 360) {
+      const end = Math.min(source.length, start + 360);
+      const value = source.slice(start, end).trim();
+      const lower = value.toLowerCase();
+      const chunkTerms = new Set(lower.match(/[\p{L}\p{N}]{3,}/gu) || []);
+      const score = terms.reduce((sum, term) => sum + (chunkTerms.has(term) ? 1 : 0), 0);
+      chunks.push({ start, value, score });
+    }
+    const matching = chunks.filter((chunk) => chunk.score > 0);
+    const pool = matching.length ? matching : chunks;
+    pool.sort((a, b) => b.score - a.score || a.start - b.start);
+
+    const selected = [];
+    let used = 0;
+    for (const chunk of pool) {
+      const separatorLength = selected.length ? 3 : 0;
+      const remaining = maxChars - used - separatorLength;
+      if (remaining <= 0) break;
+      const value = chunk.value.slice(0, remaining);
+      selected.push({ start: chunk.start, value });
+      used += separatorLength + value.length;
+    }
+    selected.sort((a, b) => a.start - b.start);
+    const selectedText = selected.map((chunk) => chunk.value).join(' … ');
+    return {
+      text: selectedText,
+      sourceChars: source.length,
+      omittedChars: Math.max(0, source.length - selected.reduce((sum, chunk) => sum + chunk.value.length, 0))
+    };
+  }
+
   compactElements(unifiedObservation, pageState) {
     const rankedIds = new Set((pageState?.ranked_candidates || []).map((c) => c.element_id));
     const mustKeep = new Set();
@@ -72,7 +116,11 @@ export class PromptBuilder {
     }));
   }
 
-  compactObservation(unifiedObservation, pageState) {
+  compactObservation(unifiedObservation, pageState, task = '') {
+    const visibleText = this.selectRelevantVisibleText(
+      unifiedObservation.visible_text || pageState?.visible_text_excerpt || '',
+      task
+    );
     return {
       page: {
         domain: unifiedObservation.page?.domain,
@@ -88,7 +136,9 @@ export class PromptBuilder {
       ranked_candidates: pageState?.ranked_candidates || [],
       resolved_references: pageState?.resolved_references || {},
       form_state: unifiedObservation.form_state,
-      visible_text: String(pageState?.visible_text_excerpt || unifiedObservation.visible_text || '').slice(0, 1200),
+      visible_text: visibleText.text,
+      visible_text_source_chars: visibleText.sourceChars,
+      visible_text_omitted_chars: visibleText.omittedChars,
       elements: this.compactElements(unifiedObservation, pageState)
     };
   }
@@ -115,7 +165,7 @@ export class PromptBuilder {
   buildPlanningPrompt(userTask, unifiedObservation, taskHistory = [], taskState = null, pageState = null) {
     const allowedActions = Object.values(ActionType).filter(action => action !== ActionType.UPLOAD).join(', ');
     const allowedSecretSources = Object.values(SymbolicSecretSource).join(', ');
-    const compact = this.compactObservation(unifiedObservation, pageState);
+    const compact = this.compactObservation(unifiedObservation, pageState, userTask);
     const allowedIds = compact.elements.map((e) => e.id);
 
     // L17: Scroll context
@@ -181,7 +231,7 @@ ${JSON.stringify(taskState && taskState.toPayload ? taskState.toPayload() : (tas
 - Result sets: ${JSON.stringify(compact.result_sets)}
 
 <untrusted_webpage_content>
-${JSON.stringify({ elements: compact.elements, visible_text: compact.visible_text }, null, 2)}
+${JSON.stringify({ elements: compact.elements, visible_text: compact.visible_text, visible_text_omitted_chars: compact.visible_text_omitted_chars }, null, 2)}
 </untrusted_webpage_content>
 
 ### TASK HISTORY (Recent steps):

@@ -4,70 +4,58 @@
   "quantization": "q4",
   "ocr_language": "eng",
   "runtime_downloads": false,
-  "total_bytes": 62568918,
+  "total_bytes": 47414288,
   "files": [
     {
-      "path": "Xenova/yolos-tiny/config.json",
+      "path": "models/Xenova/yolos-tiny/config.json",
       "bytes": 4145
     },
     {
-      "path": "Xenova/yolos-tiny/onnx/model_q4.onnx",
+      "path": "models/Xenova/yolos-tiny/onnx/model_q4.onnx",
       "bytes": 7809003
     },
     {
-      "path": "Xenova/yolos-tiny/preprocessor_config.json",
+      "path": "models/Xenova/yolos-tiny/preprocessor_config.json",
       "bytes": 457
     },
     {
-      "path": "Xenova/yolos-tiny/quantize_config.json",
+      "path": "models/Xenova/yolos-tiny/quantize_config.json",
       "bytes": 887
     },
     {
-      "path": "lang/eng.traineddata.gz",
+      "path": "models/lang/eng.traineddata.gz",
       "bytes": 2952873
     },
     {
-      "path": "onnxruntime-web/ort-wasm-simd-threaded.jsep.mjs",
+      "path": "vendor/onnxruntime-web/ort-wasm-simd-threaded.jsep.mjs",
       "bytes": 46851
     },
     {
-      "path": "onnxruntime-web/ort-wasm-simd-threaded.jsep.wasm",
+      "path": "vendor/onnxruntime-web/ort-wasm-simd-threaded.jsep.wasm",
       "bytes": 28352885
     },
     {
-      "path": "onnxruntime-web/ort-wasm-simd-threaded.mjs",
-      "bytes": 24381
-    },
-    {
-      "path": "onnxruntime-web/ort-wasm-simd-threaded.wasm",
-      "bytes": 14264838
-    },
-    {
-      "path": "onnxruntime-web/ort.all.bundle.min.mjs",
+      "path": "vendor/onnxruntime-web/ort.all.bundle.min.mjs",
       "bytes": 865411
     },
     {
-      "path": "onnxruntime-web/ort.min.mjs",
-      "bytes": 865411
-    },
-    {
-      "path": "tesseract/tesseract-core-simd-lstm.wasm",
+      "path": "vendor/tesseract/tesseract-core-simd-lstm.wasm",
       "bytes": 2857601
     },
     {
-      "path": "tesseract/tesseract-core-simd-lstm.wasm.js",
+      "path": "vendor/tesseract/tesseract-core-simd-lstm.wasm.js",
       "bytes": 3899472
     },
     {
-      "path": "tesseract/tesseract.esm.min.js",
+      "path": "vendor/tesseract/tesseract.esm.min.js",
       "bytes": 63220
     },
     {
-      "path": "tesseract/worker.min.js",
+      "path": "vendor/tesseract/worker.min.js",
       "bytes": 111307
     },
     {
-      "path": "transformers/transformers.web.min.js",
+      "path": "vendor/transformers/transformers.web.min.js",
       "bytes": 450176
     }
   ]

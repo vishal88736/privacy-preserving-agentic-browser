@@ -12,8 +12,9 @@ import json
 import re
 from playwright.sync_api import sync_playwright
 
-EXT_PATH = os.path.abspath("extension")
-BROWSER_BIN = "/home/vishal/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome"
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+EXT_PATH = os.path.join(REPO_ROOT, "extension")
+BROWSER_BIN = os.environ.get("PRIVAGENT_BROWSER_BIN")
 USER_DATA = "/tmp/test_chrome_profile_privagent_audit"
 
 SENSITIVE_TEST_VALUES = [

@@ -51,7 +51,11 @@ const CONTEXT_RULES = {
   nhs: /\bnhs(?:\s*(?:number|no\.?))?\b/i,
   iban: /\biban\b/i,
   ifsc: /\bifsc\b/i,
-  dob: /\b(?:dob|date\s*of\s*birth|birth\s*date|born\s*on|birthday)\b/i
+  dob: /\b(?:dob|date\s*of\s*birth|birth\s*date|born\s*on|birthday)\b/i,
+  otp: /\b(?:otp|one[ -]?time(?:[ -]?(?:password|code))?|verification code|security code)\b/i,
+  password: /\b(?:password|passcode|passphrase)\b/i,
+  cvv: /\b(?:cvv|cvc|card verification)\b/i,
+  bank_account: /\b(?:bank account|account number|acct(?:\s*(?:number|no\.?))?)\b/i
 };
 
 export const PII_RULES = [
@@ -70,6 +74,10 @@ export const PII_RULES = [
   { id: 'DOB_DMY', category: PIICategory.DOB, source: SymbolicSecretSource.LOCAL_DOB, pattern: /\b(?:0[1-9]|[12]\d|3[01])[-/.](?:0[1-9]|1[0-2])[-/.](?:19|20)\d{2}\b/g, context: 'dob', confidence: 0.9 },
   { id: 'DOB_MDY', category: PIICategory.DOB, source: SymbolicSecretSource.LOCAL_DOB, pattern: /\b(?:0[1-9]|1[0-2])[-/.](?:0[1-9]|[12]\d|3[01])[-/.](?:19|20)\d{2}\b/g, context: 'dob', confidence: 0.86 },
   { id: 'IFSC', category: PIICategory.IFSC, source: SymbolicSecretSource.LOCAL_PROFILE, pattern: /\b[A-Z]{4}0[A-Z0-9]{6}\b/gi, context: 'ifsc', confidence: 0.9 }
+  ,{ id: 'OTP', category: PIICategory.OTP, source: SymbolicSecretSource.LOCAL_PASSWORD, pattern: /\b(?:\d{4,10}|[A-Z0-9]{6,10})\b/gi, context: 'otp', confidence: 0.9 }
+  ,{ id: 'PASSWORD_TEXT', category: PIICategory.PASSWORD, source: SymbolicSecretSource.LOCAL_PASSWORD, pattern: /\b(?:password|passcode|passphrase)\s*(?::|=|\bis\s+)(?!required\b|incorrect\b|invalid\b|blank\b|empty\b|not\b)[A-Za-z0-9!@#$%^&*._+~-]{3,64}\b/gi, context: 'password', confidence: 0.9 }
+  ,{ id: 'CVV', category: PIICategory.CVV, source: SymbolicSecretSource.LOCAL_CVV, pattern: /\b\d{3,4}\b/g, context: 'cvv', confidence: 0.92 }
+  ,{ id: 'BANK_ACCOUNT', category: PIICategory.BANK_ACCOUNT, source: SymbolicSecretSource.LOCAL_PROFILE, pattern: /\b(?:\d[ -]?){8,18}(?!\d)/g, context: 'bank_account', confidence: 0.88 }
 ];
 
 /**
@@ -107,13 +115,53 @@ function hasNearbyTrigger(text, index, length, contextPattern) {
   return re.test(text.slice(start, end));
 }
 
+const DECIMAL_BLOCK_STARTS = [
+  0x0660, 0x06f0, 0x07c0, 0x0966, 0x09e6, 0x0a66, 0x0ae6, 0x0b66,
+  0x0be6, 0x0c66, 0x0ce6, 0x0d66, 0x0de6, 0x0e50, 0x0ed0, 0x0f20,
+  0x1040, 0x1090, 0x17e0, 0x1810, 0x1946, 0x19d0, 0x1a80, 0x1a90,
+  0x1b50, 0x1bb0, 0x1c40, 0x1c50, 0xa620, 0xa8d0, 0xa900, 0xa9d0,
+  0xa9f0, 0xaa50, 0xabf0, 0xff10, 0x104a0, 0x10d30, 0x11066, 0x110f0,
+  0x11136, 0x111d0, 0x112f0, 0x11450, 0x114d0, 0x11650, 0x116c0,
+  0x11730, 0x118e0, 0x11950, 0x11c50, 0x11d50, 0x11da0, 0x16a60,
+  0x16ac0, 0x16b50, 0x1d7ce, 0x1d7d8, 0x1d7e2, 0x1d7ec, 0x1d7f6,
+  0x1e140, 0x1e2f0, 0x1e4f0, 0x1e950
+];
+
+/** NFKC plus zero-width/format removal, retaining offsets into the source. */
+function canonicalizeWithOffsets(source) {
+  let canonical = '';
+  const starts = [];
+  const ends = [];
+  let originalOffset = 0;
+  for (const originalChar of source) {
+    const originalStart = originalOffset;
+    originalOffset += originalChar.length;
+    const normalized = originalChar.normalize('NFKC').replace(/[\p{Cf}]/gu, '');
+    for (const char of normalized) {
+      let normalizedChar = char;
+      const point = char.codePointAt(0);
+      if (/\p{Nd}/u.test(char)) {
+        const block = DECIMAL_BLOCK_STARTS.find((start) => point >= start && point < start + 10);
+        if (block !== undefined) normalizedChar = String(point - block);
+      }
+      canonical += normalizedChar;
+      for (let i = 0; i < normalizedChar.length; i++) {
+        starts.push(originalStart);
+        ends.push(originalOffset);
+      }
+    }
+  }
+  return { text: canonical, starts, ends };
+}
+
 export function findPIIMatches(text, contextHint = '') {
   if (typeof text !== 'string' || !text) return [];
+  const canonical = canonicalizeWithOffsets(text);
   // A non-empty hint is FIELD-level context (label/name). An absent hint
   // (policy engine, raw text) must not degrade into payload-wide context —
   // gated rules then rely on proximity to the match alone.
   const hasFieldContext = typeof contextHint === 'string' && contextHint.trim().length > 0;
-  const context = hasFieldContext ? contextHint : '';
+  const context = hasFieldContext ? canonicalizeWithOffsets(contextHint).text : '';
   const matches = [];
   for (const rule of PII_RULES) {
     const contextPattern = rule.context instanceof RegExp ? rule.context : CONTEXT_RULES[rule.context];
@@ -125,20 +173,23 @@ export function findPIIMatches(text, contextHint = '') {
     );
     const flags = rule.pattern.flags.includes('g') ? rule.pattern.flags : rule.pattern.flags + 'g';
     const pattern = new RegExp(rule.pattern.source, flags);
-    for (const match of text.matchAll(pattern)) {
+    for (const match of canonical.text.matchAll(pattern)) {
       if (rule.validate) {
         try { if (!rule.validate(match[0])) continue; }
         catch { /* validator failure fails closed: redact the pattern match */ }
       }
-      if (!contextOk && !hasNearbyTrigger(text, match.index, match[0].length, contextPattern)) continue;
+      if (!contextOk && !hasNearbyTrigger(canonical.text, match.index, match[0].length, contextPattern)) continue;
+      const sourceStart = canonical.starts[match.index] ?? match.index;
+      const sourceEnd = canonical.ends[Math.max(match.index, match.index + match[0].length - 1)] ?? (match.index + match[0].length);
+      if (sourceEnd <= sourceStart) continue;
       matches.push({
         id: rule.id,
         category: rule.category,
         source: rule.source,
         confidence: rule.confidence,
-        value: match[0],
-        index: match.index,
-        end: match.index + match[0].length
+        value: text.slice(sourceStart, sourceEnd),
+        index: sourceStart,
+        end: sourceEnd
       });
     }
   }

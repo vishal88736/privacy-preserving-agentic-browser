@@ -9,6 +9,16 @@ import { MessageType } from '../shared/messages.js';
 import { validateNavigationUrl } from '../navigation/navigation.js';
 import { defaultLocalValueResolver } from './local-value-resolver.js';
 
+const CHROME_API_TIMEOUT_MS = 10000;
+
+function withTimeout(promise, ms = CHROME_API_TIMEOUT_MS, message = 'The browser did not respond in time.') {
+  let timer;
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), ms); })
+  ]).finally(() => clearTimeout(timer));
+}
+
 export class ActionExecutor {
   constructor(valueResolver = defaultLocalValueResolver) {
     this.valueResolver = valueResolver;
@@ -38,7 +48,7 @@ export class ActionExecutor {
       if (!validation.valid) {
         throw new Error(`New-tab navigation blocked: ${validation.reason}`);
       }
-      const openedTab = await chrome.tabs.create({ url: validation.normalizedUrl, active: true });
+      const openedTab = await withTimeout(chrome.tabs.create({ url: validation.normalizedUrl, active: true }));
       if (!Number.isInteger(openedTab?.id)) {
         return { success: false, error: 'The browser did not return an ID for the new tab.' };
       }
@@ -74,7 +84,7 @@ export class ActionExecutor {
         throw new Error(`Navigation blocked: ${validation.reason}`);
       }
       const targetUrl = validation.normalizedUrl;
-      await chrome.tabs.update(tabId, { url: targetUrl });
+      await withTimeout(chrome.tabs.update(tabId, { url: targetUrl }));
 
       // Wait for navigation and document load
       await new Promise((resolve) => {
@@ -126,46 +136,42 @@ export class ActionExecutor {
     };
 
     // Dispatch execution command to Content Script in the tab
-    return new Promise((resolve) => {
-      chrome.tabs.sendMessage(
-        tabId,
-        { type: MessageType.EXECUTE_ACTION, payload },
-        async (response) => {
-          if (chrome.runtime.lastError) {
-            const errMsg = chrome.runtime.lastError.message;
-            // Resilient auto-injection if tab existed prior to extension reload
-            if (errMsg.includes('Could not establish connection') && typeof chrome !== 'undefined' && chrome.scripting) {
-              try {
-                await chrome.scripting.executeScript({
-                  target: { tabId },
-                  files: ['content/content.js']
-                });
-                chrome.tabs.sendMessage(
-                  tabId,
-                  { type: MessageType.EXECUTE_ACTION, payload },
-                  (retryRes) => {
-                    if (chrome.runtime.lastError) {
-                      resolve({ success: false, error: chrome.runtime.lastError.message });
-                    } else {
-                      resolve(retryRes || { success: true });
-                    }
-                  }
-                );
-                return;
-              } catch (injectErr) {
-                console.error("[ActionExecutor] Injection error:", injectErr);
-                resolve({ success: false, error: injectErr.message });
-                return;
-              }
-            }
-            console.error("[ActionExecutor] sendMessage error:", errMsg);
-            resolve({ success: false, error: errMsg });
-          } else {
-            resolve(response || { success: true });
-          }
-        }
-      );
+    const send = () => new Promise((resolve) => {
+      let settled = false;
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(result);
+      };
+      const timer = setTimeout(() => finish({ success: false, error: 'Action execution timed out.' }), CHROME_API_TIMEOUT_MS);
+      try {
+        chrome.tabs.sendMessage(tabId, { type: MessageType.EXECUTE_ACTION, payload }, (response) => {
+          const runtimeError = chrome.runtime.lastError;
+          finish(runtimeError
+            ? { success: false, error: runtimeError.message }
+            : (response || { success: true }));
+        });
+      } catch (error) {
+        finish({ success: false, error: error?.message || 'Action dispatch failed.' });
+      }
     });
+
+    let result = await send();
+    if (!result?.success && String(result?.error || '').includes('Could not establish connection') && chrome.scripting) {
+      try {
+        await withTimeout(chrome.scripting.executeScript({
+          target: { tabId },
+          files: ['content/content.js']
+        }), CHROME_API_TIMEOUT_MS, 'Content script injection timed out.');
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        result = await send();
+      } catch (injectErr) {
+        console.error('[ActionExecutor] Injection error:', injectErr);
+        return { success: false, error: injectErr?.message || 'Could not initialize the page action executor.' };
+      }
+    }
+    return result;
   }
 }
 

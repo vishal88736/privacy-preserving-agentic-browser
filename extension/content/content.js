@@ -264,6 +264,10 @@
         const label = this.getAccessibleLabel(node);
         const context = this.getContextText(node);
         const price_value = this.parsePrice(`${label} ${context}`);
+        const describedBy = String(node.getAttribute('aria-describedby') || '').split(/\s+/)
+          .map((id) => document.getElementById(id)?.innerText || '')
+          .filter(Boolean).join(' ').slice(0, 500);
+        const fieldsetLegend = node.closest('fieldset')?.querySelector('legend')?.innerText?.trim()?.slice(0, 240) || '';
 
         let options = undefined;
         if (tag === 'select') {
@@ -288,10 +292,13 @@
           type: node.type || '',
           name: node.name || '',
           label,
+          accessible_name: label,
           placeholder: node.placeholder || '',
           value: node.value || '',
           autocomplete: node.autocomplete || '',
           ariaLabel: node.getAttribute('aria-label') || '',
+          ariaDescribedBy: describedBy,
+          fieldset_legend: fieldsetLegend,
           role: node.getAttribute('role') || '',
           href: node.getAttribute('href') || '',
           disabled: Boolean(node.disabled),
@@ -335,7 +342,7 @@
     }
 
     _hasOpaqueVisualSurface() {
-      for (const el of document.querySelectorAll('canvas, video')) {
+      for (const el of document.querySelectorAll('canvas, video, iframe')) {
         const rect = el.getBoundingClientRect();
         if (rect.width > 0 && rect.height > 0 && this.isElementVisible(el, rect)) return true;
       }

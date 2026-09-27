@@ -2,9 +2,10 @@ import os
 import time
 from playwright.sync_api import sync_playwright
 
-EXT_PATH = os.path.abspath("extension")
-CHROMIUM_EXEC = "/home/vishal/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome"
-OUT_DIR = os.path.abspath("tests/qa_screenshots")
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+EXT_PATH = os.path.join(REPO_ROOT, "extension")
+CHROMIUM_EXEC = os.environ.get("PRIVAGENT_BROWSER_BIN")
+OUT_DIR = os.path.join(os.path.dirname(__file__), "qa_screenshots")
 os.makedirs(OUT_DIR, exist_ok=True)
 
 def run_visual_qa():

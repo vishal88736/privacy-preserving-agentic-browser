@@ -12,8 +12,8 @@ import re
 import tempfile
 from playwright.sync_api import sync_playwright
 
-EXT_PATH = os.path.abspath("extension")
-BROWSER_BIN = os.environ.get("PRIVAGENT_BROWSER_BIN", "/home/vishal/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome")
+EXT_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "extension"))
+BROWSER_BIN = os.environ.get("PRIVAGENT_BROWSER_BIN")
 
 def setup_browser(p):
     user_data = tempfile.mkdtemp(prefix="privagent-e2e-suite-")

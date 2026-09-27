@@ -127,6 +127,10 @@ def _reasoning_api_key(base_url):
 class Settings:
     HOST: str = os.getenv("HOST", "127.0.0.1")
     PORT: int = _env_int("PORT", 8000)
+    BACKEND_SHARED_SECRET: str = os.getenv("BACKEND_SHARED_SECRET", "")
+    EXTENSION_ORIGINS: tuple = tuple(
+        origin.strip() for origin in os.getenv("EXTENSION_ORIGINS", "").split(",") if origin.strip()
+    )
 
     # Supports one general reasoning key plus provider-specific keys.
     API_KEY: str = _reasoning_api_key(_CONFIGURED_AI_BASE_URL or _default_ai_base_url())
@@ -152,3 +156,7 @@ class Settings:
     REASONING_REQUEST_TIMEOUT_SECONDS: float = max(1.0, _env_float("REASONING_REQUEST_TIMEOUT_SECONDS", 12))
 
 settings = Settings()
+
+if settings.HOST not in {"127.0.0.1", "localhost", "::1"}:
+    logger.warning("Non-loopback HOST is disabled for this local agent backend; binding to 127.0.0.1.")
+    settings.HOST = "127.0.0.1"

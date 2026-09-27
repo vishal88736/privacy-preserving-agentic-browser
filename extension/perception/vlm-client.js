@@ -11,6 +11,7 @@ import { defaultPolicyEngine } from '../privacy/policy-engine.js';
 export class VLMClient {
   constructor(baseUrl = ServerDefaults.BACKEND_BASE_URL) {
     this.baseUrl = baseUrl;
+    this.authToken = '';
     this.policyEngine = defaultPolicyEngine;
   }
 
@@ -56,7 +57,10 @@ export class VLMClient {
       try {
         response = await fetch(`${this.baseUrl}${ServerDefaults.VISION_ENDPOINT}`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            ...(this.authToken ? { 'X-PrivAgent-Token': this.authToken } : {})
+          },
           body: JSON.stringify(payload),
           signal: ac.signal
         });

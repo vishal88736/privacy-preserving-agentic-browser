@@ -13,6 +13,7 @@ __pycache__/
 references/
 scratch/
 scratch*.py
+run_test_*.py
 launch_test_browser.py
 
 # Test artifacts
