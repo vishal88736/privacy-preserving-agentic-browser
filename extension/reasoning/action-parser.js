@@ -45,7 +45,9 @@ export class ActionParser {
 
     const action = (parsed.action && typeof parsed.action === 'object') ? parsed.action : parsed;
     const thought = parsed.thought || 'Executing next step';
-    const isTerminal = parsed.is_terminal || (typeof action.action === 'string' && action.action === 'DONE');
+    // Only the validated action can complete a task. A separate model flag is
+    // not evidence that the requested outcome has been reached.
+    const isTerminal = typeof action.action === 'string' && action.action === 'DONE';
 
     // Validate against strict action schema
     validateAction(action);

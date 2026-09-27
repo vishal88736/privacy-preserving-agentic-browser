@@ -11,6 +11,7 @@ import { localInterpretTask, parseTaskSemantics } from './task-understanding.js'
 import { defaultPromptBuilder } from './prompt-builder.js';
 import { defaultFormAnalyzer } from './form-analyzer.js';
 import { defaultFormPlanBuilder } from './form-plan-builder.js';
+import { defaultTaskGrounding } from '../perception/task-grounding.js';
 import { rankCandidates, ambiguousCandidates, requiredCapabilities, SemanticType } from '../perception/semantic-capability.js';
 
 export class GPTOSSClient {
@@ -73,7 +74,9 @@ export class GPTOSSClient {
           value: { prompt: 'Choose the file directly in the webpage file picker. The extension does not read or upload local documents.' }
         },
         isTerminal: false,
-        remoteCallMade: false
+        remoteCallMade: false,
+        remoteCallAttempted: false,
+        model_trace: { component: 'reasoning', source: 'local', provider: null, model: null, planner: 'upload_guard' }
       };
     }
     const isFormTask = String(interpreted?.intent || '').toUpperCase() === 'FILL_FORM' ||
@@ -98,7 +101,9 @@ export class GPTOSSClient {
             : 'Waiting for the user to resolve fields without a clear saved value.',
           action: formDecision.action,
           isTerminal: false,
-          remoteCallMade: false
+          remoteCallMade: false,
+          remoteCallAttempted: false,
+          model_trace: { component: 'reasoning', source: 'local', provider: null, model: null, planner: 'form_plan_builder' }
         };
       }
 
@@ -111,7 +116,9 @@ export class GPTOSSClient {
           thought: 'All actionable profile fields are resolved; the form was left unsubmitted.',
           action: { action: ActionType.DONE, risk: RiskLevel.LOW, requires_confirmation: false },
           isTerminal: true,
-          remoteCallMade: false
+          remoteCallMade: false,
+          remoteCallAttempted: false,
+          model_trace: { component: 'reasoning', source: 'local', provider: null, model: null, planner: 'form_plan_builder' }
         };
       }
     }
@@ -122,7 +129,10 @@ export class GPTOSSClient {
       action: s.action?.action,
       target: s.action?.target?.element_id || s.action?.target?.label,
       success: s.success,
-      error: s.error || undefined
+      error: s.error || undefined,
+      ...(s.action?.action === ActionType.EXTRACT && s.success !== false && typeof s.result?.extractedText === 'string'
+        ? { extracted_text: s.result.extractedText.slice(0, 3500) }
+        : {})
     }));
 
     const payload = {
@@ -150,7 +160,7 @@ export class GPTOSSClient {
       }
 
       const data = await response.json();
-      if (typeof data.action === 'object') {
+      if (data && data.action && typeof data.action === 'object') {
         const isDone = data.action?.action === 'DONE';
         return {
           task_understanding: data.task_understanding,
@@ -159,10 +169,17 @@ export class GPTOSSClient {
           grounding: data.grounding,
           thought: data.thought || 'Planning next action based on semantic reasoning',
           action: data.action,
-          isTerminal: isDone
+          isTerminal: isDone,
+          remoteCallMade: true,
+          remoteCallAttempted: true,
+          model_trace: data.model_trace || { component: 'reasoning', source: 'remote', provider: null, model: null }
         };
       }
-      return this.actionParser.parse(data.raw_response || JSON.stringify(data));
+      const parsed = this.actionParser.parse(data?.raw_response || JSON.stringify(data || {}));
+      parsed.remoteCallMade = true;
+      parsed.remoteCallAttempted = true;
+      parsed.model_trace = data?.model_trace || { component: 'reasoning', source: 'remote', provider: null, model: null };
+      return parsed;
     } catch (err) {
       if (err?.name === 'OutboundPolicyViolationError') {
         // The payload was never sent. Surface the privacy block (category
@@ -170,22 +187,32 @@ export class GPTOSSClient {
         // planner, which fills configured fields without network data.
         console.warn('[GPTOSSClient] Outbound privacy block; using grounded local planner.');
         try {
-          const local = this._localPlannerFallback(task, fusedObservation, taskHistory, taskState);
+          const local = this._localPlannerFallback(task, fusedObservation, taskHistory, taskState, pageState);
+          local.remoteCallMade = false;
+          local.remoteCallAttempted = false;
           local.privacyBlocked = String(err.message || 'Outbound privacy block').slice(0, 200);
           local.thought = `[local-fallback] ${local.privacyBlocked} — continuing with the local planner.`;
+          local.model_trace = { component: 'reasoning', source: 'local', provider: null, model: null, planner: 'grounded_fallback', reason: 'privacy_policy' };
           return local;
         } catch (fallbackErr) {
           return {
             thought: `Outbound privacy block: ${err.message}`,
             action: { action: ActionType.WAIT, risk: RiskLevel.LOW, requires_confirmation: false },
             isTerminal: false,
-            privacyBlocked: String(err.message || 'Outbound privacy block').slice(0, 200)
+            privacyBlocked: String(err.message || 'Outbound privacy block').slice(0, 200),
+            remoteCallMade: false,
+            remoteCallAttempted: false,
+            model_trace: { component: 'reasoning', source: 'local', provider: null, model: null, planner: 'wait_fallback', reason: 'privacy_policy' }
           };
         }
       }
       console.warn(`[GPTOSSClient] Remote reasoning unavailable (${err.message}). Using grounded local planner.`);
       try {
-        return this._localPlannerFallback(task, fusedObservation, taskHistory, taskState);
+        const local = this._localPlannerFallback(task, fusedObservation, taskHistory, taskState, pageState);
+        local.remoteCallMade = false;
+        local.remoteCallAttempted = true;
+        local.model_trace = { component: 'reasoning', source: 'local', provider: null, model: null, planner: 'grounded_fallback', reason: err?.name || 'remote_error' };
+        return local;
       } catch (fallbackErr) {
         console.warn(`[GPTOSSClient] Local planner failed: ${fallbackErr.message}`);
         return {
@@ -195,7 +222,10 @@ export class GPTOSSClient {
             risk: RiskLevel.LOW,
             requires_confirmation: false
           },
-          isTerminal: false
+          isTerminal: false,
+          remoteCallMade: false,
+          remoteCallAttempted: true,
+          model_trace: { component: 'reasoning', source: 'local', provider: null, model: null, planner: 'wait_fallback', reason: 'local_planner_error' }
         };
       }
     }
@@ -208,7 +238,7 @@ export class GPTOSSClient {
    * via lexical grounding + task semantics + history. The thought explicitly
    * marks this as a local fallback so callers never mistake it for LLM output.
    */
-  _localPlannerFallback(task, fusedObservation, taskHistory = [], taskState = null) {
+  _localPlannerFallback(task, fusedObservation, taskHistory = [], taskState = null, pageState = null) {
     const obs = fusedObservation || {};
     const elements = obs.elements || [];
     const history = taskHistory || [];
@@ -400,22 +430,21 @@ export class GPTOSSClient {
         }
         return mk(ActionType.TYPE, next.id, { value_source: SymbolicSecretSource.LOCAL_PROFILE, thought: `Fill ${labelOf(next) || next.id} from local profile` });
       }
-      // Flight from/to: "from PUNE to DELHI".
-      const fromTo = lowerTask.match(/from\s+([a-z\s]+?)\s+to\s+([a-z\s]+?)(?:\s+tomorrow|\s+today|$)/i);
-      if (fromTo && nonSearch.length >= 1) {
-        const origin = fromTo[1].trim().replace(/\b(cheapest|flight|flights)\b/gi, '').trim() || fromTo[1].trim();
-        const dest = fromTo[2].trim().replace(/\b(cheapest|flight|flights)\b/gi, '').trim() || fromTo[2].trim();
-        const cap = (s) => s ? s[0].toUpperCase() + s.slice(1) : s;
-        // Heuristic: first input = origin, second = destination.
-        if (!typedIds.size && nonSearch.length >= 2) {
-          return mk(ActionType.TYPE, nonSearch[0].id, { value: cap(origin.split(' ')[0]), thought: `Type origin ${origin}` });
+      // Generic route filling: bind "from X to Y" to controls whose labels
+      // identify origin and destination. Do not infer field meaning from DOM
+      // order; if the page does not label the route fields, leave it to the
+      // remote reasoner or ask for clarification.
+      const route = lowerTask.match(/\bfrom\s+(.+?)\s+to\s+(.+?)(?:\s+(?:tomorrow|today|on\s+\d)|$)/i);
+      if (route) {
+        const origin = task.match(/\bfrom\s+(.+?)\s+to\s+/i)?.[1]?.trim();
+        const destination = task.match(/\bfrom\s+.+?\s+to\s+(.+?)(?:\s+(?:tomorrow|today|on\s+\d)|$)/i)?.[1]?.trim();
+        const originField = nonSearch.find((e) => /\b(from|origin|source|departure)\b/i.test(`${labelOf(e)} ${domOf(e).name || ''} ${domOf(e).id || ''}`));
+        const destinationField = nonSearch.find((e) => /\b(to|destination|arrival)\b/i.test(`${labelOf(e)} ${domOf(e).name || ''} ${domOf(e).id || ''}`));
+        if (origin && originField && !typedIds.has(originField.id)) {
+          return mk(ActionType.TYPE, originField.id, { value: origin, thought: `Type the requested origin into the labeled origin field.` });
         }
-        if (nonSearch.length >= 2) {
-          const alreadyTypedOrigin = [...typedIds].length >= 1;
-          if (alreadyTypedOrigin) {
-            const destEl = nonSearch.find((e) => !typedIds.has(e.id));
-            if (destEl) return mk(ActionType.TYPE, destEl.id, { value: cap(dest.split(' ')[0]), thought: `Type destination ${dest}` });
-          }
+        if (destination && destinationField && !typedIds.has(destinationField.id)) {
+          return mk(ActionType.TYPE, destinationField.id, { value: destination, thought: `Type the requested destination into the labeled destination field.` });
         }
       }
       // Generic search/play: type the clean query into the search box.
@@ -463,27 +492,28 @@ export class GPTOSSClient {
       // click a nearby non-submit control.
     }
 
-    // 4. Results: click cheapest/first/video result, skipping player controls.
+    // 4. Select a result only when the user asked to open/select/rank one.
+    // The grounded reference resolver decides which current result matches;
+    // never assume the first card is the user's intended target.
     const results = obs.result_items || [];
-    if (results.length) {
-      let pick = results[0];
-      if (/\bpro\b/i.test(lowerTask)) pick = results.find(r => /\bpro\b/i.test(r.title || r.text)) || pick;
-      else if (/\bteam\b/i.test(lowerTask)) pick = results.find(r => /\bteam\b/i.test(r.title || r.text)) || pick;
-      else if (/\bbasic\b/i.test(lowerTask)) pick = results.find(r => /\bbasic\b/i.test(r.title || r.text)) || pick;
-
-      if (pick.primary_action_id && elById.has(pick.primary_action_id) && !clickedIds.has(pick.primary_action_id)) {
+    const wantsResultSelection = Boolean(semantics.asks_to_select_result);
+    if (results.length && wantsResultSelection) {
+      const grounded = pageState?.resolved_references ||
+        defaultTaskGrounding.ground(taskState || interpreted, obs).resolved_references;
+      const selected = grounded.selected_item;
+      const selectedId = selected?.element_id || grounded.cheapest || grounded.first_suitable;
+      const pick = results.find((item) => item.primary_action_id === selectedId);
+      if (pick?.primary_action_id && elById.has(pick.primary_action_id) && !clickedIds.has(pick.primary_action_id)) {
         return mk(ActionType.CLICK, pick.primary_action_id, { thought: `Open result "${pick.title || pick.id}"` });
       }
     }
-    // Video results: links with views/title that are not player controls.
-    const videoLink = elements.find((e) => {
-      if (tagOf(e) !== 'a' || clickedIds.has(e.id)) return false;
-      const l = labelOf(e);
-      if (/previous|next|play|pause|volume|mute|mix|subscribe|like|share/i.test(l)) return false;
-      return /views|official|video|song/i.test(l) || /watch\?v=/.test(domOf(e).href || '');
-    });
-    if (videoLink && taskHistory.some((h) => h.action?.action === 'CLICK' || h.action?.action === 'TYPE')) {
-      return mk(ActionType.CLICK, videoLink.id, { thought: `Open video result ${videoLink.id}` });
+
+    // A search task that has reached result content is complete if it only
+    // asked to display results. Do not open a result as an extra action.
+    if (results.length && !wantsResultSelection && taskHistory.some((h) =>
+      h.success !== false && h.action?.action === 'TYPE' && isSearchBox(elById.get(h.action?.target?.element_id))
+    )) {
+      return doneAction('The requested search results are visible.');
     }
 
     // 5. Submit when the form looks complete.

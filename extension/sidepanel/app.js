@@ -583,6 +583,18 @@ class SidePanelApp {
     lines.push(`elements_sent: ${payload ? payload.elementsSent : 0} (roles + redacted labels only)`);
     lines.push(`sensitive fields redacted: ${payload ? payload.redactedCount : redacted}`);
     lines.push(`screenshot: ${payload ? payload.screenshot : 'sanitized before upload'}`);
+    const traces = payload?.modelTrace;
+    if (traces?.vision || traces?.reasoning) {
+      const describe = (trace) => {
+        if (!trace) return 'not run';
+        const source = trace.source || 'unknown';
+        const identity = [trace.provider, trace.model].filter(Boolean).join(' / ');
+        const planner = trace.planner ? ` (${trace.planner})` : '';
+        return `${source}${identity ? `: ${identity}` : ''}${planner}`;
+      };
+      lines.push(`vision: ${describe(traces.vision)}`);
+      lines.push(`reasoning: ${describe(traces.reasoning)}`);
+    }
     if (payload?.localVision) {
       const local = payload.localVision;
       lines.push(`local_vision: ${local.model} completed in ${local.analysisMs} ms (load ${local.modelLoadMs} ms, inference ${local.inferenceMs} ms)`);

@@ -29,6 +29,39 @@ export class ActionExecutor {
       return { success: true, isTerminal: true };
     }
 
+    if (action.action === ActionType.OPEN_TAB) {
+      const rawTarget = action.target?.url || action.value;
+      if (!rawTarget) {
+        throw new Error('OPEN_TAB action requires a target URL');
+      }
+      const validation = validateNavigationUrl(rawTarget);
+      if (!validation.valid) {
+        throw new Error(`New-tab navigation blocked: ${validation.reason}`);
+      }
+      const openedTab = await chrome.tabs.create({ url: validation.normalizedUrl, active: true });
+      if (!Number.isInteger(openedTab?.id)) {
+        return { success: false, error: 'The browser did not return an ID for the new tab.' };
+      }
+      await new Promise((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          chrome.tabs.onUpdated?.removeListener?.(listener);
+          resolve();
+        };
+        const listener = (updatedTabId, changeInfo) => {
+          if (updatedTabId === openedTab.id && changeInfo.status === 'complete') finish();
+        };
+        const timer = setTimeout(finish, 5000);
+        if (openedTab.status === 'complete') finish();
+        else chrome.tabs.onUpdated?.addListener?.(listener);
+      });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      return { success: true, openedUrl: validation.normalizedUrl, openedTabId: openedTab.id };
+    }
+
     if (action.action === ActionType.NAVIGATE) {
       const rawTarget = action.target?.url || action.value;
       if (!rawTarget) {

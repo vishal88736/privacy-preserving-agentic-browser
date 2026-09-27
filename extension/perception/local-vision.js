@@ -161,6 +161,7 @@ export class LocalVisionEngine {
         env.allowLocalModels = true;
         env.localModelPath = this.api.runtime.getURL('models/');
         env.useBrowserCache = false;
+        env.logLevel = 40;
         env.backends = env.backends || {};
         env.backends.onnx = env.backends.onnx || {};
         env.backends.onnx.wasm = env.backends.onnx.wasm || {};

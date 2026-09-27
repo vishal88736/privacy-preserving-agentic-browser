@@ -44,6 +44,7 @@ export class VLMClient {
         fallback._source = 'DOM_ONLY';
         fallback._error = String(err?.message || err).slice(0, 200);
         fallback.privacyBlocked = true;
+        fallback.remoteCallAttempted = false;
         return fallback;
       }
       throw err;
@@ -75,12 +76,21 @@ export class VLMClient {
       // when no vision model responds. Never label that "remote-vlm" —
       // downstream fusion must know it is not visual proof.
       obs._source = obs?.provenance || (obs?.grounding_source === 'vision_model' ? 'DOM_PLUS_REAL_VLM' : 'DOM_PLUS_HEURISTIC');
+      obs.remoteCallAttempted = true;
+      obs.model_trace ||= {
+        component: 'vision',
+        source: obs._source === 'DOM_PLUS_REAL_VLM' ? 'remote' : 'dom_heuristic',
+        provider: null,
+        model: null
+      };
       return obs;
     } catch (err) {
       console.warn(`[VLMClient] Remote VLM request failed (${err.message}). Using local visual inference.`);
       const fallback = this._domOnlyObservation(sanitizedDom);
       fallback._source = 'DOM_ONLY';
+      fallback.model_trace = { component: 'vision', source: 'dom_only', provider: null, model: null };
       fallback._error = String(err?.message || err).slice(0, 200);
+      fallback.remoteCallAttempted = true;
       return fallback;
     }
   }
@@ -93,6 +103,8 @@ export class VLMClient {
   domOnlyObservation(sanitizedDom, errorNote = null) {
     const fallback = this._domOnlyObservation(sanitizedDom);
     fallback._source = 'DOM_ONLY';
+    fallback.model_trace = { component: 'vision', source: 'dom_only', provider: null, model: null };
+    fallback.remoteCallAttempted = false;
     if (errorNote) fallback._error = String(errorNote).slice(0, 200);
     return fallback;
   }

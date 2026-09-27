@@ -150,7 +150,7 @@ export function setupMessageRouter(chromeApi = chrome, deps = {}) {
         payload: { event, data, task }
       }, () => {
         // Panel closed or no listener — expected, ignore.
-        if (chromeApi.runtime?.lastError) { /* noop */ }
+        const _ = (typeof chrome !== 'undefined' && chrome.runtime?.lastError) || chromeApi.runtime?.lastError;
       });
     } catch {
       // Side panel unavailable — task state remains persisted via taskManager.persist().

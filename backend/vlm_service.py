@@ -303,6 +303,15 @@ class VLMService:
                     if fabricated:
                         print(f"[VLM] {candidate['provider']} output contained fabricated sensitive content; rotating provider/key")
                         continue
+                    # Report the active provider/model so downstream task
+                    # diagnostics can distinguish actual visual inference
+                    # from the DOM heuristic used when vision is unavailable.
+                    out["model_trace"] = {
+                        "component": "vision",
+                        "source": "remote",
+                        "provider": candidate["provider"],
+                        "model": candidate["model"],
+                    }
                     return out
                 print(f"[VLM] {candidate['provider']} response missing layout keys; rotating provider/key")
             except Exception as exc:

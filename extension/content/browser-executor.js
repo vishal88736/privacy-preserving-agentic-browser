@@ -125,9 +125,36 @@ export class BrowserExecutor {
     try {
       if (String(element.type || '').toLowerCase() === 'date' && typeof text === 'string') {
         const t = text.trim();
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(t)) {
-          const m = t.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/);
-          if (m) rawText = `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+        if (/^\d{4}-\d{2}-\d{2}$/.test(t)) {
+          rawText = t;
+        } else {
+          const ymd = t.match(/^(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})$/);
+          if (ymd) {
+            rawText = `${ymd[1]}-${ymd[2].padStart(2, '0')}-${ymd[3].padStart(2, '0')}`;
+          } else {
+            const m = t.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2}|\d{4})$/);
+            if (m) {
+              let year = m[3];
+              if (year.length === 2) {
+                const yNum = Number(year);
+                year = yNum < 70 ? `20${year}` : `19${year}`;
+              }
+              const first = Number(m[1]);
+              const second = Number(m[2]);
+              const monthFirst = first <= 12 && second > 12;
+              rawText = monthFirst
+                ? `${year}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}`
+                : `${year}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+            } else {
+              const parsed = new Date(t);
+              if (!isNaN(parsed.getTime())) {
+                const yyyy = parsed.getFullYear();
+                const mm = String(parsed.getMonth() + 1).padStart(2, '0');
+                const dd = String(parsed.getDate()).padStart(2, '0');
+                rawText = `${yyyy}-${mm}-${dd}`;
+              }
+            }
+          }
         }
       }
     } catch { /* use original text */ }

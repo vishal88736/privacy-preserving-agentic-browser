@@ -18,6 +18,18 @@ const STOP = new Set([
   'need', 'use', 'using', 'used', 'try', 'am', 'are', 'i', 'now', 'how'
 ]);
 
+// Keep negative clauses from being mistaken for positive browser commands.
+// This is only a conservative local hint; the model still receives the full
+// original request and all explicit constraints.
+function positiveInstructionText(text) {
+  return String(text || '')
+    .split(/[,;]|\bbut\b|\bhowever\b|\band\s+then\b|\bthen\b|\band\b/i)
+    .filter((clause) => !/\b(?:do\s+not|don't|never|avoid|without|not)\b/i.test(clause))
+    .join(' and ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 // L19: Intent detection — SEARCH must be checked before FILL_FORM because
 // "find the cheapest and fill booking" should start as SEARCH, not FILL_FORM.
 // L20: Multi-intent patterns for composite decomposition.
@@ -52,11 +64,13 @@ const COMPOUND_PATTERNS = [
 export function localInterpretTask(rawPrompt) {
   const text = String(rawPrompt || '').trim();
   const lower = text.toLowerCase();
+  const positiveText = positiveInstructionText(text);
+  const positiveLower = positiveText.toLowerCase();
 
   // L19: Walk intent rules in correct priority order
   let intent = 'ACT';
   for (const rule of INTENT_RULES) {
-    if (rule.pattern.test(lower)) {
+    if (rule.pattern.test(positiveLower)) {
       intent = rule.intent;
       break;
     }
@@ -65,25 +79,25 @@ export function localInterpretTask(rawPrompt) {
   // L20: Detect secondary intent for compound tasks
   let secondaryIntent = null;
   for (const cp of COMPOUND_PATTERNS) {
-    if (cp.pattern.test(lower)) {
+    if (cp.pattern.test(positiveLower)) {
       secondaryIntent = cp.secondaryIntent;
       break;
     }
   }
 
   const constraints = [];
-  if (/cheap|lowest|least\s*expensive|min(?:imum)?\s*price/i.test(lower)) constraints.push('cheapest');
-  if (/latest|newest|most\s*recent/i.test(lower)) constraints.push('latest');
-  if (/best|top\s*rated|highest\s*rated/i.test(lower)) constraints.push('best_rated');
-  if (/most\s*popular|most\s*viewed|trending/i.test(lower)) constraints.push('most popular');
-  if (/ask\s*before\s*submitt|confirm\s*before|ask\s*me\s*before/i.test(lower)) constraints.push('must ask user before submitting');
+  if (/cheap|lowest|least\s*expensive|min(?:imum)?\s*price/i.test(positiveLower)) constraints.push('cheapest');
+  if (/latest|newest|most\s*recent/i.test(positiveLower)) constraints.push('latest');
+  if (/best|top\s*rated|highest\s*rated/i.test(positiveLower)) constraints.push('best_rated');
+  if (/most\s*popular|most\s*viewed|trending/i.test(positiveLower)) constraints.push('most popular');
+  if (/ask\s*before\s*submitt|confirm\s*before|ask\s*me\s*before/i.test(positiveLower)) constraints.push('must ask user before submitting');
   if (/\bdon'?t\s+submit\b|do\s+not\s+submit|never\s+submit/i.test(lower)) constraints.push('must NOT submit the form');
-  const budget = lower.match(/(?:under|below|less than|upto|up to|<=|≤)\s*(?:₹|rs\.?|inr)?\s*([\d,]+)\s*(k)?/i);
+  const budget = positiveLower.match(/(?:under|below|less than|upto|up to|<=|≤)\s*(?:₹|rs\.?|inr)?\s*([\d,]+)\s*(k)?/i);
   if (budget) constraints.push(`price <= ${budget[1].replace(/,/g, '')}${budget[2] ? '000' : ''}`);
-  if (/\bfirst\b/.test(lower)) constraints.push('first matching result');
+  if (/\bfirst\b/.test(positiveLower)) constraints.push('first matching result');
 
   // L18: Better entity extraction with expanded stop-word filtering
-  const entities = text
+  const entities = positiveText
     .split(/[^A-Za-z0-9₹$]+/)
     .filter((w) => w.length > 2 && !STOP.has(w.toLowerCase()))
     .slice(0, 12);
@@ -116,7 +130,7 @@ export function localInterpretTask(rawPrompt) {
     subgoals,
     current_subgoal: subgoals[0],
     current_subgoal_index: 0,
-    confidence: 0.55
+    confidence: semantics.confidence ?? 0.55
   };
 }
 
@@ -126,6 +140,8 @@ export function localInterpretTask(rawPrompt) {
 export function parseTaskSemantics(rawPrompt) {
   const text = String(rawPrompt || '').trim();
   const lower = text.toLowerCase();
+  const positiveText = positiveInstructionText(text);
+  const positiveLower = positiveText.toLowerCase();
 
   const SITE_NAMES = {
     youtube: 'YouTube', google: 'Google', amazon: 'Amazon', flipkart: 'Flipkart',
@@ -135,26 +151,26 @@ export function parseTaskSemantics(rawPrompt) {
     ebay: 'eBay', spotify: 'Spotify', netflix: 'Netflix', wikipedia: 'Wikipedia',
     booking: 'Booking', irctc: 'IRCTC'
   };
-  const siteMatch = lower.match(/\b(youtube|google|amazon|flipkart|bing|duckduckgo|github|stackoverflow|gmail|drive|maps|facebook|twitter|instagram|linkedin|reddit|ebay|spotify|netflix|wikipedia|booking|irctc|x\.com)\b/i);
+  const siteMatch = positiveLower.match(/\b(youtube|google|amazon|flipkart|bing|duckduckgo|github|stackoverflow|gmail|drive|maps|facebook|twitter|instagram|linkedin|reddit|ebay|spotify|netflix|wikipedia|booking|irctc|x\.com)\b/i);
   const siteKey = siteMatch ? siteMatch[1].toLowerCase() : null;
   let site = siteKey === 'x.com' ? 'X' : (SITE_NAMES[siteKey] || null);
   if (!site) {
     // Generic fallback: any literal domain token in the task ("book on
     // cleartrip.com") names the site without a hand-maintained map entry.
-    const domain = lower.match(/\b([a-z0-9][a-z0-9-]{1,}\.(?:com|org|net|io|in|co\.uk|edu|gov))\b/i);
+    const domain = positiveLower.match(/\b([a-z0-9][a-z0-9-]{1,}\.(?:com|org|net|io|in|co\.uk|edu|gov))\b/i);
     if (domain) site = domain[1];
   }
 
   let ranking_constraint = null;
-  if (/most\s*popular|most\s*viewed|trending/i.test(text)) ranking_constraint = 'most popular';
-  else if (/latest|newest|most\s*recent/i.test(text)) ranking_constraint = 'latest';
-  else if (/cheap|lowest|least\s*expensive/i.test(text)) ranking_constraint = 'cheapest';
-  else if (/best|top\s*rated|highest\s*rated/i.test(text)) ranking_constraint = 'best_rated';
+  if (/most\s*popular|most\s*viewed|trending/i.test(positiveText)) ranking_constraint = 'most popular';
+  else if (/latest|newest|most\s*recent/i.test(positiveText)) ranking_constraint = 'latest';
+  else if (/cheap|lowest|least\s*expensive/i.test(positiveText)) ranking_constraint = 'cheapest';
+  else if (/best|top\s*rated|highest\s*rated/i.test(positiveText)) ranking_constraint = 'best_rated';
 
   // Clean search query: remove leading verbs, site opens, ranking adjectives.
   // Handles "search YouTube for X", "find the most popular videos of X",
   // "open google and search for X", "play latest song from X".
-  let q = text
+  let q = positiveText
     .replace(/^(please\s+)?(could\s+you\s+)?(open|go\s*to|navigate\s*to|visit|search(\s+for)?|find|look\s*for|play|watch|show\s*me)\b\s*/i, '')
     .replace(/\b(open|go\s*to|navigate|visit)\s+(youtube|google|amazon|flipkart|bing|github|stackoverflow)\b\s*(and\s+)?/i, '')
     .replace(/\b(youtube|google|amazon|flipkart|bing|github|stackoverflow|duckduckgo)\b\s*(and\s+)?/i, '')
@@ -171,50 +187,59 @@ export function parseTaskSemantics(rawPrompt) {
   const search_query_init = q || null;
 
   const references = [];
-  if (/\bthis\b/i.test(text)) references.push('this');
-  if (/\bthat\b/i.test(text)) references.push('that');
-  if (/\bfirst\b|\b1st\b/i.test(text)) references.push('first');
-  if (/\bsecond\b|\b2nd\b/i.test(text)) references.push('second');
-  if (/\bthird\b|\b3rd\b/i.test(text)) references.push('third');
-  if (/cheapest|lowest/i.test(text)) references.push('cheapest');
-  if (/on\s+this\s+page/i.test(text)) references.push('on this page');
+  if (/\bthis\b/i.test(positiveText)) references.push('this');
+  if (/\bthat\b/i.test(positiveText)) references.push('that');
+  if (/\bfirst\b|\b1st\b/i.test(positiveText)) references.push('first');
+  if (/\bsecond\b|\b2nd\b/i.test(positiveText)) references.push('second');
+  if (/\bthird\b|\b3rd\b/i.test(positiveText)) references.push('third');
+  if (/cheapest|lowest/i.test(positiveText)) references.push('cheapest');
+  if (/on\s+this\s+page/i.test(positiveText)) references.push('on this page');
 
   let ordering = null;
-  if (/cheapest|lowest|price/i.test(text)) ordering = 'price_asc';
-  else if (/latest|newest|most\s*recent/i.test(text)) ordering = 'newest';
-  else if (/most\s*popular|most\s*viewed/i.test(text)) ordering = 'popularity';
+  if (/cheapest|lowest|price/i.test(positiveText)) ordering = 'price_asc';
+  else if (/latest|newest|most\s*recent/i.test(positiveText)) ordering = 'newest';
+  else if (/most\s*popular|most\s*viewed/i.test(positiveText)) ordering = 'popularity';
 
   const preferences = [];
-  if (/non-?stop/i.test(text)) preferences.push('non-stop');
-  if (/in\s*stock/i.test(text)) preferences.push('in stock');
+  if (/non-?stop/i.test(positiveText)) preferences.push('non-stop');
+  if (/in\s*stock/i.test(positiveText)) preferences.push('in stock');
 
   const required_actions = [];
-  if (/search|find|look\s*for/i.test(lower)) required_actions.push('SEARCH');
-  if (/open|click|select|choose/i.test(lower)) required_actions.push('CLICK');
-  if (/fill|form|register|sign\s*up/i.test(lower)) required_actions.push('FILL_FORM');
-  if (/upload|attach/i.test(lower)) required_actions.push('UPLOAD');
-  if (/download/i.test(lower)) required_actions.push('DOWNLOAD');
-  if (/book|reserve/i.test(lower)) required_actions.push('BOOK');
-  if (/play|watch/i.test(lower)) required_actions.push('PLAY');
-  if (/tell\s*me|what\s*is|extract|price\s*of|read|show\s*me/i.test(lower)) required_actions.push('EXTRACT');
+  if (/search|find|look\s*for/i.test(positiveLower)) required_actions.push('SEARCH');
+  if (/open|click|select|choose/i.test(positiveLower)) required_actions.push('CLICK');
+  if (/fill|form|register|sign\s*up/i.test(positiveLower)) required_actions.push('FILL_FORM');
+  if (/upload|attach/i.test(positiveLower)) required_actions.push('UPLOAD');
+  if (/download/i.test(positiveLower)) required_actions.push('DOWNLOAD');
+  if (/book|reserve/i.test(positiveLower)) required_actions.push('BOOK');
+  if (/play|watch/i.test(positiveLower)) required_actions.push('PLAY');
+  if (/tell\s*me|what\s*is|extract|price\s*of|read|show\s*me/i.test(positiveLower)) required_actions.push('EXTRACT');
 
   const ambiguities = [];
-  // Intent for semantic planners.
-  let intent = 'search_and_select';
-  if (/login|sign\s*in/i.test(lower)) intent = 'login';
-  else if (/fill|form|register|kyc|apply/i.test(lower)) intent = 'fill_form';
-  else if (/upload/i.test(lower)) intent = 'upload';
-  else if (/book|reserve/i.test(lower)) intent = 'book';
-  else if (/download/i.test(lower)) intent = 'download';
-  else if (/extract|what\s*is|tell\s*me|price\s*of/i.test(lower)) intent = 'extract';
+  // Do not silently turn every request into a search. Only infer a search
+  // flow from explicit search language, a ranking request, or a media verb.
+  // A site name alone does not imply search; this local result is a hint for
+  // offline behavior and the original request remains authoritative.
+  const explicitSearch = /\b(search|find|look\s+for|browse)\b/i.test(positiveLower);
+  const explicitNavigate = /^(please\s+)?(could\s+you\s+)?(open|go\s+to|navigate\s+to|visit|go)\b/i.test(positiveLower);
+  const explicitMediaAction = /\b(play|watch|listen\s+to)\b/i.test(positiveLower);
+  let intent = 'act';
+  if (/login|log\s*in|sign\s*in/i.test(positiveLower)) intent = 'login';
+  else if (/fill|form|register|kyc|apply|sign\s*up/i.test(positiveLower)) intent = 'fill_form';
+  else if (/upload|attach/i.test(positiveLower)) intent = 'upload';
+  else if (/book|reserve/i.test(positiveLower)) intent = 'book';
+  else if (/download/i.test(positiveLower)) intent = 'download';
+  else if (/extract|what\s*is|tell\s*me|price\s*of|read\s+me/i.test(positiveLower)) intent = 'extract';
+  else if (explicitSearch || ranking_constraint || explicitMediaAction) intent = 'search_and_select';
+  else if (explicitNavigate) intent = 'navigate';
+  else if (/\b(click|select|choose|pick|tap|press)\b/i.test(positiveLower)) intent = 'click';
+  if (intent === 'act') ambiguities.push('task intent needs page-aware interpretation');
 
   // search_query is only meaningful for search/select flows. For form, auth,
   // upload, and booking tasks the "query" would just echo the whole request.
-  let search_query = search_query_init;
-  if (intent !== 'search_and_select') {
-    search_query = null;
-  }
-  if (!search_query && /search|find|play|open/i.test(lower)) ambiguities.push('search query is unclear');
+  let search_query = intent === 'search_and_select' ? search_query_init : null;
+  if (intent === 'search_and_select' && !search_query) ambiguities.push('search query is unclear');
+  const asks_to_select_result = Boolean(ranking_constraint || explicitMediaAction ||
+    /\b(open|click|select|choose|pick)\b.{0,50}\b(first|second|third|cheapest|latest|matching|result|item|product|video|song|listing|option|one|it|them|this|that)\b/i.test(positiveText));
 
   // Ordered subgoals for open-ended tasks. Search-style subgoals only for
   // search/select intents; form/fill/upload/etc. use the structured builder
@@ -224,23 +249,25 @@ export function parseTaskSemantics(rawPrompt) {
     if (site) subgoals.push(`open ${site}`);
     if (search_query) subgoals.push(`search for ${search_query}`);
     if (ranking_constraint) subgoals.push(`select ${ranking_constraint} result`);
-    else if (/open|click|select|play|watch/i.test(lower) && search_query) subgoals.push('open the matching result');
+    else if (asks_to_select_result && search_query) subgoals.push('open the matching result');
   } else {
     const mapped = intent === 'fill_form' ? 'FILL_FORM' : intent === 'upload' ? 'UPLOAD'
       : intent === 'login' ? 'LOGIN' : intent === 'book' ? 'BOOK'
-      : intent === 'download' ? 'DOWNLOAD' : intent === 'extract' ? 'EXTRACT' : 'ACT';
-    subgoals.push(..._buildSubgoals(mapped, null, lower, []));
+      : intent === 'download' ? 'DOWNLOAD' : intent === 'extract' ? 'EXTRACT'
+      : intent === 'navigate' ? 'NAVIGATE' : intent === 'click' ? 'CLICK' : 'ACT';
+    subgoals.push(..._buildSubgoals(mapped, null, positiveLower, []));
   }
   if (!subgoals.length) {
     const fallback = _buildSubgoals('ACT', null, lower, []);
     subgoals.push(...fallback);
   }
-  subgoals.push('verify selected result');
+  if (intent === 'search_and_select') subgoals.push('verify selected result');
 
   return {
     site,
     intent,
     search_query,
+    asks_to_select_result,
     ranking_constraint,
     references,
     ordering,
@@ -249,7 +276,7 @@ export function parseTaskSemantics(rawPrompt) {
     success_criteria: [`The page reflects: ${text}`],
     ambiguities,
     subgoals,
-    confidence: 0.6
+    confidence: intent === 'act' ? 0.25 : (ambiguities.length ? 0.45 : 0.65)
   };
 }
 

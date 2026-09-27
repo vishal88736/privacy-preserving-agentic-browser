@@ -189,3 +189,14 @@ test('user-supplied personal text is excluded from extension request diagnostics
   }
   assert.doesNotMatch(logs.join('\n'), /Synthetic name|synthetic\.email@example\.invalid/);
 });
+
+test('date normalization handles 2-digit year (e.g. 27/09/26) and matches YYYY-MM-DD', () => {
+  const form = [field('el_dob', 'input', 'date', 'dob', 'Date of birth', { value: '2026-09-27' })];
+  const history = [{
+    action: { action: ActionType.FILL_FORM_PLAN },
+    result: { details: [{ field: 'el_dob', success: true }] }
+  }];
+  const decision = builder({ ...PROFILE, LOCAL_DOB: '27/09/26' }).decide(form, 'Fill the form using my saved profile', history);
+  assert.equal(decision.status, 'COMPLETE');
+});
+

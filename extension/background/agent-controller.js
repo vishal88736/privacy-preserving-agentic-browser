@@ -528,6 +528,7 @@ export class AgentController {
               ? 'processed; no known sensitive regions to mask'
               : 'unavailable on this page; no image was sent',
         sampleElements,
+        modelTrace: { vision: null, reasoning: null },
         timestamp: Date.now()
       };
     } catch { /* transparency is best-effort */ }
@@ -563,7 +564,14 @@ export class AgentController {
           'The screenshot could not be captured on this page; no image was sent.'
         );
 
-    if (visualObservation._source !== 'DOM_ONLY') {
+    if (task.lastLLMPayload) {
+      task.lastLLMPayload.modelTrace ||= { vision: null, reasoning: null };
+      task.lastLLMPayload.modelTrace.vision = visualObservation?.model_trace || {
+        component: 'vision', source: visualObservation?._source || 'unknown', provider: null, model: null
+      };
+    }
+
+    if (visualObservation.remoteCallAttempted) {
       taskManager.updatePrivacyMetrics({ serverCallsCount: 1 });
     }
     if (visualObservation?.privacyBlocked) {
@@ -626,6 +634,12 @@ export class AgentController {
       task.taskState,
       pageState
     );
+    if (task.lastLLMPayload) {
+      task.lastLLMPayload.modelTrace ||= { vision: null, reasoning: null };
+      task.lastLLMPayload.modelTrace.reasoning = planResult?.model_trace || {
+        component: 'reasoning', source: planResult?.remoteCallMade === false ? 'local' : 'unknown', provider: null, model: null
+      };
+    }
 
     // L6/L7: Track previous subgoal for advancement detection
     const prevSubgoal = task.taskState.getActiveSubgoal();
@@ -642,7 +656,7 @@ export class AgentController {
       task.consecutiveFailures = 0;
     }
 
-    if (planResult.remoteCallMade !== false) taskManager.updatePrivacyMetrics({ serverCallsCount: 1 });
+    if (planResult.remoteCallAttempted !== false) taskManager.updatePrivacyMetrics({ serverCallsCount: 1 });
     if (planResult?.privacyBlocked) taskManager.updatePrivacyMetrics({ privacyBlocks: 1 });
     let proposedAction = planResult.action;
 
@@ -652,7 +666,10 @@ export class AgentController {
     const guarded = this._guardProfileFormCompletion(task, taskIntent, planResult, sanitizedElements);
     proposedAction = guarded.action;
 
-    if (proposedAction?.action === ActionType.DONE || planResult.isTerminal) {
+    // A model's terminal flag is advisory only. Complete the task only when
+    // it emits the explicit DONE action; otherwise a malformed response can
+    // report success while asking the browser to WAIT or keep interacting.
+    if (proposedAction?.action === ActionType.DONE) {
       taskManager.completeTask(planResult.thought);
       this.clearOverlays(task.tabId);
       this.notify('TASK_COMPLETED', { result: planResult.thought });
@@ -758,6 +775,20 @@ export class AgentController {
       execResult = await defaultActionExecutor.execute(task.tabId, proposedAction);
     } catch (execErr) {
       execResult = { success: false, error: execErr?.message || 'Execution failed' };
+    }
+
+    if (proposedAction.action === ActionType.OPEN_TAB && execResult?.success && Number.isInteger(execResult.openedTabId)) {
+      // Continue the same task in the tab that was actually opened so
+      // multi-step requests can inspect and act on its loaded page.
+      task.tabId = execResult.openedTabId;
+    }
+    if (proposedAction.action === ActionType.EXTRACT && execResult?.success && typeof execResult.extractedText === 'string') {
+      // Extraction can contain user data even when the normal DOM snapshot
+      // would redact it. Scrub it before storing it in task history or sending
+      // the result back for a grounded answer.
+      execResult.extractedText = defaultDOMSanitizer.sanitizeUserPrompt(execResult.extractedText).slice(0, 3500);
+      if (execResult.url) execResult.url = defaultDOMSanitizer.sanitizeUrl(execResult.url);
+      if (execResult.title) execResult.title = defaultDOMSanitizer.sanitizeUserPrompt(execResult.title);
     }
 
     // Intercept ASK_USER / needs_user_input to pause and await user clarification
@@ -881,7 +912,8 @@ export class AgentController {
         action: proposedAction,
         result: execResult,
         success: false,
-        error: String(errMsg).slice(0, 200)
+        error: String(errMsg).slice(0, 200),
+        diagnostic: { model_trace: task.lastLLMPayload?.modelTrace || null }
       });
       this.notify('STEP_FAILED', {
         stepNumber: task.currentStep,
@@ -905,6 +937,7 @@ export class AgentController {
         current_state: planResult.current_state,
         task_state: task.taskState?.toPayload(),
         page_state: task.pageState,
+        model_trace: task.lastLLMPayload?.modelTrace || null,
         // Decision diagnostics: safe metadata only (ids, semantic types,
         // scores, evidence sources) — never raw personal data, secrets,
         // page contents, or model responses.
@@ -932,6 +965,7 @@ export class AgentController {
         current_state: planResult.current_state,
         task_state: task.taskState?.toPayload(),
         page_state: task.pageState,
+        model_trace: task.lastLLMPayload?.modelTrace || null,
       },
       success: true,
       timestamp: Date.now()
@@ -948,7 +982,7 @@ export class AgentController {
   _guardProfileFormCompletion(task, taskIntent, planResult, sanitizedElements) {
     let action = planResult?.action;
     const profileDrivenForm = /\b(saved profile|my profile|local vault|saved details|profile details)\b/i.test(String(task?.prompt || ''));
-    if ((action?.action === ActionType.DONE || planResult?.isTerminal) && taskIntent === 'FILL_FORM' && profileDrivenForm) {
+    if (action?.action === ActionType.DONE && taskIntent === 'FILL_FORM' && profileDrivenForm) {
       const formDecision = this.formPlanBuilder.decide(sanitizedElements, task.prompt, task.steps);
       if (formDecision.status === 'REMAINING' || formDecision.status === 'ASK_USER') {
         action = formDecision.action;
@@ -1330,6 +1364,9 @@ export class AgentController {
           tabId,
           { type: MessageType.CHECK_PAGE_STABILITY, payload: { quietMs: 120 } },
           () => {
+            if (typeof chrome !== 'undefined' && chrome.runtime?.lastError) {
+              // Expected if content script is not injected yet or tab is not ready.
+            }
             done();
           }
         );

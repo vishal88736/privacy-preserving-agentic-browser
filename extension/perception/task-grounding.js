@@ -77,7 +77,8 @@ export class TaskGrounding {
    * @param {object} fusedObservation
    */
   ground(taskState, fusedObservation) {
-    const query = taskState?.original_query || taskState?.active_subgoal || '';
+    const query = taskState?.original_query || taskState?.goal || taskState?.active_subgoal ||
+      taskState?.current_subgoal || (taskState?.getActiveSubgoal ? taskState.getActiveSubgoal() : '') || '';
     const qTokens = tokens(query);
     const qBigrams = bigrams(qTokens); // L15
     const constraints = Array.isArray(taskState?.constraints) ? taskState.constraints : [];
