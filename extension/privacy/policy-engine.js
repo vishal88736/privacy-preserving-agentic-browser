@@ -75,10 +75,11 @@ export class PolicyEngine {
     }
 
     // Use the same registry as the local DOM sanitizer for identifiers,
-    // payment data, and date formats. Bare Indian mobile numbers and IFSC
-    // codes are unconditional registry rules (no context gating), so they
-    // are blocked even when the payload omits a trigger word.
-    const piiMatch = findPIIMatches(scannable, scannable)[0];
+    // payment data, and date formats. Context hint is empty so context-gated
+    // rules (SSN_COMPACT, SIN, NHS, DOB, IFSC, PHONE_IN) only fire when
+    // their trigger word appears near the actual match in the text, not when
+    // it appears anywhere in the full serialized payload.
+    const piiMatch = findPIIMatches(scannable, '')[0];
     if (piiMatch) {
       // Title-case display label: the UI parses this message, and tests
       // assert /Aadhaar/ (not the uppercase category constant).

@@ -11,6 +11,7 @@ import { localInterpretTask, parseTaskSemantics } from './task-understanding.js'
 import { defaultPromptBuilder } from './prompt-builder.js';
 import { defaultFormAnalyzer } from './form-analyzer.js';
 import { defaultFormPlanBuilder } from './form-plan-builder.js';
+import { rankCandidates, ambiguousCandidates, requiredCapabilities, SemanticType } from '../perception/semantic-capability.js';
 
 export class GPTOSSClient {
   constructor(baseUrl = ServerDefaults.BACKEND_BASE_URL, formPlanBuilder = defaultFormPlanBuilder) {
@@ -432,16 +433,34 @@ export class GPTOSSClient {
       }
     }
 
-    // 3. After typing a search, click the search button (not player controls).
+    // 3. After typing a search, click the best SUBMIT candidate — ranked by
+    // semantic compatibility against the task, never by proximity or DOM
+    // order. A nearby voice-input control is never an equivalent candidate.
     const typedSearch = [...typedIds].some((id) => isSearchBox(elById.get(id)));
     if (typedSearch || (semantics.search_query && taskHistory.some((h) => h.action?.action === 'TYPE'))) {
-      const btn = elements.find((e) => {
-        if (!isClickable(e) || clickedIds.has(e.id)) return false;
-        const l = labelOf(e);
-        if (/search/i.test(l)) return true;
-        return domOf(e).id === 'search-icon-legacy';
-      });
-      if (btn) return mk(ActionType.CLICK, btn.id, { thought: `Submit search via ${btn.id}` });
+      const submission = this._selectSemantically(elements, {
+        required: new Set([SemanticType.SUBMIT]),
+        taskText: task,
+        excludeIds: clickedIds
+      }, { strict: true });
+      if (submission.decision === 'AMBIGUOUS') {
+        return this._askBetweenCandidates(submission.ambiguous, interpreted, obs);
+      }
+      if (submission.candidate) {
+        return {
+          ...mk(ActionType.CLICK, submission.candidate.element_id, { thought: `Submit search via ${submission.candidate.accessible_name || submission.candidate.element_id}` }),
+          selection_evidence: {
+            required_action: 'SUBMIT',
+            candidate_ids: submission.compatible.slice(0, 5).map((c) => c.element_id),
+            candidate_semantics: submission.compatible.slice(0, 5).map((c) => c.semantic_type),
+            candidate_scores: submission.compatible.slice(0, 5).map((c) => c.score),
+            selected_candidate: submission.candidate.element_id,
+            selection_evidence: submission.candidate.evidence_sources
+          }
+        };
+      }
+      // No semantically-compatible submit control: fall through — never
+      // click a nearby non-submit control.
     }
 
     // 4. Results: click cheapest/first/video result, skipping player controls.
@@ -496,24 +515,107 @@ export class GPTOSSClient {
       return doneAction('Target content opened.');
     }
 
-    // 7. Generic click: first unclicked non-noise button/link. Player
-    // controls are never generic targets (they stall search/select flows).
-    const genericClick = elements.find((e) => {
-      if (!isClickable(e) || clickedIds.has(e.id) || isSubmitBtn(e)) return false;
-      if (wantsFormFill && ambiguousIds.has(e.id)) return false; // unasked opt-ins: never toggle blindly
-      const l = labelOf(e);
-      if (/cookie|privacy policy|subscribe|terms|copyright|footer/i.test(l)) return false;
-      if (/previous|next|play|pause|volume|mute|replay|shuffle|mix|like|dislike|share|clip|save|miniplayer/i.test(l)) return false;
-      return true;
-    });
-    if (genericClick) return mk(ActionType.CLICK, genericClick.id, { thought: `Click ${genericClick.id}` });
+    // 7. Generic click: ranked semantically against the task intent. Noise
+    // and media conflicts never outrank relevant targets, and proximity or
+    // DOM order alone never decides. With no semantically compatible
+    // candidate the agent waits instead of guessing; genuinely ambiguous
+    // candidates are surfaced to the user.
+    const clickables = elements.filter((e) => isClickable(e) && !isTypeable(e) && tagOf(e) !== 'select');
+    if (clickables.length) {
+      const genericRanked = rankCandidates(clickables, {
+        required: requiredCapabilities(task, interpreted.intent, interpreted.active_subgoal),
+        taskText: task,
+        excludeIds: clickedIds
+      });
+      const genericCompatible = genericRanked.filter((c) => !c.conflict && c.score > 0);
+      if (genericCompatible.length) {
+        const ambiguous = ambiguousCandidates(genericCompatible, { taskText: task });
+        if (ambiguous) {
+          return this._askBetweenCandidates(ambiguous, interpreted, obs);
+        }
+        const top = genericCompatible[0];
+        return {
+          ...mk(ActionType.CLICK, top.element_id, { thought: `Click ${top.accessible_name || top.element_id}` }),
+          selection_evidence: {
+            required_action: 'CLICK',
+            candidate_ids: genericCompatible.slice(0, 5).map((c) => c.element_id),
+            candidate_semantics: genericCompatible.slice(0, 5).map((c) => c.semantic_type),
+            candidate_scores: genericCompatible.slice(0, 5).map((c) => c.score),
+            selected_candidate: top.element_id,
+            selection_evidence: top.evidence_sources
+          }
+        };
+      }
+    }
 
     return {
       task_understanding: { intent: interpreted.intent, constraints: interpreted.constraints },
       page_understanding: { page_type: obs.page?.page_type || 'unknown' },
-      thought: '[local-fallback] No grounded action available; waiting to re-observe.',
+      thought: '[local-fallback] No semantically compatible action available; waiting to re-observe.',
       action: { action: ActionType.WAIT, risk: RiskLevel.LOW, requires_confirmation: false },
       isTerminal: false
+    };
+  }
+
+  /**
+   * Deterministic semantic candidate selection. `strict` restricts
+   * compatibility to the required semantic set only (used for submit
+   * selection); otherwise any non-conflicting candidate with positive score
+   * is compatible. Returns the ranked list, the top candidate, and an
+   * AMBIGUOUS decision when the task text cannot distinguish equals.
+   */
+  _selectSemantically(elements, { required, taskText, excludeIds }, { strict = false } = {}) {
+    const ranked = rankCandidates(elements, { required, taskText, excludeIds });
+    const compatible = ranked.filter((c) =>
+      !c.conflict && (strict ? required.has(c.semantic_type) : (required.has(c.semantic_type) || c.score > 0))
+    );
+    const ambiguous = ambiguousCandidates(compatible, { taskText });
+    return {
+      ranked,
+      compatible,
+      candidate: compatible[0] || null,
+      ambiguous,
+      decision: ambiguous ? 'AMBIGUOUS' : (compatible[0] ? 'SELECTED' : 'NONE')
+    };
+  }
+
+  /**
+   * Surface a genuine ambiguity to the user instead of guessing. The choice
+   * is presented through the existing clarification modal as a select field;
+   * the controller maps the answer to a CLICK on the chosen element.
+   */
+  _askBetweenCandidates(candidates, interpreted, obs) {
+    const options = (candidates || []).map((c) => ({
+      text: c.accessible_name || c.element_id,
+      value: c.element_id
+    }));
+    const names = options.map((o) => o.text).join(' | ');
+    return {
+      task_understanding: { intent: interpreted.intent, constraints: interpreted.constraints, target_entity: interpreted.target?.entity },
+      page_understanding: { page_type: obs.page?.page_type || 'unknown' },
+      thought: '[local-fallback] Several semantically similar controls match this step; asking the user to choose.',
+      action: {
+        action: ActionType.ASK_USER,
+        risk: RiskLevel.LOW,
+        requires_confirmation: false,
+        value: {
+          prompt: `Multiple similar controls match this step: ${names}. Choose the correct one.`,
+          ambiguousFields: [{
+            field_id: 'candidate_choice',
+            label: 'Choose the correct control',
+            control_type: 'SELECT',
+            element_type: 'select',
+            options
+          }]
+        }
+      },
+      isTerminal: false,
+      selection_evidence: {
+        required_action: 'CLICK',
+        candidate_ids: (candidates || []).map((c) => c.element_id),
+        candidate_semantics: (candidates || []).map((c) => c.semantic_type),
+        decision: 'AMBIGUOUS'
+      }
     };
   }
 }

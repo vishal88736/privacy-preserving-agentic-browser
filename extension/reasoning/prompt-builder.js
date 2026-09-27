@@ -51,13 +51,20 @@ export class PromptBuilder {
       label: el.dom?.label || el.dom?.placeholder || el.dom?.name || el.visual?.description || '',
       tag: el.dom?.tag,
       type: el.dom?.type,
+      // Structured semantic evidence (derived from general browser semantics):
+      // the model chooses among grounded candidates instead of inventing
+      // meaning from element IDs.
+      semantic_type: el.semantics?.semantic_type || el.dom?.semantic_type || null,
+      capabilities: el.semantics?.capabilities || undefined,
+      accessible_name: el.semantics?.accessible_name || undefined,
+      evidence: (el.semantics?.evidence_sources || []).join('+') || undefined,
       context: (el.dom?.context || '').slice(0, 140) || undefined,
       price_value: el.dom?.price_value ?? undefined,
       sensitive: el.dom?.sensitive || false,
-      semantic_type: el.dom?.semantic_type || null,
       value_source: el.dom?.value_source || null,
       current_value: el.dom?.value || '',
       href: el.dom?.href || undefined,
+      state: el.dom?.disabled ? 'disabled' : (el.dom?.checked ? 'checked' : 'enabled'),
       clickable: Boolean(el.interaction?.clickable),
       typeable: Boolean(el.interaction?.typeable),
       uploadable: Boolean(el.interaction?.uploadable),
@@ -71,7 +78,8 @@ export class PromptBuilder {
         domain: unifiedObservation.page?.domain,
         title: unifiedObservation.page?.title,
         page_type: pageState?.page_type || unifiedObservation.page?.page_type,
-        scroll: unifiedObservation.page?.scroll || pageState?.scroll
+        scroll: unifiedObservation.page?.scroll || pageState?.scroll,
+        viewport: unifiedObservation.page?.viewport || null
       },
       visual_layout: unifiedObservation.visual_layout_summary,
       visual_state: unifiedObservation.visual_state_summary,
@@ -85,12 +93,17 @@ export class PromptBuilder {
     };
   }
 
-  // L17: Generate a human-readable scroll context summary
-  _scrollContext(scroll) {
+  // L17: Generate a human-readable scroll context summary. The viewport
+  // height comes from the observation (carried by the content script), never
+  // from a global `window` reference that is absent in service workers and
+  // test environments.
+  _scrollContext(scroll, viewport = null) {
     if (!scroll) return 'Scroll position unknown.';
     const { y, maxY } = scroll;
+    const viewportH = (Array.isArray(viewport) && Number.isFinite(viewport[1]) && viewport[1] > 0)
+      ? viewport[1]
+      : ((viewport && Number.isFinite(viewport.height) && viewport.height > 0) ? viewport.height : 800);
     if (!maxY || maxY <= 0) return 'Page is fully visible (no scrollable content).';
-    const viewportH = typeof window !== 'undefined' ? window.innerHeight : 800;
     const pct = Math.round((y / Math.max(1, maxY - viewportH)) * 100);
     const clampedPct = Math.min(100, Math.max(0, pct));
     const remainingPx = Math.max(0, maxY - y - viewportH);
@@ -106,7 +119,7 @@ export class PromptBuilder {
     const allowedIds = compact.elements.map((e) => e.id);
 
     // L17: Scroll context
-    const scrollInfo = this._scrollContext(compact.page.scroll);
+    const scrollInfo = this._scrollContext(compact.page.scroll, compact.page.viewport);
 
     return `
 ### SYSTEM SECURITY & PRIVACY POLICY:

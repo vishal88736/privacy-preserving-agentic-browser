@@ -356,7 +356,18 @@ export class AgentController {
       console.warn(`[AgentController] Screenshot capture failed on this page; continuing from the sanitized DOM only.`);
     }
 
-    const rawDOM = domResponse.data;
+    let rawDOM = domResponse.data;
+    // A nearly-empty interactive surface usually means the page is mid-SPA
+    // transition (blank frame between routes). Wait briefly and re-extract
+    // once before planning against a stale or empty view.
+    if (Array.isArray(rawDOM?.elements) && rawDOM.elements.length < 3) {
+      await this.sleep(500);
+      const reextract = await this._extractDOM(task.tabId);
+      if (reextract?.success && Array.isArray(reextract.data?.elements) &&
+          reextract.data.elements.length > rawDOM.elements.length) {
+        rawDOM = reextract.data;
+      }
+    }
     const expectedSensitiveCounts = defaultDOMSanitizer.getUnlocatedSensitiveCounts(rawDOM);
     // `captured: false` is the explicit placeholder signal from the capture
     // service; a dataUrl without the flag is a successful capture.
@@ -805,7 +816,11 @@ export class AgentController {
             const fieldMeta = (askData.ambiguousFields || []).find(f => f.field_id === fieldId);
             try {
               let answerAction;
-              if (fieldMeta?.control_type === 'SELECT' || fieldMeta?.element_type === 'select') {
+              if (fieldId === 'candidate_choice') {
+                // Semantic-candidate choice from the ambiguity modal: the
+                // answer is the chosen element's id — click it.
+                answerAction = { action: ActionType.CLICK, target: { element_id: val } };
+              } else if (fieldMeta?.control_type === 'SELECT' || fieldMeta?.element_type === 'select') {
                 answerAction = { action: ActionType.SELECT, target: { element_id: fieldId }, value: val };
               } else if (fieldMeta?.control_type === 'CHECKBOX' || fieldMeta?.input_type === 'checkbox') {
                 const checked = val === true || ['yes', 'true', '1', 'checked', 'agree', 'accepted'].includes(String(val).toLowerCase());
@@ -890,6 +905,19 @@ export class AgentController {
         current_state: planResult.current_state,
         task_state: task.taskState?.toPayload(),
         page_state: task.pageState,
+        // Decision diagnostics: safe metadata only (ids, semantic types,
+        // scores, evidence sources) — never raw personal data, secrets,
+        // page contents, or model responses.
+        decision: {
+          task_intent: taskIntent || null,
+          required_action: planResult.selection_evidence?.required_action || proposedAction?.action || null,
+          candidate_ids: planResult.selection_evidence?.candidate_ids || null,
+          candidate_semantics: planResult.selection_evidence?.candidate_semantics || null,
+          candidate_scores: planResult.selection_evidence?.candidate_scores || null,
+          selected_candidate: planResult.selection_evidence?.selected_candidate || proposedAction?.target?.element_id || null,
+          selection_evidence: planResult.selection_evidence?.selection_evidence || null,
+          validation_result: 'PASSED'
+        }
       }
     });
 
@@ -1161,7 +1189,10 @@ export class AgentController {
     const keyOf = (s) => {
       const a = s?.action || {};
       const t = a.target || {};
-      return `${a.action}::${t.element_id || t.url || ''}::${a.value_source || a.value || ''}`;
+      // Action signature only (type + element + symbolic source): thought
+      // text never participates, so loops hidden behind slightly different
+      // reasoning are still detected.
+      return `${a.action}::${t.element_id || t.url || ''}::${a.value_source || ''}`;
     };
 
     // Check 1: Exact same action repeated N times

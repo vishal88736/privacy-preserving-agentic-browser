@@ -71,13 +71,22 @@ export class DOMSanitizer {
    * NOTE: vault-secret scrubbing here is whole-token only so labels such
    * as "Female" are never rewritten because of a "male" substring.
    */
-  scrubPlaceholderText(text) {
+  /**
+   * Scrubs page-authored decorative text (input placeholders) that contains
+   * PII-shaped example values (e.g. placeholder="ABCDE1234F").
+   * `fieldContext` is the field's label+name: context-gated rules (phone,
+   * DOB, IBAN) use it to decide whether an example value is sensitive.
+   * Classification always runs on the RAW text first, so field identity is
+   * kept. Vault-secret scrubbing here is whole-token only so labels such
+   * as "Female" are never rewritten because of a "male" substring.
+   */
+  scrubPlaceholderText(text, fieldContext = '') {
     if (!text || typeof text !== 'string') return text;
     let out = text;
     for (const secret of this._vaultSecrets()) {
       out = this._scrubVaultToken(out, secret, '[example]');
     }
-    return redactPII(out, text).replace(/\[REDACTED_[A-Z_]+\]/g, '[example]');
+    return redactPII(out, fieldContext).replace(/\[REDACTED_[A-Z_]+\]/g, '[example]');
   }
 
   /**
@@ -107,6 +116,27 @@ export class DOMSanitizer {
     out = out.replace(/\bBearer\s+[A-Za-z0-9._~+/-]{12,}={0,2}/gi, 'Bearer [REDACTED_TOKEN]');
     out = out.replace(/\b(?:account|acct|bank\s*account)(?:\s*(?:number|no\.?|#))?\s*[:#-]?\s*[A-Z0-9 -]{6,24}\b/gi, '[REDACTED_ACCOUNT]');
 
+    return out;
+  }
+
+  /**
+   * Lighter sanitizer for page-authored text (headings, result titles,
+   * visible text). Only scrubs exact vault secrets and credential-shaped
+   * patterns (API keys, Bearer tokens). Does NOT run the full PII regex
+   * registry because that over-redacts order IDs, dates, and phone-like
+   * numbers in product listings — destroying the context the reasoner needs.
+   */
+  sanitizePageText(text) {
+    if (!text || typeof text !== 'string') return text;
+    let out = text;
+    try {
+      const store = this.vault || defaultLocalVault;
+      for (const [key, value] of Object.entries(store.getAllSecretsForUI())) {
+        out = this._scrubVaultToken(out, value, `[${key}]`);
+      }
+    } catch { /* ignore vault errors */ }
+    out = out.replace(/\b(?:sk|pk|api)[-_][A-Za-z0-9_-]{16,}\b/gi, '[REDACTED_API_KEY]');
+    out = out.replace(/\bBearer\s+[A-Za-z0-9._~+/-]{12,}={0,2}/gi, 'Bearer [REDACTED_TOKEN]');
     return out;
   }
 
@@ -157,25 +187,33 @@ export class DOMSanitizer {
       }
 
       // 4. Scrub PII-shaped example text from placeholders (page-authored hints,
-      // not user data) so literal examples never reach remote models.
-      sanitized.placeholder = this.scrubPlaceholderText(sanitized.placeholder);
-      if (sanitized.label) sanitized.label = this.scrubPlaceholderText(sanitized.label);
+      // not user data) so literal examples never reach remote models. The
+      // field's label+name is the context hint for gated rules (phone, DOB).
+      const fieldContext = `${sanitized.label || ''} ${sanitized.name || ''}`.trim();
+      sanitized.placeholder = this.scrubPlaceholderText(sanitized.placeholder, fieldContext);
+      if (sanitized.label) sanitized.label = this.scrubPlaceholderText(sanitized.label, sanitized.name || '');
       if (sanitized.ariaLabel) sanitized.ariaLabel = this.sanitizeUserPrompt(sanitized.ariaLabel);
       if (sanitized.ariaDescribedBy) sanitized.ariaDescribedBy = this.sanitizeUserPrompt(sanitized.ariaDescribedBy);
       if (sanitized.fieldset_legend) sanitized.fieldset_legend = this.sanitizeUserPrompt(sanitized.fieldset_legend);
       if (sanitized.context) sanitized.context = this.sanitizeUserPrompt(sanitized.context);
       if (sanitized.href) sanitized.href = this.sanitizeLink(sanitized.href);
       if (Array.isArray(sanitized.options)) {
-        // Options are {text, value, selected} objects; sanitizeUserPrompt
-        // returns non-strings unchanged, so scrub each text field directly.
-        // PII in option text must never reach the server. Values are kept
-        // because the executor matches the live option by value.
+        // Options are {text, value, selected} objects. Page-authored example
+        // text is scrubbed like placeholders (with the field's label+name as
+        // the context hint for gated rules). PII-shaped option VALUES are
+        // redacted and flagged so the executor matches the live option by
+        // its text instead.
         sanitized.options = sanitized.options.map((o) => {
-          if (typeof o === 'string') return this.sanitizeUserPrompt(o);
+          if (typeof o === 'string') return this.scrubPlaceholderText(o, fieldContext);
           if (o && typeof o === 'object') {
             const clean = { ...o };
-            if (typeof clean.text === 'string') clean.text = this.sanitizeUserPrompt(clean.text);
-            if (typeof clean.label === 'string') clean.label = this.sanitizeUserPrompt(clean.label);
+            if (typeof clean.text === 'string') clean.text = this.scrubPlaceholderText(clean.text, fieldContext);
+            if (typeof clean.label === 'string') clean.label = this.scrubPlaceholderText(clean.label, fieldContext);
+            if (typeof clean.value === 'string' && clean.value.trim() &&
+                findPIIMatches(clean.value, fieldContext).length) {
+              clean.value = '[REDACTED]';
+              clean.value_redacted = true;
+            }
             return clean;
           }
           return o;
@@ -197,9 +235,9 @@ export class DOMSanitizer {
   sanitizeResultItems(items = []) {
     return (items || []).map((it) => ({
       ...it,
-      title: this.sanitizeUserPrompt(it.title || ''),
-      text: this.sanitizeUserPrompt(String(it.text || '').slice(0, 360)),
-      price_text: this.sanitizeUserPrompt(it.price_text || '') || null,
+      title: this.sanitizePageText(it.title || ''),
+      text: this.sanitizePageText(String(it.text || '').slice(0, 360)),
+      price_text: this.sanitizePageText(it.price_text || '') || null,
       price_value: it.price_value ?? null
     }));
   }
@@ -208,8 +246,12 @@ export class DOMSanitizer {
     return {
       headings: (rawDOM.headings || []).map((h) => ({
         ...h,
-        text: this.sanitizeUserPrompt(h.text || '')
+        text: this.sanitizePageText(h.text || '')
       })),
+      // visible_text keeps the full PII registry scan (with proximity-gated
+      // context rules): page prose is a primary PII leak vector. Structural
+      // headings/result titles use the lighter sanitizePageText so the
+      // reasoner keeps its grounding context.
       visible_text: this.sanitizeUserPrompt(String(rawDOM.visible_text || '')).slice(0, 4000),
       result_items: this.sanitizeResultItems(rawDOM.result_items || []),
       scroll: rawDOM.scroll || null
@@ -271,11 +313,26 @@ export class DOMSanitizer {
       parsed.password = '';
       for (const key of new Set(parsed.searchParams.keys())) parsed.searchParams.set(key, '[REDACTED]');
       parsed.hash = '';
-      parsed.pathname = this.sanitizeUserPrompt(decodeURIComponent(parsed.pathname));
+      parsed.pathname = this._sanitizePathSegments(decodeURIComponent(parsed.pathname));
       return parsed.toString();
     } catch {
       return 'https://[REDACTED_OR_LOCAL]';
     }
+  }
+
+  /**
+   * Targeted PII scan of individual path segments. A segment that matches a
+   * PII pattern is replaced wholesale with a generic [REDACTED_PII] label —
+   * category labels inside a URL path are noise, and partial redaction would
+   * leave reconstructable fragments. Non-PII segments still get vault and
+   * credential scrubbing via sanitizePageText.
+   */
+  _sanitizePathSegments(pathname) {
+    return String(pathname || '').split('/').map((segment) => {
+      if (!segment) return segment;
+      if (findPIIMatches(segment).length) return '[REDACTED_PII]';
+      return this.sanitizePageText(segment);
+    }).join('/');
   }
 
   /** Keep link destination context without sending query values or fragments. */

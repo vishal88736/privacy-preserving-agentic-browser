@@ -4,6 +4,8 @@
  * observation representation with spatial IoU and semantic cross-referencing.
  */
 
+import { classifyElement } from './semantic-capability.js';
+
 export function calculateIoU(boxA, boxB) {
   if (!boxA || !boxB || boxA.length !== 4 || boxB.length !== 4) return 0;
   const [xA, yA, wA, hA] = boxA;
@@ -39,6 +41,49 @@ export class ObservationFusion {
     const matchedVisualIndices = new Set();
     const unifiedElements = [];
 
+    const buildElement = (domEl, visual, matchedBy, matchConfidence, matched) => ({
+      id: domEl.id,
+      role: domEl.role || domEl.tag,
+      // Normalized semantic representation derived from general browser
+      // semantics (accessibility, role/type, control relationships, text,
+      // state). The reasoner must not rediscover these from raw markup.
+      semantics: classifyElement(domEl),
+      dom: {
+        id: domEl.id,
+        tag: domEl.tag,
+        type: domEl.type,
+        name: domEl.name,
+        label: domEl.label,
+        placeholder: domEl.placeholder,
+        autocomplete: domEl.autocomplete || '',
+        ariaLabel: domEl.ariaLabel || '',
+        ariaDescribedBy: domEl.ariaDescribedBy || '',
+        fieldset_legend: domEl.fieldset_legend || '',
+        value: domEl.value,
+        href: domEl.href || '',
+        sensitive: domEl.sensitive,
+        semantic_type: domEl.semantic_type,
+        value_source: domEl.value_source,
+        checked: Boolean(domEl.checked),
+        bbox: domEl.bbox,
+        is_interactive: domEl.is_interactive,
+        disabled: Boolean(domEl.disabled),
+        in_form: Boolean(domEl.in_form),
+        form_id: domEl.form_id || null,
+        context: domEl.context || '',
+        price_value: domEl.price_value ?? null,
+        options: domEl.options
+      },
+      visual: visual,
+      interaction: {
+        clickable: ['button', 'a'].includes(domEl.tag) || (matched && domEl.tag === 'select') || ['button', 'link'].includes(domEl.role) || Boolean(domEl.is_interactive && ((domEl.tag === 'input' && (domEl.type === 'checkbox' || domEl.type === 'radio' || domEl.type === 'submit' || domEl.type === 'button')) || (domEl.tag !== 'input' && domEl.tag !== 'textarea' && (matched || domEl.tag !== 'select')))),
+        typeable: (domEl.tag === 'input' && domEl.type !== 'checkbox' && domEl.type !== 'radio' && domEl.type !== 'button' && domEl.type !== 'submit') || domEl.tag === 'textarea',
+        uploadable: domEl.type === 'file'
+      },
+      matched_by: matchedBy,
+      ...(matchConfidence !== undefined ? { match_confidence: matchConfidence } : {})
+    });
+
     // 1. Match DOM elements with Visual detections
     for (const domEl of sanitizedDomElements) {
       let bestMatch = null;
@@ -60,93 +105,20 @@ export class ObservationFusion {
 
       if (bestMatch && matchedIndex >= 0) {
         matchedVisualIndices.add(matchedIndex);
-        unifiedElements.push({
-          id: domEl.id,
-          role: domEl.role || domEl.tag,
-          dom: {
-            id: domEl.id,
-            tag: domEl.tag,
-            type: domEl.type,
-            name: domEl.name,
-            label: domEl.label,
-            placeholder: domEl.placeholder,
-            autocomplete: domEl.autocomplete || '',
-            ariaLabel: domEl.ariaLabel || '',
-            ariaDescribedBy: domEl.ariaDescribedBy || '',
-            fieldset_legend: domEl.fieldset_legend || '',
-            value: domEl.value,
-            href: domEl.href || '',
-            sensitive: domEl.sensitive,
-            semantic_type: domEl.semantic_type,
-            value_source: domEl.value_source,
-            checked: Boolean(domEl.checked),
-            bbox: domEl.bbox,
-            is_interactive: domEl.is_interactive,
-            disabled: Boolean(domEl.disabled),
-            in_form: Boolean(domEl.in_form),
-            form_id: domEl.form_id || null,
-            context: domEl.context || '',
-            price_value: domEl.price_value ?? null,
-            options: domEl.options
-          },
-          visual: {
-            visual_id: bestMatch.visual_id,
-            description: bestMatch.visual_description || bestMatch.label,
-            confidence: bestMatch.confidence || 0.9,
-            visual_bbox: bestMatch.bbox
-          },
-          interaction: {
-            clickable: ['button', 'a', 'select'].includes(domEl.tag) || ['button', 'link'].includes(domEl.role) || Boolean(domEl.is_interactive && ((domEl.tag === 'input' && (domEl.type === 'checkbox' || domEl.type === 'radio' || domEl.type === 'submit' || domEl.type === 'button')) || (domEl.tag !== 'input' && domEl.tag !== 'textarea'))),
-            typeable: (domEl.tag === 'input' && domEl.type !== 'checkbox' && domEl.type !== 'radio' && domEl.type !== 'button' && domEl.type !== 'submit') || domEl.tag === 'textarea',
-            uploadable: domEl.type === 'file'
-          },
-          matched_by: 'IOU',
-          match_confidence: highestIoU
-        });
+        unifiedElements.push(buildElement(domEl, {
+          visual_id: bestMatch.visual_id,
+          description: bestMatch.visual_description || bestMatch.label,
+          confidence: bestMatch.confidence || 0.9,
+          visual_bbox: bestMatch.bbox
+        }, 'IOU', highestIoU, true));
       } else {
         // Fallback: DOM-grounded element without visual match
-        unifiedElements.push({
-          id: domEl.id,
-          role: domEl.role || domEl.tag,
-          dom: {
-            id: domEl.id,
-            tag: domEl.tag,
-            type: domEl.type,
-            name: domEl.name,
-            label: domEl.label,
-            placeholder: domEl.placeholder,
-            autocomplete: domEl.autocomplete || '',
-            ariaLabel: domEl.ariaLabel || '',
-            ariaDescribedBy: domEl.ariaDescribedBy || '',
-            fieldset_legend: domEl.fieldset_legend || '',
-            value: domEl.value,
-            href: domEl.href || '',
-            sensitive: domEl.sensitive,
-            semantic_type: domEl.semantic_type,
-            value_source: domEl.value_source,
-            checked: Boolean(domEl.checked),
-            bbox: domEl.bbox,
-            is_interactive: domEl.is_interactive,
-            disabled: Boolean(domEl.disabled),
-            in_form: Boolean(domEl.in_form),
-            form_id: domEl.form_id || null,
-            context: domEl.context || '',
-            price_value: domEl.price_value ?? null,
-            options: domEl.options
-          },
-          visual: {
-            description: domEl.sensitive 
-              ? `Redacted sensitive input (${domEl.semantic_type})` 
-              : `DOM element ${domEl.label || domEl.tag}`,
-            confidence: 0.8
-          },
-          interaction: {
-            clickable: ['button', 'a'].includes(domEl.tag) || ['button', 'link'].includes(domEl.role) || Boolean(domEl.is_interactive && ((domEl.tag === 'input' && (domEl.type === 'checkbox' || domEl.type === 'radio' || domEl.type === 'submit' || domEl.type === 'button')) || (domEl.tag !== 'input' && domEl.tag !== 'textarea' && domEl.tag !== 'select'))),
-            typeable: (domEl.tag === 'input' && domEl.type !== 'checkbox' && domEl.type !== 'radio' && domEl.type !== 'button' && domEl.type !== 'submit') || domEl.tag === 'textarea',
-            uploadable: domEl.type === 'file'
-          },
-          matched_by: 'DOM_ONLY'
-        });
+        unifiedElements.push(buildElement(domEl, {
+          description: domEl.sensitive 
+            ? `Redacted sensitive input (${domEl.semantic_type})` 
+            : `DOM element ${domEl.label || domEl.tag}`,
+          confidence: 0.8
+        }, 'DOM_ONLY', undefined, false));
       }
     }
 
@@ -164,6 +136,7 @@ export class ObservationFusion {
             confidence: visEl.confidence,
             visual_bbox: visEl.bbox
           },
+          semantics: classifyElement({ role: visEl.role, visual: { description: visEl.visual_description || visEl.label } }),
           interaction: {
             clickable: true,
             typeable: false,

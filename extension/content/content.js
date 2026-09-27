@@ -67,6 +67,15 @@
 
   const registry = new ElementRegistry();
 
+  // Escape ids for use inside attribute selectors: element ids may contain
+  // colons, dots, or brackets that would otherwise break (or worse, inject
+  // into) the selector. CSS.escape is not available in all runtimes (Node
+  // test environments), so fall back to a conservative escape.
+  function escapeIdForSelector(id) {
+    if (typeof CSS !== 'undefined' && CSS.escape) return CSS.escape(String(id));
+    return String(id).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+  }
+
   // 2. DOM Extractor — interactive controls PLUS page evidence (cards, prices, headings, text)
   class DOMExtractor {
     getAccessibleLabel(element) {
@@ -80,7 +89,7 @@
       if (ariaLabel) return ariaLabel.trim();
 
       if (element.id) {
-        const label = document.querySelector(`label[for="${element.id}"]`);
+        const label = document.querySelector(`label[for="${escapeIdForSelector(element.id)}"]`);
         if (label) return label.innerText.trim();
       }
 
@@ -221,9 +230,26 @@
 
     extractPageElements() {
       registry.clear();
-      const selector = 'input, button, a, select, textarea, [role="button"], [role="textbox"], [role="checkbox"], [role="option"], [role="link"], [tabindex]:not([tabindex="-1"])';
-      const rawNodes = this.queryAllDeep(selector);
+      // Prioritized passes: form controls first, then buttons, then links —
+      // so form fields are never dropped on complex pages even at the cap.
+      // DOM order within each pass is preserved.
+      const passes = [
+        'input, select, textarea, [role="textbox"], [role="checkbox"]',
+        'button, [role="button"], [role="option"]',
+        'a, [role="link"], [tabindex]:not([tabindex="-1"])'
+      ];
+      const seen = new Set();
+      const rawNodes = [];
+      for (const selector of passes) {
+        for (const node of this.queryAllDeep(selector)) {
+          if (!seen.has(node)) {
+            seen.add(node);
+            rawNodes.push(node);
+          }
+        }
+      }
 
+      const MAX_ELEMENTS = 120;
       const extracted = [];
 
       for (const node of rawNodes) {
@@ -231,7 +257,7 @@
         const isVisible = this.isElementVisible(node, rect);
 
         if (!isVisible && node.type !== 'file') continue;
-        if (extracted.length >= 80) break;
+        if (extracted.length >= MAX_ELEMENTS) break;
 
         const id = registry.register(node);
         const tag = node.tagName.toLowerCase();
@@ -636,7 +662,14 @@
           const t = text.trim();
           if (!/^\d{4}-\d{2}-\d{2}$/.test(t)) {
             const m = t.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/);
-            if (m) rawText = `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+            if (m) {
+              // Detect day/month order from impossible-month values;
+              // ambiguous values default to DD/MM/YYYY.
+              const monthFirst = Number(m[1]) <= 12 && Number(m[2]) > 12;
+              rawText = monthFirst
+                ? `${m[3]}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}`
+                : `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+            }
           }
         }
       } catch { /* use original text */ }
@@ -765,7 +798,16 @@
         if (type !== 'date' || typeof value !== 'string') return value;
         if (/^\d{4}-\d{2}-\d{2}$/.test(value.trim())) return value.trim();
         const m = String(value).trim().match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/);
-        if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+        if (m) {
+          // Detect day/month order from impossible-month values; ambiguous
+          // values default to the vault's documented DD/MM/YYYY convention.
+          const first = Number(m[1]);
+          const second = Number(m[2]);
+          const monthFirst = first <= 12 && second > 12;
+          return monthFirst
+            ? `${m[3]}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}`
+            : `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+        }
       } catch { /* fall through with original value */ }
       return value;
     }
@@ -804,6 +846,7 @@
           else el.value = opt.value;
           el.dispatchEvent(new Event('input', { bubbles: true }));
           el.dispatchEvent(new Event('change', { bubbles: true }));
+          await this._waitForFieldSettle(el);
         }
       } else if (type === 'checkbox') {
         const normalized = String(value ?? '').trim().toLowerCase();
@@ -820,7 +863,7 @@
         let matched = false;
         for (const r of group) {
           let lab = '';
-          if (r.id) lab = document.querySelector(`label[for="${r.id}"]`)?.innerText || '';
+          if (r.id) lab = document.querySelector(`label[for="${escapeIdForSelector(r.id)}"]`)?.innerText || '';
           if (!lab) lab = r.closest('label')?.innerText || '';
           if (this._normalizeFormOption(r.value, field.semantic_type || '') === want || this._normalizeFormOption(lab, field.semantic_type || '') === want) {
             matched = true;
@@ -829,6 +872,7 @@
           }
         }
         if (!matched) throw new Error('No radio option matches the configured profile value.');
+        await this._waitForFieldSettle(el);
       } else {
         try {
           const proto = tag === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
@@ -867,7 +911,7 @@
         const expected = this._normalizeFormOption(value, field.semantic_type || '');
         for (const r of group) {
           let lab = '';
-          if (r.id) lab = document.querySelector(`label[for="${r.id}"]`)?.innerText || '';
+          if (r.id) lab = document.querySelector(`label[for="${escapeIdForSelector(r.id)}"]`)?.innerText || '';
           if (!lab) lab = r.closest('label')?.innerText || '';
           const matches = this._normalizeFormOption(r.value, field.semantic_type || '') === expected || this._normalizeFormOption(lab, field.semantic_type || '') === expected;
           if (matches) return r.checked === true;
@@ -887,6 +931,42 @@
 
     sleep(ms) {
       return new Promise(r => setTimeout(r, ms));
+    }
+
+    /**
+     * Frameworks react to SELECT/RADIO state changes asynchronously
+     * (dependent dropdowns, revealed sections). Wait for the DOM to settle —
+     * 150ms of quiet, hard-capped at 500ms — before the next field.
+     */
+    async _waitForFieldSettle(el) {
+      const scope = el?.form || el?.closest('form') || el?.parentElement || document.body;
+      if (typeof MutationObserver === 'undefined' || !scope) {
+        await this.sleep(300);
+        return;
+      }
+      await new Promise((resolve) => {
+        let hardTimer = null;
+        let quietTimer = null;
+        let observer = null;
+        const finish = () => {
+          if (hardTimer) clearTimeout(hardTimer);
+          if (quietTimer) clearTimeout(quietTimer);
+          try { observer?.disconnect(); } catch { /* already disconnected */ }
+          resolve();
+        };
+        observer = new MutationObserver(() => {
+          if (quietTimer) clearTimeout(quietTimer);
+          quietTimer = setTimeout(finish, 150); // settled after a quiet window
+        });
+        try {
+          observer.observe(scope, { childList: true, subtree: true, attributes: true });
+        } catch {
+          finish();
+          return;
+        }
+        quietTimer = setTimeout(finish, 150);
+        hardTimer = setTimeout(finish, 500); // bounded: never stall the plan
+      });
     }
   }
 

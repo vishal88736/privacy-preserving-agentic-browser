@@ -57,7 +57,7 @@ export class FormPlanBuilder {
     // rather than relying on DOM order, which can silently omit phone/email
     // fields from the user's intended form.
     const plan = plans.reduce((best, candidate) =>
-      this._formScore(candidate) > this._formScore(best) ? candidate : best
+      this._formScore(candidate, fieldsById) > this._formScore(best, fieldsById) ? candidate : best
     );
     const untrustedPlan = { ...plan, fields: (plan.fields || []).map((field) => ({ ...field })) };
     let localResolved;
@@ -125,14 +125,22 @@ export class FormPlanBuilder {
     return { status: 'COMPLETE', action: null, fields: [], askFields: [] };
   }
 
-  _formScore(plan) {
+  _formScore(plan, elementsById = new Map()) {
     const fields = [...(plan?.fields || []), ...(plan?.ambiguous || [])];
     const usefulTypes = new Set(fields
       .map((field) => field.semantic_type)
       .filter((type) => type && !['other', 'comments', 'newsletter', 'terms'].includes(type)));
     const contactAndIdentity = new Set(['full_name', 'first_name', 'last_name', 'email', 'phone']);
     const priorityCount = fields.filter((field) => contactAndIdentity.has(field.semantic_type)).length;
-    return fields.length * 10 + usefulTypes.size * 3 + priorityCount * 2;
+    // Penalize below-fold fields: a visible contact form must outrank a
+    // larger registration form the user cannot currently see. Geometry is a
+    // scoring signal only here — it never decides semantic identity.
+    const belowFold = fields.filter((field) => {
+      const el = elementsById.get(field.field_id);
+      const bbox = el?.bbox || el?.dom?.bbox;
+      return Array.isArray(bbox) && typeof bbox[1] === 'number' && bbox[1] > 1000;
+    }).length;
+    return fields.length * 10 + usefulTypes.size * 3 + priorityCount * 2 - belowFold * 5;
   }
 
   _askField(field, resolved = null) {

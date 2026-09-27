@@ -7,6 +7,7 @@
  */
 
 import { defaultTaskGrounding } from './task-grounding.js';
+import { classifyElement } from './semantic-capability.js';
 
 export class PageStateModeler {
   modelPageState(fusedObservation, taskState) {
@@ -36,6 +37,9 @@ export class PageStateModeler {
         if (dom.tag === 'button') buttons++;
 
         const label = (dom.label || dom.name || dom.placeholder || visual.description || '').trim();
+        // Structured semantic representation: the reasoner chooses among
+        // grounded candidates with evidence, never from raw markup.
+        const sem = el.semantics || classifyElement(el);
 
         candidateElements.push({
           element_id: el.id,
@@ -47,7 +51,11 @@ export class PageStateModeler {
           context: (dom.context || '').slice(0, 160) || undefined,
           price_value: dom.price_value ?? undefined,
           sensitive: dom.sensitive || undefined,
-          semantic_type: dom.semantic_type || undefined,
+          semantic_type: sem.semantic_type || dom.semantic_type || undefined,
+          capabilities: sem.capabilities || undefined,
+          accessible_name: sem.accessible_name || undefined,
+          state: sem.state || (dom.disabled ? 'disabled' : 'enabled'),
+          evidence_sources: sem.evidence_sources || undefined,
           is_typeable: interaction.typeable || undefined,
           is_clickable: interaction.clickable || undefined
         });

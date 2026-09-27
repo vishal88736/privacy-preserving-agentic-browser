@@ -5,6 +5,7 @@
  */
 
 import { ActionType } from '../shared/constants.js';
+import { SemanticType } from '../perception/semantic-capability.js';
 
 // L4: Actions that do NOT require a target element_id and should bypass target validation
 const TARGET_OPTIONAL_ACTIONS = new Set([
@@ -21,6 +22,15 @@ const TARGET_OPTIONAL_ACTIONS = new Set([
   ActionType.ASK_USER,
   ActionType.FILL_FORM_PLAN
 ]);
+
+// Hard semantic-compatibility gate: element semantics that contradict the
+// requested action outright. Derived from general browser semantics — never
+// site-specific rules.
+const SEMANTIC_TYPE_CONFLICTS = {
+  TYPE: new Set([SemanticType.VOICE_INPUT, SemanticType.PLAY, SemanticType.PAUSE, SemanticType.NEXT, SemanticType.PREVIOUS, SemanticType.DOWNLOAD, SemanticType.LINK]),
+  SELECT: new Set([SemanticType.VOICE_INPUT, SemanticType.PLAY, SemanticType.PAUSE, SemanticType.NEXT, SemanticType.PREVIOUS, SemanticType.LINK]),
+  SUBMIT: new Set([SemanticType.LINK, SemanticType.VOICE_INPUT, SemanticType.NEXT, SemanticType.PREVIOUS, SemanticType.DOWNLOAD])
+};
 
 export class ActionValidator {
   /**
@@ -125,7 +135,36 @@ export class ActionValidator {
           reason: `Target element "${action.target.element_id}" is currently disabled.`
         };
       }
-      
+
+      // ── HARD SEMANTIC COMPATIBILITY GATE ──
+      // An element whose derived semantics (general browser semantics, not
+      // site-specific rules) contradict the requested action is rejected
+      // deterministically: re-observe → re-ground → re-plan, never execute
+      // the guessed action.
+      const semType = String(match.semantics?.semantic_type || '').toUpperCase();
+      if (semType) {
+        if (action.action === ActionType.TYPE && SEMANTIC_TYPE_CONFLICTS.TYPE.has(semType)) {
+          return {
+            valid: false,
+            reason: `Element "${action.target.element_id}" is a ${semType} control, not a text input. Use a semantically compatible target.`
+          };
+        }
+        if (action.action === ActionType.SELECT && SEMANTIC_TYPE_CONFLICTS.SELECT.has(semType)) {
+          return {
+            valid: false,
+            reason: `Element "${action.target.element_id}" is a ${semType} control, not a select dropdown.`
+          };
+        }
+        if (action.action === ActionType.SUBMIT && semType !== SemanticType.SUBMIT &&
+            String(match.dom?.tag || '').toLowerCase() !== 'form' &&
+            SEMANTIC_TYPE_CONFLICTS.SUBMIT.has(semType)) {
+          return {
+            valid: false,
+            reason: `Element "${action.target.element_id}" is a ${semType} control, not a submit control.`
+          };
+        }
+      }
+
       if (action.action === ActionType.TYPE) {
         if (!match.interaction?.typeable) {
           return {
@@ -150,7 +189,10 @@ export class ActionValidator {
         ).toLowerCase();
 
         const label = String(match.dom?.label || match.visual?.description || action.target.label || '').toLowerCase();
-        const isPlayerControl = /previous|next|play|pause|volume|mute|replay|shuffle|mix|subscribe|like|dislike|share|clip|save|miniplayer/i.test(label);
+        // Derived semantics are more robust than label regex; the label
+        // regex stays as fallback for observations without semantics.
+        const isPlayerControl = ['PLAY', 'PAUSE', 'NEXT', 'PREVIOUS', 'VOICE_INPUT'].includes(String(match.semantics?.semantic_type || '').toUpperCase()) ||
+          /previous|next|play|pause|volume|mute|replay|shuffle|mix|subscribe|like|dislike|share|clip|save|miniplayer|voice/i.test(label);
         const hasSearchInput = availableElements.some(el =>
           el.dom?.tag === 'input' && (
             /search|find|query/i.test(el.dom?.name || '') ||
@@ -162,11 +204,19 @@ export class ActionValidator {
 
         // Subgoal: Search
         if ((activeSubgoal.startsWith('search for') || activeSubgoal.includes('search')) && action.action === ActionType.CLICK) {
-          const isSearchBtn = /search/i.test(label) || match.dom?.id === 'search-icon-legacy';
+          // Derived semantics distinguish a real search submit from a nearby
+          // control whose label merely contains "search" (e.g. voice input);
+          // the label regex stays as fallback for observations without
+          // semantics.
+          const semTypeUpper = String(match.semantics?.semantic_type || '').toUpperCase();
+          const isSearchBtn = match.semantics
+            ? (semTypeUpper === SemanticType.SEARCH_INPUT || semTypeUpper === SemanticType.SUBMIT)
+            : (/search/i.test(label) || match.dom?.id === 'search-icon-legacy');
           if (isPlayerControl && hasSearchInput && !isSearchBtn) {
+            const semName = match.semantics?.semantic_type || 'playback';
             return {
               valid: false,
-              reason: `Action "CLICK ${action.target.label || label}" does not advance active subgoal "${taskState.getActiveSubgoal()}". Search input is available and should be used first.`
+              reason: `Action "CLICK ${action.target.label || label}" is a ${semName} control and does not advance active subgoal "${taskState.getActiveSubgoal()}". Search input is available and should be used first.`
             };
           }
         }

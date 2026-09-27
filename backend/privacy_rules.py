@@ -51,7 +51,6 @@ def find_sensitive_category(text):
         ("SSN", re.compile(r"\b(?!000|666|9\d\d)\d{3}[- ](?!00)\d{2}[- ](?!0000)\d{4}\b")),
         ("NIN", re.compile(r"\b(?!BG|GB|KN|NK|NT|TN|ZZ)[A-CEGHJ-PR-TW-Z]{2}\s?\d{6}\s?[A-D]\b", re.I)),
         ("EMAIL", re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)),
-        ("PHONE", re.compile(r"(?<!\d)(?:(?:\+|0{0,2})91[\s-]?)?[6-9]\d{9}(?!\d)")),
         ("PHONE", re.compile(r"(?<!\w)\+\d{1,3}[ .-]?(?:\(\d{1,4}\)[ .-]?)?\d(?:[ .-]?\d){6,12}(?!\w)")),
         ("DOB", re.compile(r"\b(?:0[1-9]|[12]\d|3[01])[-/.](?:0[1-9]|1[0-2])[-/.](?:19|20)\d{2}\b")),
         ("DOB", re.compile(r"\b(?:0[1-9]|1[0-2])[-/.](?:0[1-9]|[12]\d|3[01])[-/.](?:19|20)\d{2}\b")),
@@ -59,6 +58,17 @@ def find_sensitive_category(text):
     for category, pattern in checks:
         if pattern.search(text):
             return category
+
+    # Bare Indian mobile numbers fire only near contact language (or with an
+    # explicit +91 prefix). Payload-wide triggers were too broad: they blocked
+    # every 10-digit order ID or tracking number in the request.
+    for match in re.finditer(r"(?<!\d)(?:(?:\+|0{0,2})91[\s-]?)?[6-9]\d{9}(?!\d)", text):
+        if match.group(0).startswith("+91") or match.group(0).startswith("91") or re.search(
+            r"phone|mobile|telephone|contact|call|dial|whatsapp",
+            text[max(0, match.start() - 50): match.end() + 50],
+            re.I,
+        ):
+            return "PHONE"
 
     if re.search(r"\b(?:ssn|social\s+security(?:\s+number)?)\b", text, re.I):
         if re.search(r"\b(?!000|666|9\d\d)\d{3}(?!00)\d{2}(?!0000)\d{4}\b", text):

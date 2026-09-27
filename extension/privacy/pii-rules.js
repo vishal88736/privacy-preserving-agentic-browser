@@ -43,12 +43,15 @@ export function validateIban(value) {
 }
 
 const CONTEXT_RULES = {
-  phone: /phone|mobile|telephone|tel\b|contact\s*(?:number|no\.?)/i,
+  // Phone context includes bare contact verbs so "call me at ..." and
+  // "Contact Jane ... <number>" are caught without a "phone number" label.
+  phone: /phone|mobile|telephone|\btel\b|contact|call|dial|whatsapp/i,
   ssn: /\b(?:ssn|social\s+security(?:\s+number)?)\b/i,
   sin: /\b(?:sin|social\s+insurance(?:\s+number)?)\b/i,
   nhs: /\bnhs(?:\s*(?:number|no\.?))?\b/i,
   iban: /\biban\b/i,
-  ifsc: /\bifsc\b/i
+  ifsc: /\bifsc\b/i,
+  dob: /\b(?:dob|date\s*of\s*birth|birth\s*date|born\s*on|birthday)\b/i
 };
 
 export const PII_RULES = [
@@ -59,22 +62,25 @@ export const PII_RULES = [
   { id: 'UK_NIN', category: PIICategory.NIN, source: SymbolicSecretSource.LOCAL_NIN, pattern: /\b(?!BG|GB|KN|NK|NT|TN|ZZ)[A-CEGHJ-PR-TW-Z]{2}\s?\d{6}\s?[A-D]\b/gi, confidence: 0.9 },
   { id: 'CANADA_SIN', category: PIICategory.SIN, source: SymbolicSecretSource.LOCAL_SIN, pattern: /\b\d{3}[ -]?\d{3}[ -]?\d{3}\b/g, context: 'sin', validate: validateLuhnDigits, confidence: 0.88 },
   { id: 'UK_NHS', category: PIICategory.NHS, source: SymbolicSecretSource.LOCAL_NHS, pattern: /\b\d{3}[ -]?\d{3}[ -]?\d{4}\b/g, context: 'nhs', validate: validateNhsNumber, confidence: 0.92 },
-  { id: 'IBAN', category: PIICategory.IBAN, source: SymbolicSecretSource.LOCAL_IBAN, pattern: /\b[A-Z]{2}\d{2}(?:[ -]?[A-Z0-9]){11,30}\b/gi, validate: validateIban, confidence: 0.98 },
+  { id: 'IBAN', category: PIICategory.IBAN, source: SymbolicSecretSource.LOCAL_IBAN, pattern: /\b[A-Z]{2}\d{2}(?:[ -]?[A-Z0-9]){11,30}\b/gi, context: 'iban', validate: validateIban, confidence: 0.98 },
   { id: 'CREDIT_CARD', category: PIICategory.CREDIT_CARD, source: SymbolicSecretSource.LOCAL_CREDIT_CARD, pattern: /(?<!\d)(?:\d[ -]?){13,19}(?!\d)/g, validate: validateLuhnDigits, confidence: 0.95 },
   { id: 'EMAIL', category: PIICategory.EMAIL, source: SymbolicSecretSource.LOCAL_EMAIL, pattern: /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, confidence: 0.96 },
-  { id: 'PHONE_IN', category: PIICategory.PHONE, source: SymbolicSecretSource.LOCAL_PHONE, pattern: /(?<!\d)(?:(?:\+|0{0,2})91[\s-]?)?[6-9]\d{9}(?!\d)/g, context: 'phone', confidence: 0.92 },  { id: 'PHONE_INTL', category: PIICategory.PHONE, source: SymbolicSecretSource.LOCAL_PHONE, pattern: /(?<!\w)\+\d{1,3}[ .-]?(?:\(\d{1,4}\)[ .-]?)?\d(?:[ .-]?\d){6,12}(?!\w)/g, confidence: 0.9 },
-  { id: 'DOB_DMY', category: PIICategory.DOB, source: SymbolicSecretSource.LOCAL_DOB, pattern: /\b(?:0[1-9]|[12]\d|3[01])[-/.](?:0[1-9]|1[0-2])[-/.](?:19|20)\d{2}\b/g, confidence: 0.9 },
-  { id: 'DOB_MDY', category: PIICategory.DOB, source: SymbolicSecretSource.LOCAL_DOB, pattern: /\b(?:0[1-9]|1[0-2])[-/.](?:0[1-9]|[12]\d|3[01])[-/.](?:19|20)\d{2}\b/g, confidence: 0.86 },
-  { id: 'IFSC', category: PIICategory.IFSC, source: SymbolicSecretSource.LOCAL_PROFILE, pattern: /\b[A-Z]{4}0[A-Z0-9]{6}\b/gi, confidence: 0.9 }
+  { id: 'PHONE_IN', category: PIICategory.PHONE, source: SymbolicSecretSource.LOCAL_PHONE, pattern: /(?<!\d)(?:(?:\+|0{0,2})91[\s-]?)?[6-9]\d{9}(?!\d)/g, context: 'phone', confidence: 0.92 },
+  { id: 'PHONE_INTL', category: PIICategory.PHONE, source: SymbolicSecretSource.LOCAL_PHONE, pattern: /(?<!\w)\+\d{1,3}[ .-]?(?:\(\d{1,4}\)[ .-]?)?\d(?:[ .-]?\d){6,12}(?!\w)/g, confidence: 0.9 },
+  { id: 'DOB_DMY', category: PIICategory.DOB, source: SymbolicSecretSource.LOCAL_DOB, pattern: /\b(?:0[1-9]|[12]\d|3[01])[-/.](?:0[1-9]|1[0-2])[-/.](?:19|20)\d{2}\b/g, context: 'dob', confidence: 0.9 },
+  { id: 'DOB_MDY', category: PIICategory.DOB, source: SymbolicSecretSource.LOCAL_DOB, pattern: /\b(?:0[1-9]|1[0-2])[-/.](?:0[1-9]|[12]\d|3[01])[-/.](?:19|20)\d{2}\b/g, context: 'dob', confidence: 0.86 },
+  { id: 'IFSC', category: PIICategory.IFSC, source: SymbolicSecretSource.LOCAL_PROFILE, pattern: /\b[A-Z]{4}0[A-Z0-9]{6}\b/gi, context: 'ifsc', confidence: 0.9 }
 ];
 
 /**
- * Unconditional rules: bare phone numbers and IFSC-shaped codes are blocked
- * everywhere. Context gating (a nearby "phone"/"ifsc" word) silently let
- * these leak from visible_text and select options whose payload happened to
- * omit the trigger word.
+ * Unconditional rules bypass context gating entirely. Only patterns with
+ * extremely low false-positive rates belong here. PHONE_IN was removed
+ * because its broad 10-digit regex caused massive false positives on order
+ * IDs, product codes, and tracking numbers; it now relies on the phone
+ * context (field label OR a nearby trigger word). IFSC's checksum-shaped
+ * pattern (4 letters + 0 + 6 alphanumerics) stays unconditional.
  */
-const UNCONDITIONAL_IDS = new Set(['PHONE_IN', 'IFSC']);
+const UNCONDITIONAL_IDS = new Set(['IFSC']);
 
 /** Register an additional locally evaluated rule before making requests. */
 export function registerPIIRule(rule) {
@@ -88,17 +94,35 @@ export function registerPIIRule(rule) {
   PII_RULES.push({ confidence: 0.8, ...rule });
 }
 
+// Context triggers must sit near the match itself, not merely anywhere in a
+// large payload: a "phone" word 100KB away must not redact every 10-digit
+// number in the payload.
+const PROXIMITY_WINDOW = 60;
+
+function hasNearbyTrigger(text, index, length, contextPattern) {
+  if (!contextPattern) return false;
+  const re = new RegExp(contextPattern.source, contextPattern.flags.replace(/g/g, ''));
+  const start = Math.max(0, index - PROXIMITY_WINDOW);
+  const end = Math.min(text.length, index + length + PROXIMITY_WINDOW);
+  return re.test(text.slice(start, end));
+}
+
 export function findPIIMatches(text, contextHint = '') {
   if (typeof text !== 'string' || !text) return [];
-  const context = String(contextHint || text);
+  // A non-empty hint is FIELD-level context (label/name). An absent hint
+  // (policy engine, raw text) must not degrade into payload-wide context —
+  // gated rules then rely on proximity to the match alone.
+  const hasFieldContext = typeof contextHint === 'string' && contextHint.trim().length > 0;
+  const context = hasFieldContext ? contextHint : '';
   const matches = [];
   for (const rule of PII_RULES) {
-    // Unconditional rules (bare phone numbers, IFSC codes) skip context
-    // gating entirely so they cannot leak when the trigger word is absent.
-    if (!UNCONDITIONAL_IDS.has(rule.id)) {
-      const contextPattern = rule.context instanceof RegExp ? rule.context : CONTEXT_RULES[rule.context];
-      if (rule.context && (!contextPattern || !new RegExp(contextPattern.source, contextPattern.flags.replace(/g/g, '')).test(context))) continue;
-    }
+    const contextPattern = rule.context instanceof RegExp ? rule.context : CONTEXT_RULES[rule.context];
+    // Unconditional rules skip gating; gated rules fire when the trigger is
+    // in the FIELD context or near the match itself.
+    const contextOk = !rule.context || UNCONDITIONAL_IDS.has(rule.id) || (
+      hasFieldContext && contextPattern &&
+      new RegExp(contextPattern.source, contextPattern.flags.replace(/g/g, '')).test(context)
+    );
     const flags = rule.pattern.flags.includes('g') ? rule.pattern.flags : rule.pattern.flags + 'g';
     const pattern = new RegExp(rule.pattern.source, flags);
     for (const match of text.matchAll(pattern)) {
@@ -106,6 +130,7 @@ export function findPIIMatches(text, contextHint = '') {
         try { if (!rule.validate(match[0])) continue; }
         catch { /* validator failure fails closed: redact the pattern match */ }
       }
+      if (!contextOk && !hasNearbyTrigger(text, match.index, match[0].length, contextPattern)) continue;
       matches.push({
         id: rule.id,
         category: rule.category,

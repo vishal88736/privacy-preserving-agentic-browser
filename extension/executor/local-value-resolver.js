@@ -70,7 +70,7 @@ export class LocalValueResolver {
         /\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b/i, // United Kingdom
         /\b\d{5}(?:-\d{4})?\b/, // United States
         /\b\d{6}\b/, // India and other six-digit postal systems
-        /(?:^|[,\s])(\d{4,6})(?=$|[,\s])/g // Common numeric postal codes
+        /\b(\d{4,6})\b/g // Common numeric postal codes (word-boundary match)
       ];
       let postal = null;
       for (const pattern of postalPatterns) {

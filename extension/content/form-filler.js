@@ -1,5 +1,13 @@
 import { registry } from './element-registry.js';
 
+// Escape ids for attribute selectors (colons/dots/brackets in ids would
+// break the selector). CSS.escape is unavailable in Node test environments,
+// so fall back to a conservative escape.
+function escapeIdForSelector(id) {
+  if (typeof CSS !== 'undefined' && CSS.escape) return CSS.escape(String(id));
+  return String(id).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+}
+
 export class FormFiller {
   async executePlan(plan) {
     const results = [];
@@ -50,9 +58,11 @@ export class FormFiller {
 
   /**
    * Normalizes vault date formats for native date inputs, which only accept
-   * YYYY-MM-DD. Vault DOBs are stored DD/MM/YYYY; assigning that string to
-   * <input type=date> is silently rejected by the browser (value stays ''),
-   * so verification would always fail without this conversion.
+   * YYYY-MM-DD. The day/month order is DETECTED from impossible-month
+   * values (a part > 12 must be the day); ambiguous values default to the
+   * vault's documented DD/MM/YYYY convention. Assigning a wrong-order string
+   * to <input type=date> is silently rejected by the browser (value stays
+   * ''), so verification would always fail without this conversion.
    */
   _normalizeDateForInput(el, value) {
     try {
@@ -61,9 +71,12 @@ export class FormFiller {
       if (/^\d{4}-\d{2}-\d{2}$/.test(value.trim())) return value.trim();
       const m = String(value).trim().match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/);
       if (m) {
-        const dd = m[1].padStart(2, '0');
-        const mm = m[2].padStart(2, '0');
-        return `${m[3]}-${mm}-${dd}`;
+        const first = Number(m[1]);
+        const second = Number(m[2]);
+        const monthFirst = first <= 12 && second > 12;
+        return monthFirst
+          ? `${m[3]}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}`
+          : `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
       }
     } catch { /* fall through with original value */ }
     return value;
@@ -85,10 +98,12 @@ export class FormFiller {
 
     if (el.tagName === 'SELECT') {
       await this._fillSelect(el, value, fieldData.options, fieldData.semantic_type);
+      await this._waitForFieldSettle(el);
     } else if (el.type === 'checkbox') {
       await this._fillCheckbox(el, value);
     } else if (el.type === 'radio') {
       await this._fillRadio(el, value, fieldData.options);
+      await this._waitForFieldSettle(el);
     } else {
       await this._fillText(el, value);
     }
@@ -150,10 +165,18 @@ export class FormFiller {
     const target = this._normalizeOptionValue(value, '');
     const normalize = (v) => this._normalizeOptionValue(v, semanticType);
     const available = Array.from(el.options || []);
+    // Substring matching is a last resort and strictly bounded: short
+    // substrings match unrelated options ("New" must not match
+    // "New Hampshire"), so require a minimum length AND that the target
+    // covers most of the option text.
+    const substringOk = (option) => {
+      const text = normalize(option.text);
+      return target.length >= 5 && text.includes(target) && target.length >= text.length * 0.6;
+    };
     return available.find((option) => String(option.value ?? '').trim() === String(value ?? '').trim())
       || available.find((option) => normalize(option.value) === normalize(value))
       || available.find((option) => normalize(option.text) === normalize(value))
-      || available.find((option) => normalize(option.text).includes(normalize(value)) && target.length >= 3);
+      || available.find(substringOk);
   }
 
   async _fillCheckbox(el, value) {
@@ -174,11 +197,13 @@ export class FormFiller {
 
   async _fillRadio(el, value, options = []) {
     // Locate the specific radio button in the group that matches the value
-    // el might just be one of the radios
+    // el might just be one of the radios. The group is scoped to radios in
+    // the SAME form: identically-named groups in different forms are
+    // independent questions.
     const groupName = el.name;
     const want = this._normalizeOptionValue(value);
     const group = groupName
-      ? Array.from(document.querySelectorAll('input[type="radio"]')).filter((radio) => radio.name === groupName)
+      ? Array.from(document.querySelectorAll('input[type="radio"]')).filter((radio) => radio.name === groupName && radio.form === el.form)
       : [el];
     for (const radio of group) {
       const labelText = this._getLabelText(radio);
@@ -194,12 +219,49 @@ export class FormFiller {
 
   _getLabelText(el) {
     if (el.id) {
-      const label = document.querySelector(`label[for="${el.id}"]`);
+      const label = document.querySelector(`label[for="${escapeIdForSelector(el.id)}"]`);
       if (label) return label.innerText;
     }
     const parentLabel = el.closest('label');
     if (parentLabel) return parentLabel.innerText;
     return '';
+  }
+
+  /**
+   * Frameworks react to SELECT/RADIO state changes asynchronously (dependent
+   * dropdowns, revealed sections). Wait for the DOM to settle — 150ms of
+   * quiet, hard-capped at 500ms — before filling the next field. Falls back
+   * to a fixed pause when MutationObserver is unavailable (Node tests).
+   */
+  async _waitForFieldSettle(el) {
+    const scope = el?.form || el?.parentNode || (typeof document !== 'undefined' ? document.body : null);
+    if (typeof MutationObserver === 'undefined' || !scope) {
+      await this.sleep(300);
+      return;
+    }
+    await new Promise((resolve) => {
+      let hardTimer = null;
+      let quietTimer = null;
+      let observer = null;
+      const finish = () => {
+        if (hardTimer) clearTimeout(hardTimer);
+        if (quietTimer) clearTimeout(quietTimer);
+        try { observer?.disconnect(); } catch { /* already disconnected */ }
+        resolve();
+      };
+      observer = new MutationObserver(() => {
+        if (quietTimer) clearTimeout(quietTimer);
+        quietTimer = setTimeout(finish, 150); // settled after a quiet window
+      });
+      try {
+        observer.observe(scope, { childList: true, subtree: true, attributes: true });
+      } catch {
+        finish();
+        return;
+      }
+      quietTimer = setTimeout(finish, 150);
+      hardTimer = setTimeout(finish, 500); // bounded: never stall the plan
+    });
   }
 
   sleep(ms) {
@@ -219,7 +281,7 @@ export class FormFiller {
       const groupName = el.name;
       if (!groupName) return String(el.value ?? '').toLowerCase() === String(value ?? '').toLowerCase() && el.checked === true;
       const group = groupName
-        ? Array.from(document.querySelectorAll('input[type="radio"]')).filter((radio) => radio.name === groupName)
+        ? Array.from(document.querySelectorAll('input[type="radio"]')).filter((radio) => radio.name === groupName && radio.form === el.form)
         : [el];
       for (const radio of group) {
         const labelText = this._getLabelText(radio);

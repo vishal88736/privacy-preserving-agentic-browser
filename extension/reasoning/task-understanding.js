@@ -23,10 +23,14 @@ const STOP = new Set([
 // L20: Multi-intent patterns for composite decomposition.
 const INTENT_RULES = [
   { pattern: /upload/i, intent: 'UPLOAD' },
-  { pattern: /search|find|cheapest|lowest|look\s*for|browse|compare/i, intent: 'SEARCH' },
+  { pattern: /search|find|cheapest|lowest|look\s*for|browse/i, intent: 'SEARCH' },
   { pattern: /fill|form|application|aadhaar|kyc|register|sign\s*up/i, intent: 'FILL_FORM' },
-  { pattern: /play|watch|video|stream/i, intent: 'PLAY' },
+  // NAVIGATE outranks PLAY: "go to YouTube and watch X" is a navigation task
+  // with a PLAY secondary intent (handled by COMPOUND_PATTERNS), not a media
+  // task. "compare" was removed from SEARCH — it is too generic and hijacked
+  // comparison/browsing tasks into search intent.
   { pattern: /open|go\s*to|navigate|visit/i, intent: 'NAVIGATE' },
+  { pattern: /play|watch|video|stream/i, intent: 'PLAY' },
   { pattern: /click|select|choose|pick|tap/i, intent: 'CLICK' },
   { pattern: /extract|what\s*is|tell\s*me|price\s*of|read|show\s*me/i, intent: 'EXTRACT' },
   { pattern: /download/i, intent: 'DOWNLOAD' },
@@ -127,11 +131,19 @@ export function parseTaskSemantics(rawPrompt) {
     youtube: 'YouTube', google: 'Google', amazon: 'Amazon', flipkart: 'Flipkart',
     bing: 'Bing', duckduckgo: 'DuckDuckGo', github: 'GitHub', stackoverflow: 'StackOverflow',
     gmail: 'Gmail', drive: 'Drive', maps: 'Maps', facebook: 'Facebook',
-    twitter: 'Twitter', instagram: 'Instagram', linkedin: 'LinkedIn', reddit: 'Reddit'
+    twitter: 'Twitter', instagram: 'Instagram', linkedin: 'LinkedIn', reddit: 'Reddit',
+    ebay: 'eBay', spotify: 'Spotify', netflix: 'Netflix', wikipedia: 'Wikipedia',
+    booking: 'Booking', irctc: 'IRCTC'
   };
-  const siteMatch = lower.match(/\b(youtube|google|amazon|flipkart|bing|duckduckgo|github|stackoverflow|gmail|drive|maps|facebook|twitter|instagram|linkedin|reddit|x\.com)\b/i);
+  const siteMatch = lower.match(/\b(youtube|google|amazon|flipkart|bing|duckduckgo|github|stackoverflow|gmail|drive|maps|facebook|twitter|instagram|linkedin|reddit|ebay|spotify|netflix|wikipedia|booking|irctc|x\.com)\b/i);
   const siteKey = siteMatch ? siteMatch[1].toLowerCase() : null;
-  const site = siteKey === 'x.com' ? 'X' : (SITE_NAMES[siteKey] || null);
+  let site = siteKey === 'x.com' ? 'X' : (SITE_NAMES[siteKey] || null);
+  if (!site) {
+    // Generic fallback: any literal domain token in the task ("book on
+    // cleartrip.com") names the site without a hand-maintained map entry.
+    const domain = lower.match(/\b([a-z0-9][a-z0-9-]{1,}\.(?:com|org|net|io|in|co\.uk|edu|gov))\b/i);
+    if (domain) site = domain[1];
+  }
 
   let ranking_constraint = null;
   if (/most\s*popular|most\s*viewed|trending/i.test(text)) ranking_constraint = 'most popular';

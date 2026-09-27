@@ -5,7 +5,14 @@
  * "what is the user asking + what on this page is relevant" stage.
  *
  * L15: Added bigram/phrase matching bonus for better multi-word relevance
+ * Semantic conditioning: candidates are ranked against REQUIRED ACTION
+ * SEMANTICS (derived from the task intent), with explicit penalties for
+ * semantically conflicting controls (e.g. a nearby voice-input control is
+ * never an equivalent candidate for a text-search task). Lexical matching
+ * alone cannot distinguish "Search" from "Search by voice".
  */
+
+import { classifyElement, requiredCapabilities, SemanticType } from './semantic-capability.js';
 
 const STOP = new Set([
   'a', 'an', 'the', 'and', 'or', 'to', 'of', 'for', 'in', 'on', 'at', 'this',
@@ -83,9 +90,25 @@ export class TaskGrounding {
     const elements = fusedObservation?.elements || [];
     const resultItems = fusedObservation?.result_items || [];
 
+    // Task-conditioned semantics: convert the user's request into required
+    // action capabilities, then rank candidates against them.
+    const required = requiredCapabilities(allText, taskState?.intent, taskState?.getActiveSubgoal ? taskState.getActiveSubgoal() : taskState?.active_subgoal);
+    const mediaConflict = (semantic) => !required.has(semantic) &&
+      (semantic === SemanticType.VOICE_INPUT || semantic === SemanticType.PLAY || semantic === SemanticType.PAUSE ||
+       semantic === SemanticType.NEXT || semantic === SemanticType.PREVIOUS || semantic === SemanticType.DOWNLOAD ||
+       semantic === SemanticType.RESET);
+
     const scored = elements.map((el) => {
       const hay = haystack(el);
       let score = 0;
+
+      // Semantic compatibility (dominant signal, from general browser
+      // semantics — accessibility, role/type, control relationships).
+      const sem = el.semantics || classifyElement(el);
+      if (required.has(sem.semantic_type)) score += 8;
+      if (mediaConflict(sem.semantic_type)) {
+        score -= 8;
+      }
 
       // Unigram matching
       let matchedTokens = 0;
@@ -137,9 +160,18 @@ export class TaskGrounding {
         label: d.label || el.visual?.description || '',
         role: d.tag || el.role,
         type: d.type,
+        semantic_type: sem.semantic_type,
+        capabilities: sem.capabilities,
+        accessible_name: sem.accessible_name || undefined,
+        state: sem.state || (d.disabled ? 'disabled' : 'enabled'),
+        evidence_sources: sem.evidence_sources,
         price_value: d.price_value ?? null,
         context: (d.context || '').slice(0, 180),
-        why: score > 0 ? 'lexical/intent match' : 'interactive but low relevance'
+        why: required.has(sem.semantic_type)
+          ? `semantic match (${sem.semantic_type}) + lexical/intent evidence`
+          : mediaConflict(sem.semantic_type)
+            ? `semantically incompatible (${sem.semantic_type})`
+            : score > 0 ? 'lexical/intent match' : 'interactive but low relevance'
       };
     }).sort((a, b) => b.score - a.score);
 
@@ -180,7 +212,9 @@ export class TaskGrounding {
       };
     }
 
-    const searchEl = ranked.find((r) => /search|query|find/i.test(`${r.label} ${r.type} ${r.role}`))
+    // Prefer a semantically-classified search input; fall back to lexical.
+    const searchEl = scored.find((r) => r.semantic_type === SemanticType.SEARCH_INPUT)
+      || ranked.find((r) => /search|query|find/i.test(`${r.label} ${r.type} ${r.role}`))
       || scored.find((r) => r.type === 'search' || r.type === 'text');
 
     return {

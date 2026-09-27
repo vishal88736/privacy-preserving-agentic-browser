@@ -11,6 +11,7 @@
     "test:navigation": "node --test tests/navigation/*.test.js",
     "test:perception": "node --test tests/perception/*.test.js extension/perception/task-grounding.test.js",
     "test:agent": "node --test tests/agent/*.test.js",
+    "test:grounding": "node --test tests/grounding/*.test.js",
     "test:schemas": "node --test tests/shared/*.test.js",
     "test:all": "node --test 'tests/**/*.test.js' 'extension/perception/task-grounding.test.js'",
     "prepare:local-vision-assets": "node scripts/prepare-local-vision-assets.mjs",
