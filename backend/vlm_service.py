@@ -36,15 +36,46 @@ _PROVIDERS = {
 }
 
 
-def _truncate_image_data_url(url: str, limit: int) -> str:
-    """Bound a data URL payload without cutting base64 mid-character."""
+_PROVIDER_ERROR_TEXT = re.compile(
+    r"^\s*ERROR\b"
+    r"|does\s+not\s+support\s+(?:image|vision|this\s+content)"
+    r"|cannot\s+read\s+[\"']?\w+[\"']?"
+    r"|invalid\s+value\s+at\s+'[^']+'"
+    r"|content[- ]type\s+[^ ]+\s+is\s+not\s+supported"
+    r"|\brate[\s-]?limit(?:ed|exceeded)?\b"
+    r"|\bexceeded\b.*\bquota\b"
+    r"|\bmodel\s+not\s+found\b",
+    re.I,
+)
+
+
+def _looks_like_provider_error(text: str) -> bool:
+    """True when model 'content' is actually a gateway/provider error string.
+
+    Some gateways return HTTP 200 with the provider's error text as the
+    message content (e.g. Google's "Cannot read 'clipboard'" for an
+    unreadable image part). Treating that text as model output lets it leak
+    into observations and the UI.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return False
+    head = text.strip()[:400]
+    return bool(_PROVIDER_ERROR_TEXT.search(head))
+
+
+def _truncate_image_data_url(url: str, limit: int) -> Optional[str]:
+    """Fit a data URL within a payload limit WITHOUT corrupting the image.
+
+    Cutting base64 mid-payload (even at a 4-char boundary) produces an
+    undecodable partial image: providers reject it with errors like
+    Google's "Cannot read 'clipboard'" / "Invalid value at
+    'contents[0].parts[1].inline_data.data'". An oversized image is
+    therefore skipped entirely (None) so the caller falls back to the DOM
+    heuristic instead of wasting a provider call on a corrupt payload.
+    """
     if len(url) <= limit:
         return url
-    head, sep, b64 = url.partition(",")
-    if not sep:
-        return url[:limit]
-    keep = max(0, ((limit - len(head) - len(sep)) // 4) * 4)
-    return head + sep + b64[:keep]
+    return None
 
 
 def _extract_json_object(content: str) -> Optional[Dict[str, Any]]:
@@ -155,6 +186,16 @@ class VLMService:
         if not candidates:
             return None
 
+        # Fit the image ONCE for all candidates. An image that exceeds the
+        # payload limit is skipped entirely — truncating base64 mid-payload
+        # produces an undecodable partial image and every provider rejects
+        # it ("Cannot read 'clipboard'", "Invalid value at
+        # 'inline_data.data'"), wasting the whole rotation.
+        fitted_screenshot = _truncate_image_data_url(screenshot, 1200000)
+        if fitted_screenshot is None:
+            print(f"[VLM] screenshot payload exceeds {1200000} chars; using DOM heuristic instead of corrupting the image")
+            return None
+
         prompt = (
             "Describe the webpage layout in JSON with keys: "
             "spatial_layout (one sentence), visual_state (one sentence), "
@@ -197,7 +238,7 @@ class VLMService:
                     "role": "user",
                     "content": [
                         {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": _truncate_image_data_url(screenshot, 180000)}}
+                        {"type": "image_url", "image_url": {"url": fitted_screenshot}}
                     ]
                 }],
                 "max_tokens": 400,
@@ -218,6 +259,13 @@ class VLMService:
                 if not isinstance(content, str) or not content.strip():
                     print(f"[VLM] {candidate['provider']} returned empty content; rotating provider/key")
                     continue
+                # Gateways sometimes return HTTP 200 whose content IS the
+                # provider error text ("ERROR: Cannot read 'clipboard' ...").
+                # That text must never become visual grounding — reject and
+                # rotate like any other provider failure.
+                if _looks_like_provider_error(content):
+                    print(f"[VLM] {candidate['provider']} returned provider error text (model={candidate['model']}); rotating provider/key")
+                    continue
                 # Balanced parse of the first well-formed {...} block. A
                 # greedy first-{-to-last-} span wraps prose between braces
                 # into an invalid object and misreports a parse failure as a
@@ -226,6 +274,15 @@ class VLMService:
                 parsed = _extract_json_object(content)
                 if parsed is None:
                     print(f"[VLM] {candidate['provider']} returned non-JSON text; rotating provider/key")
+                    continue
+                # The same gateway errors can arrive JSON-wrapped inside the
+                # layout fields — reject those too.
+                if any(
+                    _looks_like_provider_error(str(v))
+                    for v in (parsed.get("spatial_layout"), parsed.get("visual_state"), parsed.get("page_type"))
+                    if isinstance(v, str)
+                ):
+                    print(f"[VLM] {candidate['provider']} JSON fields contained provider error text; rotating provider/key")
                     continue
                 out = {}
                 if parsed.get("spatial_layout"):

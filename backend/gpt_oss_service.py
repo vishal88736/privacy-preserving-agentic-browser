@@ -399,6 +399,10 @@ CRITICAL RULES:
                 content = message.get("content")
                 if not isinstance(content, str) or not content.strip():
                     raise Exception("Empty response from reasoning model")
+                # Gateways can return HTTP 200 whose content is the provider's
+                # error text; that must never be parsed as a plan.
+                if _looks_like_provider_error(content):
+                    raise Exception("Reasoning provider returned an error instead of a plan")
                 parsed = _extract_json(content)
                 if isinstance(parsed, dict) and "action" in parsed:
                     act = parsed.get("action")
