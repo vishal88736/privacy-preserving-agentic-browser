@@ -134,7 +134,10 @@ class Settings:
     # Base URL for reasoning calls; VLM provider endpoints rotate independently.
     AI_BASE_URL: str = _CONFIGURED_AI_BASE_URL or _default_ai_base_url()
 
-    VLM_MODEL: str = os.getenv("VLM_MODEL", "qwen2.5-vl-72b")
+    # Default is a REAL, verified vision-capable OpenRouter model ID (the old
+    # "qwen2.5-vl-72b" without a provider prefix never resolved on OpenRouter
+    # and made every vision call fail).
+    VLM_MODEL: str = os.getenv("VLM_MODEL", "qwen/qwen2.5-vl-72b-instruct")
     VLM_OPENROUTER_MODEL: str = os.getenv("VLM_OPENROUTER_MODEL", "")
     VLM_HUGGINGFACE_MODEL: str = os.getenv("VLM_HUGGINGFACE_MODEL", "")
     VLM_GROQ_MODEL: str = os.getenv("VLM_GROQ_MODEL", "")

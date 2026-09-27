@@ -5,6 +5,7 @@ from typing import Dict, Any, List, Optional
 import requests
 from config import settings
 from privacy_rules import find_sensitive_category
+from vlm_service import _looks_like_provider_error
 
 logger = logging.getLogger(__name__)
 _SAFE_ACTION_TYPES = {

@@ -84,134 +84,155 @@ The solution is specifically structured and benchmarked against the 5 official c
 
 ## 💡 System Architecture & End-to-End Pipeline Flowchart
 
-The following interactive flowchart illustrates the full client-server lifecycle, specifically mapping to the Problem Statement requirements: local Vision Transformer (ViT) screen reading, dynamic face and PII redaction on client canvas, anonymized transmission across the security boundary, server-side multimodal VLM/LLM reasoning, and human-gated browser action execution.
+The following flowchart illustrates the complete client-server lifecycle, specifically mapping to the Problem Statement requirements: local Vision Transformer (ViT) screen reading, dynamic face and PII redaction on client canvas, anonymized transmission across the security boundary, server-side multimodal VLM/LLM reasoning, and human-gated browser action execution.
 
 ```mermaid
 flowchart TD
-    %% Styling Definitions
-    classDef client fill:#1e1b4b,stroke:#6366f1,stroke-width:2px,color:#ffffff;
-    classDef privacy fill:#064e3b,stroke:#10b981,stroke-width:2px,color:#ffffff;
-    classDef server fill:#312e81,stroke:#818cf8,stroke-width:2px,color:#ffffff;
-    classDef gate fill:#701a75,stroke:#f472b6,stroke-width:2px,color:#ffffff;
-    classDef boundary fill:#18181b,stroke:#71717a,stroke-width:1px,stroke-dasharray: 5 5,color:#e4e4e7;
-    classDef action fill:#451a03,stroke:#f59e0b,stroke-width:2px,color:#ffffff;
-
-    subgraph CLIENT["🖥️ CLIENT-SIDE ENVIRONMENT (Browser Extension / Local Machine)"]
-        direction TB
-
-        subgraph BROWSER["🌐 Browser Context & Untrusted Webpage"]
-            USER(["👤 User Task / Prompt"]):::client
-            PAGE["📄 Active Tab Webpage (DOM & Viewport)"]:::client
-            USER -->|Initiate Task| SP_UI["Side Panel Interface"]:::client
-            SP_UI -->|Trigger Observation| PAGE
-        end
-
-        subgraph LOCAL_PERCEPTION["👁️ Local Vision Processing (Client ViT & OCR via WebGPU/WASM)"]
-            DOM_EXTRACT["Bounded DOM Extractor\n(Accessibility Tree, Inputs, Labels & Roles)"]:::client
-            SCREEN_CAP["Visible Tab Screenshot\n(chrome.tabs.captureVisibleTab)"]:::client
-            
-            PAGE -->|Extract Structure| DOM_EXTRACT
-            PAGE -->|Capture Pixels| SCREEN_CAP
-
-            LOCAL_VIT["Local Vision Transformer (ViT)\n(Quantized YOLOS-Tiny via ONNX Runtime Web / WebGPU)"]:::privacy
-            LOCAL_OCR["Local OCR Engine\n(Tesseract.js WASM)"]:::privacy
-
-            SCREEN_CAP -->|In-Browser ViT Inference| LOCAL_VIT
-            SCREEN_CAP -->|In-Memory Text Scan| LOCAL_OCR
-            
-            LOCAL_VIT -->|Detects Person / Object Boxes| MERGE_BOXES["Coordinate & Bounding Box Aggregator"]:::privacy
-            LOCAL_OCR -->|Matches PII Patterns & Discards Raw Text| MERGE_BOXES
-        end
-
-        subgraph PRIVACY_ENGINE["🛡️ Privacy-Preserving Filter & Dynamic Redaction Engine"]
-            DOM_SANITIZER["DOM Sanitizer\n(Substitutes Sensitive Values with [REDACTED] & LOCAL_*)"]:::privacy
-            DOM_EXTRACT --> DOM_SANITIZER
-
-            CANVAS_MASK["OffscreenCanvas Masking\n(Solid #000000 Blackout Over Face & PII Boxes)"]:::privacy
-            MERGE_BOXES --> CANVAS_MASK
-            SCREEN_CAP -.->|Viewport Pixels| CANVAS_MASK
-
-            FAIL_CLOSED{"Fail-Closed Safeguard\n(Coverage uncertain, OCR unlocated,\nor Canvas/Video surface?)"}:::privacy
-            CANVAS_MASK --> FAIL_CLOSED
-            FAIL_CLOSED -->|Yes / Anomaly| PLACEHOLDER["Withhold Screenshot\n(Substitute Neutral Placeholder)"]:::privacy
-            FAIL_CLOSED -->|No / Complete| SANITIZED_IMG["Sanitized Image (Masked Faces & PII)"]:::privacy
-
-            POLICY["Outbound Policy Engine\n(Deep Scan vs Vault & Registered Patterns)"]:::privacy
-            DOM_SANITIZER -->|Sanitized DOM| POLICY
-            SANITIZED_IMG --> POLICY
-            PLACEHOLDER --> POLICY
-        end
-
-        subgraph EXECUTOR["⚡ Safety Gate & In-Browser Action Execution"]
-            VALIDATOR["Action Schema Validator\n(Rejects script / eval injections)"]:::action
-            RISK_GATE{"Two-Tier Risk Gate\n(LOW, MEDIUM, HIGH, CRITICAL)"}:::gate
-            
-            CONFIRM_CARD["Human-in-the-Loop Confirmation\n(Transparent Card in Side Panel)"]:::gate
-            
-            RESOLVER["Local Value Resolver\n(Swaps Symbolic Tokens with Vault Plaintext)"]:::privacy
-            VAULT[("🔒 Local Secret Vault\nchrome.storage.local")]:::privacy
-            VAULT -.->|Read Plaintext In-Browser| RESOLVER
-
-            DISPATCHER["Browser Executor\n(Dispatches Synthetic Events: Click, Type, Select)"]:::action
-            VERIFY["Observation Verifier\n(Checks DOM Settling & Navigation Success)"]:::client
-
-            VALIDATOR --> RISK_GATE
-            RISK_GATE -->|High/Critical: Submit, Checkout, Delete| CONFIRM_CARD
-            RISK_GATE -->|Low/Medium: Click, Type, Scroll| RESOLVER
-            CONFIRM_CARD -->|User Approved| RESOLVER
-            CONFIRM_CARD -->|User Cancelled| CANCEL_HALT(["Halt / Cancel Task"]):::gate
-
-            RESOLVER -->|Injects Value directly into DOM| DISPATCHER
-            DISPATCHER -->|Mutates Webpage| PAGE
-            DISPATCHER --> VERIFY
-            VERIFY -->|Subgoals Remain| PAGE
-            VERIFY -->|Goal Satisfied| COMPLETE(["Task Completed"]):::client
-        end
+    subgraph S_Page ["1. Untrusted Webpage Context"]
+        User["User Enters Task"] --> SidePanel["Extension Side Panel UI"]
+        SidePanel --> Webpage["Active Tab DOM and Viewport"]
     end
 
-    subgraph NETWORK["🔒 ENFORCED NETWORK BOUNDARY (Loopback + Origin Regex)"]
-        direction TB
-        BOUNDARY_GUARD["Origin-Protected Gateway\n(Verifies Extension Origin Regex; Loopback 127.0.0.1)"]:::boundary
-        ANONYMIZED_PAYLOAD["Anonymized Context Payload\n• Sanitized Screenshot (Masked Faces & PII / Withheld)\n• Sanitized DOM (Roles, IDs, Quarantined Text)\n• Zero Raw Secrets or Plaintext Identifiers"]:::boundary
+    subgraph S_LocalVision ["2. Client-Side Local Vision (WebGPU / WASM)"]
+        Webpage -->|"Extract DOM Structure"| DomExtractor["Bounded DOM Extractor<br/>(Inputs, Labels, Roles, Bounding Boxes)"]
+        Webpage -->|"Capture Pixels"| Screenshot["Viewport Screenshot<br/>(chrome.tabs.captureVisibleTab)"]
+        
+        Screenshot -->|"In-Browser Inference"| LocalViT["Local Vision Transformer<br/>(YOLOS-Tiny ONNX via WebGPU/WASM)"]
+        Screenshot -->|"Pixel Text Scan"| LocalOCR["Local OCR Engine<br/>(Tesseract.js WASM)"]
+        
+        LocalViT -->|"Person and Object Bounding Boxes"| BoxAggregator["Coordinate and Bounding Box Aggregator"]
+        LocalOCR -->|"Matches PII Rules and Discards Text"| BoxAggregator
     end
 
-    subgraph SERVER["☁️ SERVER-SIDE INTEGRATION (Centralized LLM / VLM API Cluster)"]
-        direction TB
+    subgraph S_PrivacyFilter ["3. Client-Side Privacy Filter and Redaction Engine"]
+        DomExtractor --> DomSanitizer["DOM Sanitizer<br/>(Replaces values with REDACTED and LOCAL_*)"]
+        BoxAggregator --> CanvasMask["OffscreenCanvas Masking<br/>(Solid Blackout Over Faces and PII Boxes)"]
+        Screenshot -.->|"Raw Pixels"| CanvasMask
         
-        API_GATEWAY["FastAPI Backend Server\n(POST /vision, POST /reason)"]:::server
+        CanvasMask --> FailClosed{"Fail-Closed Safeguard<br/>(Coverage uncertain, OCR unlocated,<br/>or Canvas/Video surface?)"}
+        FailClosed -->|"Yes / Anomaly"| WithholdImg["Withhold Screenshot<br/>(Neutral Placeholder Substituted)"]
+        FailClosed -->|"No / Complete"| CleanImg["Sanitized Image<br/>(Masked Faces and PII)"]
         
-        subgraph VLM_PIPELINE["VLM Visual Perception Cluster"]
-            VLM_ROTATOR["Provider Rotator & Timeout Gate\n(OpenRouter ➔ Hugging Face ➔ Groq)"]:::server
-            VLM_INFERENCE["Remote Multimodal VLM\n(Interprets Visual Hierarchy & Layout Context)"]:::server
-            DOM_HEURISTIC["DOM-Derived Layout Heuristic\n(Automatic Offline Fallback)"]:::server
-            
-            VLM_ROTATOR -->|Online (<4s)| VLM_INFERENCE
-            VLM_ROTATOR -->|Timeout / 429 Error| DOM_HEURISTIC
-        end
-
-        OBS_FUSION["Observation Fusion Engine\n(Calculates Spatial IoU between DOM & Visual Boxes)"]:::server
-        
-        REASONING["Multimodal Reasoning Engine\n(GPT-OSS 120B / Open-Weights VLM)"]:::server
-
-        PROVENANCE["Explicit Provenance Reporter\n(DOM_PLUS_REAL_VLM | DOM_PLUS_HEURISTIC | DOM_ONLY)"]:::server
-
-        ACTION_GEN["Actionable Command Planner\n(Emits Symbolic Actions: CLICK, TYPE value_source: LOCAL_*)"]:::server
-
-        API_GATEWAY --> VLM_ROTATOR
-        VLM_INFERENCE --> PROVENANCE
-        DOM_HEURISTIC --> PROVENANCE
-        PROVENANCE --> OBS_FUSION
-        API_GATEWAY -->|Sanitized DOM| OBS_FUSION
-        OBS_FUSION --> REASONING
-        REASONING --> ACTION_GEN
+        DomSanitizer --> OutboundPolicy["Outbound Policy Engine<br/>(Deep Scan vs Vault and Registered Patterns)"]
+        CleanImg --> OutboundPolicy
+        WithholdImg --> OutboundPolicy
     end
 
-    %% Cross-boundary connections
-    POLICY -->|Enforce Safety| BOUNDARY_GUARD
-    BOUNDARY_GUARD --> ANONYMIZED_PAYLOAD
-    ANONYMIZED_PAYLOAD -->|Transmit over HTTP| API_GATEWAY
-    ACTION_GEN -->|Return Actionable JSON Plan| VALIDATOR
+    subgraph S_Boundary ["4. Enforced Network Boundary"]
+        OutboundPolicy -->|"Enforce Safety and Strip Headers"| OriginGuard["Origin Guard Gate<br/>(Verifies Extension Origin Regex on 127.0.0.1)"]
+        OriginGuard --> AnonymizedData["Anonymized Context Payload<br/>- Sanitized Screenshot or Placeholder<br/>- Sanitized DOM Structure and Quarantined Text<br/>- Zero Plaintext Secrets or Unmasked Faces"]
+    end
+
+    subgraph S_Server ["5. Server-Side VLM and LLM Pipeline"]
+        AnonymizedData -->|"HTTP POST /vision and /reason"| BackendAPI["FastAPI Backend Server"]
+        
+        BackendAPI --> VlmRotator["VLM Provider Rotator<br/>(OpenRouter to Hugging Face to Groq)"]
+        VlmRotator -->|"Online (less than 4s)"| RemoteVLM["Server Multimodal VLM<br/>(Visual Hierarchy and Spatial Layout)"]
+        VlmRotator -->|"Timeout or 429 Error"| DomHeuristic["DOM-Derived Layout Heuristic<br/>(Automatic Offline Fallback)"]
+        
+        RemoteVLM --> Provenance["Explicit Provenance Reporter<br/>(DOM_PLUS_REAL_VLM / DOM_PLUS_HEURISTIC)"]
+        DomHeuristic --> Provenance
+        
+        Provenance --> ObsFusion["Observation Fusion Engine<br/>(Spatial IoU Matching DOM and Visual Boxes)"]
+        BackendAPI -.->|"Sanitized DOM"| ObsFusion
+        
+        ObsFusion --> Reasoner["Reasoning Engine<br/>(GPT-OSS 120B / Open-Weights Model)"]
+        Reasoner --> ActionPlan["Actionable Command Planner<br/>(Emits Symbolic Actions: CLICK, TYPE LOCAL_*)"]
+    end
+
+    subgraph S_Execution ["6. Client-Side Safety Gate and Execution"]
+        ActionPlan -->|"Return Actionable JSON"| Validator["Action Schema Validator<br/>(Rejects script / eval injections)"]
+        Validator --> RiskGate{"Risk Classifier<br/>(LOW, MEDIUM, HIGH, CRITICAL)"}
+        
+        RiskGate -->|"High/Critical: Submit, Checkout, Delete"| ConfirmPrompt["Human-in-the-Loop Confirmation<br/>(Approval Card in Side Panel)"]
+        RiskGate -->|"Low/Medium: Click, Type, Scroll"| Resolver["Local Value Resolver"]
+        
+        ConfirmPrompt -->|"User Approves"| Resolver
+        ConfirmPrompt -->|"User Cancels"| HaltTask["Halt Task Execution"]
+        
+        VaultStorage[("Local Secret Vault<br/>chrome.storage.local")] -.->|"Read Plaintext In-Browser"| Resolver
+        Resolver -->|"Swaps LOCAL_* with Real Secret"| Executor["Browser Executor<br/>(Dispatches Synthetic Events)"]
+        
+        Executor -->|"Mutates Page"| Webpage
+        Executor --> VerifyState["Observation Verifier<br/>(Checks DOM Settling and Navigation)"]
+        VerifyState -->|"Subgoals Remain"| Webpage
+        VerifyState -->|"Goal Accomplished"| TaskDone["Task Completed Successfully"]
+    end
 ```
+
+<details>
+<summary>📋 Click to view Text/ASCII Pipeline Architecture Diagram</summary>
+
+```
+                                  [ UNTRUSTED WEBPAGE ]
+                                             │
+                       ┌─────────────────────┴─────────────────────┐
+                       ▼                                           ▼
+             [ Content Script DOM ]                     [ Visible Viewport ]
+                       │                                           │
+         Bounded DOM Feature Extractor                             │
+                       │                                           ▼
+         Local DOM Sanitizer & PII Audit                [ Extension Side Panel ]
+         (Tokens replaced with LOCAL_*)                 Local YOLOS-Tiny (ONNX)
+                       │                                English Tesseract.js OCR
+                       │                                           │
+                       │                                Bounding Box Detection
+                       │                                           │
+                       │                                           ▼
+                       │                                [ Screenshot Sanitizer ]
+                       │                                Solid Blackout Over Boxes
+                       │                                (Fail-Closed Placeholder)
+                       │                                           │
+                       └─────────────────────┬─────────────────────┘
+                                             ▼
+                               [ Outbound Policy Engine ]
+                               (Local PII Registry Audit)
+                                             │ (Blocks raw leaks)
+                                             ▼
+                             [ Loopback Backend (/vision) ]
+                               Extension-Origin Enforced
+                                             │
+                       ┌─────────────────────┴─────────────────────┐
+                       ▼                                           ▼
+            [ Remote Server VLM ]                       [ Labeled Fallback ]
+            (OpenRouter / HF / Groq)                     (DOM-Derived Heuristic)
+                       │                                           │
+                       └─────────────────────┬─────────────────────┘
+                                             ▼
+                                   [ Observation Fusion ]
+                             IoU Matching + Semantic State
+                                             │
+                                             ▼
+                                  [ Reasoning Engine ]
+                               Multi-Step Symbolic Planning
+                                (Never emits raw secrets)
+                                             │
+                                             ▼
+                                 [ Local Action Validator ]
+                                             │
+                                             ▼
+                                     [ Risk Gate ]
+                                 Risk Classification
+                                 (LOW / MED / HIGH / CRIT)
+                                             │
+                        ┌────────────────────┴────────────────────┐
+                 [ LOW / MEDIUM ]                          [ HIGH / CRITICAL ]
+                        │                                         │
+                        │                                  User Confirmation Card
+                        │                                  (Side Panel Approval)
+                        │                                         │
+                        └────────────────────┬────────────────────┘
+                                             │ (Approved)
+                                             ▼
+                                  [ Local Value Resolver ]
+                                 Fetches Plaintext in-browser
+                                 from Local Vault Storage
+                                             │
+                                             ▼
+                                  [ Browser Executor ]
+                                 DOM Mutation & Navigation
+```
+</details>
 
 ---
 
