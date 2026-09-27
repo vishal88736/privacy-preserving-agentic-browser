@@ -17,6 +17,14 @@ export class ActionParser {
       throw new Error('ActionParser received empty or invalid response string');
     }
 
+    // Gateways can return HTTP 200 whose content is the provider's error
+    // text (e.g. "ERROR: Cannot read 'clipboard'..."). Never parse that as
+    // a plan and never embed it in error messages — fail with a clean error
+    // so the caller falls back to the grounded local planner.
+    if (/^\s*ERROR\b|does\s+not\s+support\s+(?:image|vision|this\s+content)|cannot\s+read\s+["']?\w+["']?|rate[\s-]?limit(?:ed|exceeded)?/i.test(rawText.slice(0, 400))) {
+      throw new Error('The reasoning provider returned an error instead of a plan');
+    }
+
     let cleaned = rawText.trim();
     // Strip markdown code fences if present (```json ... ```)
     cleaned = cleaned.replace(/^```json\s*/i, '').replace(/^```\s*/, '').replace(/```$/g, '').trim();
