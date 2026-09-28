@@ -34,6 +34,19 @@ This document details the licensing, attribution, conceptual reuse, clean-room r
   - Critical Privacy Anti-Pattern: AI Browser Agent sent raw HTML (`${html}`) and target values directly into external OpenAI API prompts without sanitization, leaking all form values, PII, and credentials.
 - **Implementation Mechanism**: Clean-room implementation targeting Chrome Extension APIs (`chrome.tabs`, `chrome.scripting`, `chrome.sidePanel`) with zero Electron dependencies.
 
+---
+
+### Repository C: TheAgenticBrowser
+- **Repository URL**: [`https://github.com/TheAgenticAI/TheAgenticBrowser`](https://github.com/TheAgenticAI/TheAgenticBrowser)
+- **Pinned source**: Commit [`71daa285d65584333e0c69b963360f8b74fd980f`](https://github.com/TheAgenticAI/TheAgenticBrowser/commit/71daa285d65584333e0c69b963360f8b74fd980f)
+- **License**: TheAgentic Community License Agreement, Version 1.0; the complete pinned text is copied to [`backend/agentic/LICENSE.TheAgentic`](../backend/agentic/LICENSE.TheAgentic).
+- **Compliance notes**: The four upstream Python files are preserved under `backend/agentic/_upstream/` as reference-only copies. The adapted modules carry prominent modification notices, and the required Section 1.2(b) notice is reproduced in `backend/agentic/VENDORING.md`. Hashes, exact file mapping, exclusions, and adaptations are recorded there.
+- **Concepts reused and adapted**: Planner plan/next-step structure, Critique feedback/termination structure, and the Planner → executor → Critique workflow design. The live `/reason` path uses one `UNIVERSAL_TASK_PROMPT` system message per step, combining those roles with this executor's action contract; it is defined in `backend/agentic/prompts.py`. Prompts were changed for sanitized observations, value non-echo, `LOCAL_*` tokens, observation deltas, and the extension's three-failure breaker. The upstream `pydantic-ai` result types became ordinary Pydantic models. The older role-specific prompt constants and builders/parsers are retained for isolated contract tests only and are not used in production request handling.
+- **Components excluded**: Browser Agent Playwright tools and `mmid` selectors, browser manager, skills, and utility integrations (`logfire`, `tiktoken`, and upstream `openai_client`). These components would route execution or raw page data around the extension's privacy and safety controls or add dependencies that this project deliberately avoids.
+- **Implementation mechanism**: **verbatim reference copy + documented adaptation, no dependency taken**. The upstream browser executor is reference-only; browser execution and the task loop remain in the extension. The live prompt never emits `UPLOAD`; a defensive client check routes any accidental model-emitted `UPLOAD` to `ASK_USER` so file selection stays with the user.
+
+**SIH evaluator restriction note:** The upstream license prohibits use for an Excluded Purpose: a competing SaaS, PaaS, IaaS, or similar online service. It also grants no sublicensing right. SIH evaluation or redistribution does not create a sublicense; each recipient must agree directly to the upstream license terms to exercise its rights. See [`backend/agentic/LICENSE.TheAgentic`](../backend/agentic/LICENSE.TheAgentic) for the controlling text.
+
 ### Packaged local-vision assets
 
 The extension build includes these upstream assets so screenshot analysis does not fetch executable code or model files at runtime:
@@ -65,6 +78,7 @@ The extension build includes these upstream assets so screenshot analysis does n
 | **Local Safety Risk Gate** | **Novel SIH Contribution** | Written from scratch | Blocks exfiltration & prompt injection |
 | **DOM/local-vision/VLM fusion** | Project implementation | DOM grounding, packaged local model, remote VLM | Heuristic and VLM provenance reported explicitly |
 | **MV3 Side Panel UI** | **Novel SIH Contribution** | Written from scratch | Real-time privacy & step dashboard |
+| **Planner + Critique reasoning** | TheAgenticBrowser (pinned; see `backend/agentic/VENDORING.md`) | `UNIVERSAL_TASK_PROMPT`; one fused backend call per step; legacy role prompts retained for tests only | Sanitized inputs; extension owns execution and loop; uploads route to the user |
 
 ---
 

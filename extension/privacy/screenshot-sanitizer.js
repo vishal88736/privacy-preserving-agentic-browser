@@ -5,6 +5,10 @@
  * placeholder whenever coverage or redaction cannot be established.
  */
 
+import { createLogger } from '../shared/logger.js';
+
+const log = createLogger({ scope: 'ScreenshotSanitizer', surface: 'background' });
+
 export class ScreenshotSanitizer {
   constructor() {
     this.maskColor = '#000000';
@@ -124,9 +128,8 @@ export class ScreenshotSanitizer {
 
       return await failClosedPlaceholder();
     } catch (err) {
-      console.warn('Screenshot redaction failed closed (placeholder returned):', err);
-      return await failClosedPlaceholder();
-    }
+      log.exception('Redaction failed closed; returning the neutral placeholder', err);
+      return await failClosedPlaceholder();    }
   }
 
   _blobToDataURL(blob) {

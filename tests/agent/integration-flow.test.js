@@ -1,80 +1,48 @@
 import test from 'node:test';
-import assert from 'node:assert';
+import assert from 'node:assert/strict';
 import { GPTOSSClient } from '../../extension/reasoning/gpt-oss-client.js';
-import { ActionType, RiskLevel, SymbolicSecretSource } from '../../extension/shared/constants.js';
-import { FormAnalyzer } from '../../extension/reasoning/form-analyzer.js';
-import { FormPlanBuilder } from '../../extension/reasoning/form-plan-builder.js';
-import { LocalValueResolver } from '../../extension/executor/local-value-resolver.js';
+import { ActionType, SymbolicSecretSource } from '../../extension/shared/constants.js';
 
-function clientWithSyntheticProfile() {
-  const vault = {
-    resolveSecret(source) {
-      return {
-        LOCAL_FULL_NAME: 'Synthetic Integration User',
-        LOCAL_AADHAAR: 'SYNTHETIC_AADHAAR_FIXTURE',
-        LOCAL_PAN: 'SYNTHETIC_PAN_FIXTURE',
-        LOCAL_DOB: '01/01/1990',
-        LOCAL_PHONE: '9000000000'
-      }[source] || null;
-    }
-  };
-  return new GPTOSSClient('http://127.0.0.1:9999', new FormPlanBuilder(new FormAnalyzer(), new LocalValueResolver(vault)));
+async function withMockFetch(handler, run) {
+  const original = globalThis.fetch;
+  globalThis.fetch = handler;
+  try {
+    return await run();
+  } finally {
+    globalThis.fetch = original;
+  }
 }
 
-test('Integration - Multi-step Aadhaar form filling scenario', async () => {
-  const client = clientWithSyntheticProfile();
-
-  // Step 1: Provide observation with Aadhaar, PAN, Name, DOB, Phone and Submit button
+test('Integration - remote planner action is grounded to the sanitized form observation', async () => {
+  let sentBody;
   const fusedObservation = {
     elements: [
-      { id: 'el_1', dom: { tag: 'input', name: 'full_name', label: 'Full Name', sensitive: false } },
-      { id: 'el_2', dom: { tag: 'input', name: 'aadhaar_number', label: 'Aadhaar Number', sensitive: true, value_source: SymbolicSecretSource.LOCAL_AADHAAR } },
-      { id: 'el_3', dom: { tag: 'input', name: 'pan_number', label: 'PAN Card', sensitive: true, value_source: SymbolicSecretSource.LOCAL_PAN } },
-      { id: 'el_4', dom: { tag: 'input', type: 'date', name: 'dob', label: 'Date of Birth', sensitive: false } },
-      { id: 'el_5', dom: { tag: 'input', type: 'tel', name: 'phone', label: 'Registered Mobile', sensitive: false } },
-      { id: 'el_6', dom: { tag: 'button', type: 'submit', label: 'Submit Application' } }
+      { id: 'el_name', dom: { tag: 'input', name: 'full_name', label: 'Full Name', sensitive: false } },
+      { id: 'el_aadhaar', dom: { tag: 'input', name: 'aadhaar_number', label: 'Aadhaar Number', sensitive: true, value_source: SymbolicSecretSource.LOCAL_AADHAAR } },
+      { id: 'el_submit', dom: { tag: 'button', type: 'submit', label: 'Submit Application' } }
     ]
   };
 
-  const task = 'Fill this Aadhaar application using my saved profile';
-  const history = [];
-
-  // Step 1: bulk form plan (FormAnalyzer now handles fused {dom} shape).
-  // Must contain all fillable fields with correct symbolic sources.
-  // Bulk profile fills stay confirmation-free (values never leave the
-  // device); only SUBMIT requires approval (asserted in the next step).
-  const step1 = await client.planNextStep(task, fusedObservation, history);
-  assert.strictEqual(step1.action.action, ActionType.FILL_FORM_PLAN);
-  assert.ok(step1.action.requires_confirmation === false, 'Bulk profile fill must NOT require confirmation');
-  assert.ok(step1.action.risk === RiskLevel.HIGH || step1.action.risk === RiskLevel.MEDIUM);
-  const byId = new Map((step1.action.value.fields || []).map((f) => [f.field_id, f]));
-  assert.strictEqual(byId.get('el_1')?.value_source, SymbolicSecretSource.LOCAL_FULL_NAME);
-  assert.strictEqual(byId.get('el_2')?.value_source, SymbolicSecretSource.LOCAL_AADHAAR);
-  assert.strictEqual(byId.get('el_3')?.value_source, SymbolicSecretSource.LOCAL_PAN);
-  history.push({
-    step: 1,
-    action: step1.action,
-    success: true,
-    result: { details: step1.action.value.fields.map((field) => ({ field: field.field_id, success: true })) }
+  await withMockFetch(async (_url, options) => {
+    sentBody = JSON.parse(options.body);
+    return { ok: true, json: async () => ({
+      action: { action: ActionType.TYPE, target: { element_id: 'el_name' }, value_source: SymbolicSecretSource.LOCAL_FULL_NAME },
+      plan: 'Fill the requested identity fields, then review the result.',
+      planner_feedback: '',
+      terminate_assessment: false,
+      final_response: ''
+    }) };
+  }, async () => {
+    const result = await new GPTOSSClient('http://127.0.0.1:9999').planNextStep(
+      'Fill this application using my saved profile', fusedObservation, []
+    );
+    assert.equal(result.action.action, ActionType.TYPE);
+    assert.equal(result.action.target.element_id, 'el_name');
+    assert.equal(result.remoteCallMade, true);
+    assert.ok(fusedObservation.elements.some((element) => element.id === result.action.target.element_id));
   });
-
-  const afterFill = {
-    ...fusedObservation,
-    elements: fusedObservation.elements.map((el) => ({
-      ...el,
-      dom: {
-        ...el.dom,
-        value: ['el_1', 'el_2', 'el_3', 'el_4', 'el_5'].includes(el.id) ? '[REDACTED]' : el.dom.value
-      }
-    }))
-  };
-
-  // After the bulk plan is executed, the next step must be Submit with confirmation
-  const submitStep = await client.planNextStep(task, afterFill, history);
-  assert.strictEqual(submitStep.action.action, ActionType.SUBMIT);
-  assert.strictEqual(submitStep.action.target.element_id, 'el_6');
-  assert.strictEqual(submitStep.action.risk, RiskLevel.HIGH);
-  assert.strictEqual(submitStep.action.requires_confirmation, true);
+  assert.equal(sentBody.task, 'Fill this application using my saved profile');
+  assert.doesNotMatch(JSON.stringify(sentBody), /SYNTHETIC_AADHAAR_FIXTURE/);
 });
 
 test('Integration - unsupported local document upload asks user to choose directly on the site', async () => {
@@ -91,8 +59,31 @@ test('Integration - unsupported local document upload asks user to choose direct
   assert.equal(uploadStep.action.value_source, undefined);
 });
 
-test('Integration - Flight Search comparison scenario', async () => {
-  const client = new GPTOSSClient('http://127.0.0.1:9999');
+test('Integration - model-emitted UPLOAD is blocked and routed to the user', async () => {
+  const fusedObservation = {
+    elements: [
+      { id: 'el_file', dom: { tag: 'input', type: 'file', label: 'Supporting document' }, interaction: { uploadable: true } }
+    ]
+  };
+
+  await withMockFetch(async () => ({ ok: true, json: async () => ({
+    action: { action: ActionType.UPLOAD, target: { element_id: 'el_file' } },
+    plan: 'Complete the application.',
+    planner_feedback: '',
+    terminate_assessment: false
+  }) }), async () => {
+    const result = await new GPTOSSClient('http://backend.test').planNextStep(
+      'Complete this application', fusedObservation, []
+    );
+    assert.equal(result.action.action, ActionType.ASK_USER);
+    assert.match(result.action.value.prompt, /Choose the file directly/i);
+    assert.equal(result.action.target, undefined);
+    assert.equal(result.remoteCallMade, true);
+    assert.equal(result.remoteCallAttempted, true);
+  });
+});
+
+test('Integration - remote flight-search action passes through with its grounded target', async () => {
   const fusedObservation = {
     elements: [
       { id: 'el_from', dom: { tag: 'input', label: 'Origin City (From)' } },
@@ -101,8 +92,17 @@ test('Integration - Flight Search comparison scenario', async () => {
     ]
   };
 
-  const step1 = await client.planNextStep('Find the cheapest flight from Pune to Delhi', fusedObservation, []);
-  assert.strictEqual(step1.action.action, ActionType.TYPE);
-  assert.strictEqual(step1.action.target.element_id, 'el_from');
-  assert.strictEqual(step1.action.value, 'Pune');
+  await withMockFetch(async () => ({ ok: true, json: async () => ({
+    action: { action: ActionType.TYPE, target: { element_id: 'el_from' }, value: 'Pune' },
+    plan: 'Enter the origin and destination, then compare flights.',
+    planner_feedback: ''
+  }) }), async () => {
+    const result = await new GPTOSSClient('http://127.0.0.1:9999').planNextStep(
+      'Find the cheapest flight from Pune to Delhi', fusedObservation, []
+    );
+    assert.equal(result.action.action, ActionType.TYPE);
+    assert.equal(result.action.target.element_id, 'el_from');
+    assert.equal(result.action.value, 'Pune');
+    assert.equal(result.remoteCallMade, true);
+  });
 });

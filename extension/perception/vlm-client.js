@@ -6,7 +6,10 @@
 
 import { ServerDefaults } from '../shared/constants.js';
 import { validateVisionPayload } from '../shared/schemas.js';
+import { createLogger } from '../shared/logger.js';
 import { defaultPolicyEngine } from '../privacy/policy-engine.js';
+
+const log = createLogger({ scope: 'VLMClient', surface: 'background' });
 
 export class VLMClient {
   constructor(baseUrl = ServerDefaults.BACKEND_BASE_URL) {
@@ -45,7 +48,7 @@ export class VLMClient {
       this.policyEngine.enforceOutboundSafety(payload);
     } catch (err) {
       if (err?.name === 'OutboundPolicyViolationError') {
-        console.warn('[VLMClient] Outbound privacy block; using DOM-only observation.');
+        log.warn('Outbound privacy block; using DOM-only observation.', { violation: err?.message });
         const fallback = this._domOnlyObservation(sanitizedDom);
         fallback._source = 'DOM_ONLY';
         fallback._error = String(err?.message || err).slice(0, 200);
@@ -94,7 +97,7 @@ export class VLMClient {
       };
       return obs;
     } catch (err) {
-      console.warn(`[VLMClient] Remote VLM request failed (${err.message}). Using local visual inference.`);
+      log.exception('Remote VLM request failed; using local visual inference', err);
       const fallback = this._domOnlyObservation(sanitizedDom);
       fallback._source = 'DOM_ONLY';
       fallback.model_trace = { component: 'vision', source: 'dom_only', provider: null, model: null };

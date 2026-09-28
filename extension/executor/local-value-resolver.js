@@ -4,7 +4,10 @@
  * from the LocalVault immediately prior to in-browser execution.
  */
 
+import { createLogger } from '../shared/logger.js';
 import { defaultLocalVault } from '../privacy/local-vault.js';
+
+const log = createLogger({ scope: 'LocalValueResolver', surface: 'background' });
 
 // Canonical state/province names used to split a free-form address record
 // into city/state/zip parts. Matched case-insensitively; the matched
@@ -212,7 +215,7 @@ export class LocalValueResolver {
         throw new Error('Real document upload is not supported. Choose the file directly on the webpage.');
       }
       // Privacy: token name only — never the plaintext value.
-      console.log(`[LocalValueResolver] Resolved action value_source ${action.value_source} (kept local)`);
+      log.info(`Resolved action value_source ${action.value_source} (kept local)`);
       return resolved;
     }
     return action.value || '';

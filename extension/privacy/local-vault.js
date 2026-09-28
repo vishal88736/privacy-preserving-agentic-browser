@@ -15,12 +15,15 @@
  */
 
 import { SymbolicSecretSource } from '../shared/constants.js';
+import { createLogger } from '../shared/logger.js';
 import {
   isEncryptionSupported,
   migrateLegacyVault,
   readEncryptedVault,
   writeEncryptedVault
 } from './vault-crypto.js';
+
+const log = createLogger({ scope: 'LocalVault', surface: 'background' });
 
 export class LocalVault {
   constructor() {
@@ -59,7 +62,7 @@ export class LocalVault {
       if (removedDemo) await writeEncryptedVault(safe);
     } catch (e) {
       this.storageError = `The vault could not be read: ${e?.message || 'unknown error'}`;
-      console.warn('Could not read the encrypted vault:', e);
+      log.exception('Could not read the encrypted vault', e);
     }
   }
 
@@ -67,14 +70,14 @@ export class LocalVault {
     if (typeof chrome === 'undefined' || !chrome.storage?.local) return;
     if (!isEncryptionSupported()) {
       this.storageError = 'This browser cannot encrypt the vault at rest, so values will not be saved.';
-      console.warn('[LocalVault] Refusing to write an unencrypted vault.');
+      log.warn('Refusing to write an unencrypted vault.');
       return;
     }
     try {
       await writeEncryptedVault(this.memoryStore);
     } catch (e) {
       this.storageError = `The vault could not be saved: ${e?.message || 'unknown error'}`;
-      console.warn('Could not save the encrypted vault:', e);
+      log.exception('Could not save the encrypted vault', e);
     }
   }
 
@@ -87,7 +90,7 @@ export class LocalVault {
     if (!symbolicSource) return null;
     const value = this.memoryStore[symbolicSource] || null;
     // Privacy: never log plaintext values — token name + configured flag only.
-    console.log(`[LocalVault] Resolving ${symbolicSource} -> ${value === null || value === undefined || value === '' ? '(not configured)' : '(configured, kept local)'}`);
+    log.info(`Resolving ${symbolicSource} -> ${value === null || value === undefined || value === '' ? '(not configured)' : '(configured, kept local)'}`);
     return value;
   }
 

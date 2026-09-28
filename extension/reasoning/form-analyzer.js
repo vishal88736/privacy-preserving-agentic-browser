@@ -1,7 +1,10 @@
 /**
- * Form Analyzer
- * Takes form evidence extracted by DOM extractor and classifies each field semantically,
- * then maps it to local value sources.
+ * @deprecated Legacy local form-planning heuristic. The live agent path must
+ * use the remote Planner output; this module remains only for isolated tests
+ * and migration comparison.
+ *
+ * Form Analyzer takes DOM form evidence, classifies fields, and maps them to
+ * local value sources. Do not connect it to the live task loop.
  */
 
 import { SymbolicSecretSource } from '../shared/constants.js';

@@ -3,6 +3,10 @@
  * Uses WebExtension tabs.captureVisibleTab to read the active viewport.
  */
 
+import { createLogger } from '../shared/logger.js';
+
+const log = createLogger({ scope: 'ScreenshotService', surface: 'background' });
+
 export class ScreenshotService {
   /**
    * Captures the visible tab of the specified window.
@@ -45,7 +49,7 @@ export class ScreenshotService {
             settled = true;
             clearTimeout(timer);
             if (chrome.runtime.lastError) {
-              console.warn('[ScreenshotService] captureVisibleTab notice:', chrome.runtime.lastError.message);
+              log.warn('captureVisibleTab reported a notice; falling back.', { notice: chrome.runtime.lastError.message });
               resolve(null);
             } else {
               resolve(res || null);
@@ -74,7 +78,7 @@ export class ScreenshotService {
           };
         }
       } catch (err) {
-        console.warn('[ScreenshotService] captureTab non-fatal error:', err);
+        log.exception('captureTab failed; returning the safe placeholder', err);
       }
     }
 

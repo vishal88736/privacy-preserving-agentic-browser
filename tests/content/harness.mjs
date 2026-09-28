@@ -2,13 +2,18 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 /**
- * Boots the REAL content script — the single file `extension/manifest.json`
- * registers — inside a synthetic page, and returns a `send()` that dispatches
- * extension messages to its listener.
+ * Boots the REAL content scripts — the exact files, in the exact order, that
+ * `extension/manifest.json` registers — inside a synthetic page, and returns a
+ * `send()` that dispatches extension messages to its listener.
  *
- * content.js is an IIFE that touches `window`, `document` and `chrome.runtime`
- * at evaluation time, so it cannot simply be imported. This harness supplies
- * just enough of that surface to run it, which means every assertion made
+ * The manifest lists two files: `log-forwarder.js` then `content.js`. The
+ * forwarder has to be evaluated first, in the same global, because content.js
+ * reads the `__privAgentLog` it defines. Loading only content.js would prove
+ * nothing about the shipped configuration.
+ *
+ * Both are IIFEs that touch `window`, `document` and `chrome.runtime` at
+ * evaluation time, so they cannot simply be imported. This harness supplies
+ * just enough of that surface to run them, which means every assertion made
  * through it exercises production code paths.
  *
  * The previous test suite imported a parallel set of `extension/content/*.js`
@@ -16,7 +21,10 @@ import { fileURLToPath } from 'node:url';
  * nothing, and the two implementations had already drifted.
  */
 
-const SRC = readFileSync(fileURLToPath(new URL('../../extension/content/content.js', import.meta.url)), 'utf8');
+const SOURCES = [
+  readFileSync(fileURLToPath(new URL('../../extension/content/log-forwarder.js', import.meta.url)), 'utf8'),
+  readFileSync(fileURLToPath(new URL('../../extension/content/content.js', import.meta.url)), 'utf8')
+];
 
 /** Minimal stand-in for a page element. */
 export class FakeElement {
@@ -176,7 +184,7 @@ export function bootPage({ elements = [], devicePixelRatio = 1, innerWidth = 128
   globalThis.window.__PRIVACY_AGENT_CONTENT_INITIALIZED__ = false;
 
   try {
-    new Function(SRC)();
+    for (const source of SOURCES) new Function(source)();
   } finally {
     console_.log = realLog;
     console_.warn = realWarn;

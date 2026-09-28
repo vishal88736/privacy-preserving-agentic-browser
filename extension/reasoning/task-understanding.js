@@ -1,8 +1,8 @@
 /**
  * Task Understanding & State Machine
- * Maintains the internal semantic representation of the user's task.
- * Includes a local interpreter for fast task startup and grounded fallback
- * planning, so task understanding does not depend on a separate model call.
+ * Maintains the internal semantic representation of the user's task. The
+ * live path gets intent and plans from the backend; localInterpretTask is a
+ * deprecated test/reference helper, not a planning fallback.
  */
 
 // L18: Expanded stop-word list — prevents noise entities from polluting grounding
@@ -61,6 +61,10 @@ const COMPOUND_PATTERNS = [
   { pattern: /and\s+(then\s+)?(download)/i, secondaryIntent: 'DOWNLOAD' }
 ];
 
+/**
+ * @deprecated Legacy keyword interpreter, retained for tests and comparison.
+ * The live path must not use this as an intent, plan, or action fallback.
+ */
 export function localInterpretTask(rawPrompt) {
   const text = String(rawPrompt || '').trim();
   const lower = text.toLowerCase();
@@ -394,8 +398,9 @@ export class TaskState {
     this.search_query = null;
     this.ranking_constraint = null;
 
-    // If constructed with a real prompt, seed a sensible default task so
-    // getActiveSubgoal() is meaningful before updateFromModel() runs.
+    // Keep only the structural parseTaskSemantics seed so state has a site,
+    // query, and subgoal shape before the backend interpreter responds. This
+    // seed does not choose an executable action or replace remote intent.
     if (rawPrompt) {
       try {
         const seed = parseTaskSemantics(rawPrompt);

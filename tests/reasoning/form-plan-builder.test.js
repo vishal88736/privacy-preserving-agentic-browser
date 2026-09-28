@@ -164,17 +164,18 @@ test('known fields still remaining are returned as actionable work', () => {
   assert.equal(decision.action.value.fields[0].field_id, 'el_country');
 });
 
-test('remote DONE cannot bypass a locally resolvable form field', async () => {
-  const client = new GPTOSSClient('http://127.0.0.1:1', builder(PROFILE));
+test('unreachable planner fails closed instead of creating a local form plan', async () => {
+  const client = new GPTOSSClient('http://127.0.0.1:1');
+  client.post = async () => { throw new Error('backend offline'); };
   const result = await client.planNextStep(
     'Fill this form using my saved profile, but do not submit it.',
     { elements: [field('el_terms', 'input', 'checkbox', 'terms', 'Agree to terms', { checked: false })] },
-    [],
-    { intent: 'FILL_FORM', constraints: ['must NOT submit the form'] }
+    []
   );
-  assert.equal(result.action.action, ActionType.FILL_FORM_PLAN);
-  assert.equal(result.action.value.fields[0].field_id, 'el_terms');
+  assert.equal(result.action.action, ActionType.WAIT);
+  assert.equal(result.plannerUnavailable, true);
   assert.equal(result.remoteCallMade, false);
+  assert.equal(result.remoteCallAttempted, true);
 });
 
 test('user-supplied personal text is excluded from extension request diagnostics', async () => {
@@ -202,4 +203,3 @@ test('date normalization handles 2-digit year (e.g. 27/09/26) and matches YYYY-M
   const decision = builder({ ...PROFILE, LOCAL_DOB: '27/09/26' }).decide(form, 'Fill the form using my saved profile', history);
   assert.equal(decision.status, 'COMPLETE');
 });
-

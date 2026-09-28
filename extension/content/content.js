@@ -5,6 +5,19 @@
  */
 
 (() => {
+  // The logger shim (content/log-forwarder.js) is registered ahead of this file
+  // in the manifest, so it is always defined in the isolated world. The fallback
+  // covers a non-browser evaluation (the unit-test harness may run this file on
+  // its own) and must never itself throw: a throw here would abort the whole
+  // injection and leave the tab permanently unresponsive.
+  const log = globalThis.__privAgentLog || {
+    debug: () => {},
+    info: (...parts) => console.log(...parts),
+    warn: (...parts) => console.warn(...parts),
+    error: (...parts) => console.error(...parts),
+    exception: (scope, message, error) => console.error(`[${scope}] ${message}:`, error)
+  };
+
   // Prevent duplicate injections, but recover after an extension
   // reload/update: this flag persists in the isolated world while the
   // previous injection's runtime is invalidated (its listeners stop
@@ -20,7 +33,7 @@
   }
   if (previousInjectionValid) return;
 
-  console.log('[PrivacyAgent] Content script initialized.');
+  log.info('PrivacyAgent', 'Content script initialized.');
 
   // Time allowed for scrollIntoView + layout shift to settle before the action
   // target is re-resolved. Re-resolving after the scroll (rather than before)
@@ -1213,6 +1226,10 @@
           sendResponse({ success: true, data: domData });
         }).catch(err => {
           activeOperation = null;
+          // The caller only ever saw { success: false, error }, which the
+          // background then folded into a generic friendly message. Without
+          // this line the underlying cause was unrecoverable after the fact.
+          log.exception('Content', 'EXTRACT_DOM failed', err);
           sendResponse({ success: false, error: err.message });
         });
         return true; // Keep message channel open for async response
@@ -1224,6 +1241,7 @@
           sendResponse(result);
         }).catch(err => {
           activeOperation = null;
+          log.exception('Content', 'EXECUTE_ACTION failed', err, { action: payload?.action?.action ?? null });
           sendResponse({ success: false, error: err.message });
         });
         return true;
@@ -1245,6 +1263,7 @@
         stabilityObserver.waitForStability(payload?.quietMs || 300, 2000).then(() => {
           sendResponse({ stable: true });
         }).catch(err => {
+          log.exception('Content', 'CHECK_PAGE_STABILITY failed', err);
           sendResponse({ stable: false, error: err.message });
         });
         return true;

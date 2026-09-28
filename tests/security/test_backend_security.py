@@ -174,8 +174,19 @@ class BackendBoundaryTests(unittest.TestCase):
                     None
                 )
             output = '\n'.join(captured.output)
-            self.assertIn('action_type=TYPE', output)
+            # The action type may ride in the message or in a structured
+            # `extra` field, so assert against the records rather than the
+            # rendered text. What this guards is that the record exists at all:
+            # without it the assertNotIn below would pass vacuously.
+            self.assertTrue(
+                any('TYPE' in str(getattr(r, 'msg', '')) or getattr(r, 'action_type', None) == 'TYPE'
+                    for r in captured.records),
+                'plan_step did not record the resolved action type',
+            )
             self.assertNotIn(sentinel, output)
+            # Structured fields are written to the JSONL file, so they are a
+            # log sink too and must be held to the same rule as the message.
+            self.assertNotIn(sentinel, repr([r.__dict__ for r in captured.records]))
         finally:
             settings.API_KEY = previous_key
 

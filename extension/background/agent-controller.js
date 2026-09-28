@@ -16,6 +16,7 @@
 
 import { AgentState, ActionType, RiskLevel } from '../shared/constants.js';
 import { MessageType } from '../shared/messages.js';
+import { createLogger } from '../shared/logger.js';
 import { taskManager } from './task-manager.js';
 import { defaultDOMSanitizer } from '../privacy/dom-sanitizer.js';
 import { defaultLocalVault } from '../privacy/local-vault.js';
@@ -24,11 +25,10 @@ import { defaultScreenshotService } from '../perception/screenshot.js';
 import { defaultVLMClient } from '../perception/vlm-client.js';
 import { defaultObservationFusion } from '../perception/observation-fusion.js';
 import { defaultGPTOSSClient } from '../reasoning/gpt-oss-client.js';
-import { defaultFormPlanBuilder } from '../reasoning/form-plan-builder.js';
 import { defaultRiskGate } from '../executor/risk-gate.js';
 import { defaultActionValidator } from '../executor/action-validator.js';
 import { defaultActionExecutor } from '../executor/action-executor.js';
-import { TaskState, localInterpretTask } from '../reasoning/task-understanding.js';
+import { TaskState } from '../reasoning/task-understanding.js';
 import { defaultPageStateModeler } from '../perception/page-state-modeler.js';
 import {
   PageCapability,
@@ -38,6 +38,8 @@ import {
   validateNavigationUrl,
   urlsMatchForVerification
 } from '../navigation/navigation.js';
+
+const log = createLogger({ scope: 'AgentController', surface: 'background' });
 
 const MAX_CONSECUTIVE_FAILURES = 3;
 const MAX_IDENTICAL_ACTIONS = 3;
@@ -106,6 +108,16 @@ async function measureStage(task, name, operation) {
   }
 }
 
+export function plannerStepMetadata(planResult = {}) {
+  return {
+    planner_plan: typeof planResult.plan === 'string' ? planResult.plan.slice(0, 8000) : '',
+    planner_feedback: typeof planResult.planner_feedback === 'string'
+      ? planResult.planner_feedback.slice(0, 3000)
+      : '',
+    terminate_assessment: planResult.terminate_assessment === true
+  };
+}
+
 function isSparsePageSnapshot(rawDOM) {
   const elements = Array.isArray(rawDOM?.elements) ? rawDOM.elements : [];
   const visible = elements.filter((element) => element && element.is_visible !== false);
@@ -133,8 +145,7 @@ function visualEvidenceNeed(task, rawDOM) {
 }
 
 export class AgentController {
-  constructor(formPlanBuilder = defaultFormPlanBuilder) {
-    this.formPlanBuilder = formPlanBuilder;
+  constructor() {
     this.activeTabId = null;
     this.isPaused = false;
     this.isCancelled = false;
@@ -157,7 +168,7 @@ export class AgentController {
       try {
         listener(event, data);
       } catch (err) {
-        console.error('Listener notification error:', err);
+        log.exception('Listener notification threw', err);
       }
     }
   }
@@ -218,18 +229,32 @@ export class AgentController {
     taskManager.updateState(AgentState.UNDERSTANDING_TASK, 'Interpreting task goal...', task);
     this.notify('STATE_CHANGED', { state: AgentState.UNDERSTANDING_TASK });
 
-    // Seed task state locally. The first /reason request already receives the
-    // complete sanitized request and grounded page state, so a separate remote
-    // /interpret roundtrip only adds startup latency.
-    task.taskState.updateFromModel(localInterpretTask(sanitizedPrompt));
-    console.log("[TASK_INTERPRETED]", JSON.stringify(task.taskState.toPayload()));
+    // Seed task state from the backend interpreter. The keyword interpreter
+    // that used to do this locally is gone: intent classification is the
+    // planner's job now. On a backend failure interpretTask reports an
+    // unknown intent instead of guessing, and the loop below surfaces that.
+    const interpretation = await defaultGPTOSSClient.interpretTask(sanitizedPrompt);
+    task.taskState.updateFromModel(interpretation);
+    if (interpretation.remoteCallAttempted) {
+      taskManager.updatePrivacyMetrics({ serverCallsCount: 1 }, task);
+    }
+    log.info('TASK_INTERPRETED', { task_state: task.taskState.toPayload() });
+
+    if (interpretation.privacyBlocked) {
+      taskManager.updatePrivacyMetrics({ privacyBlocks: 1 }, task);
+      taskManager.failTask('Privacy protection blocked this AI request. Remove or rephrase the sensitive content, then try again.', task);
+      this.clearOverlays(task.tabId);
+      this.notify('PRIVACY_UPDATED', task.privacyMetrics);
+      this.notify('TASK_FAILED', { error: task.error, hint: task.hint });
+      return;
+    }
 
     taskManager.updateState(AgentState.UNDERSTANDING_TASK, `Goal: ${task.taskState.goal}`, task);
     this.notify('STATE_CHANGED', { state: AgentState.UNDERSTANDING_TASK, goal: task.taskState.goal });
 
     this.runLoop(token).catch(err => {
       if (err?.name === 'SupersededTaskError' || taskManager.getTask() !== task) return;
-      console.error('Agent loop encountered unhandled error:', err);
+      log.exception('Agent loop encountered an unhandled error', err);
       taskManager.failTask(err?.message || 'Unexpected agent error', task);
       this.clearOverlays(task.tabId);
       this.notify('TASK_FAILED', { error: taskManager.getTask()?.error, hint: taskManager.getTask()?.hint });
@@ -278,7 +303,7 @@ export class AgentController {
           if (runtimeError) {
             finish(reject, new LocalVisionRequiredError('Open the agent side panel to run local screenshot analysis.'));
           } else if (!response?.success || response.analysis?.completed !== true) {
-            console.error('[AgentController] Local vision failed:', response?.error);
+            log.error('Local vision failed', { error: response?.error });
             finish(reject, new LocalVisionRequiredError(response?.error ? `Local vision failed: ${response.error}` : 'Local screenshot analysis did not complete.'));
           } else {
             finish(resolve, response.analysis);
@@ -329,7 +354,7 @@ export class AgentController {
 
       // L2: Improved stuck-loop detection
       if (this._isStuckInLoop(task)) {
-        console.log("[REPLAN] No progress detected. Agent is stuck in a loop.");
+        log.warn('REPLAN: no progress detected; the agent is stuck in a loop.');
         taskManager.failTask('The agent repeated the same step without making progress.', task);
         this.clearOverlays(task.tabId);
         this.notify('TASK_FAILED', { error: task.error, hint: task.hint });
@@ -344,7 +369,7 @@ export class AgentController {
         // Deterministic privacy failure: retrying cannot help (same redacted
         // input would be blocked again). Fail fast with a user-safe message.
         if (stepErr && stepErr.name === 'OutboundPolicyViolationError') {
-          console.error('[AgentController] Outbound privacy block, aborting task:', stepErr.message);
+          log.error('Outbound privacy block; aborting the task.', { violation: stepErr.message });
           taskManager.failTask(stepErr.message, task);
           this.clearOverlays(task.tabId);
           this.notify('TASK_FAILED', { error: task.error, hint: task.hint });
@@ -365,7 +390,7 @@ export class AgentController {
           this.notify('TASK_FAILED', { error: task.error, hint: task.hint });
           break;
         }
-        console.warn('[AgentController] Step failed, recovering:', stepErr?.message);
+        log.exception('Step failed; recovering by re-observing', stepErr);
         await this._awaitOwned(task, token, measureStage(task, 'step_error_recovery_wait_ms', () => this.sleep(700)));
         taskManager.recordStep({
           thought: `Step encountered a problem (${stepErr?.message || 'Unknown error'}); re-analyzing the page.`,
@@ -400,21 +425,20 @@ export class AgentController {
         withTimeout(chrome.tabs.get(task.tabId), CHROME_API_TIMEOUT_MS, 'The browser tab did not respond in time.')));
     } catch (e) {
       if (e?.name === 'SupersededTaskError') throw e;
-      console.warn('[AgentController] Could not get tab info:', e);
+      log.exception('Could not get tab info; continuing without it', e);
     }
     this._assertTaskOwner(task, token);
 
     const currentUrl = currentTab?.url || '';
     const capability = classifyPageCapability(currentUrl);
-    let taskIntent = task.taskState?.intent;
-    if (!taskIntent) {
-      try { taskIntent = localInterpretTask(task.prompt).intent; } catch { taskIntent = 'unknown'; }
-    }
-    console.log(`[TASK] intent=${taskIntent}`);
+    // The task state is seeded from /interpret at startup, so an intent is
+    // always present on the live path. Unknown means the planner will decide.
+    const taskIntent = task.taskState?.intent || 'unknown';
+    log.info('TASK', { intent: taskIntent });
     try {
-      console.log(`[PAGE] capability=${capability} url=${defaultDOMSanitizer.sanitizeUrl(currentUrl) || capability}`);
+      log.info('PAGE', { capability, url: defaultDOMSanitizer.sanitizeUrl(currentUrl) || capability });
     } catch {
-      console.log(`[PAGE] capability=${capability}`);
+      log.info('PAGE', { capability });
     }
 
     // Capability-aware bootstrap BEFORE any DOM observation: pure NAVIGATE
@@ -473,7 +497,7 @@ export class AgentController {
         }
       }));
       if (screenshotResponse?.captured === false || !screenshotResponse?.dataUrl) {
-        console.warn('[AgentController] Screenshot capture failed; continuing from the sanitized DOM only.');
+        log.warn('Screenshot capture failed; continuing from the sanitized DOM only.');
       }
     }
     task.activeStepTimings.observation_ms = Math.max(0, Math.round(clockNow() - observationStarted));
@@ -494,7 +518,7 @@ export class AgentController {
       } catch (visionErr) {
         if (visionErr?.name === 'SupersededTaskError') throw visionErr;
         if (visionErr?.name !== 'LocalVisionRequiredError') throw visionErr;
-        console.warn('[AgentController] Local visual analysis unavailable; continuing from sanitized DOM only.');
+        log.warn('Local visual analysis unavailable; continuing from the sanitized DOM only.');
       }
     }
 
@@ -750,19 +774,17 @@ export class AgentController {
     // gate the user's own answer against the same observation the prompt was
     // built from rather than re-deriving one.
     this._lastFusedObservation = fusedObservation;
-    console.log("[PAGE_OBSERVED]", JSON.stringify(pageState));
+    log.info('PAGE_OBSERVED', { page_state: pageState });
 
     // STEP 5: REASONING & PLANNING
     // Storage initialization must not block task creation or the initial UI
-    // updates or unrelated tasks. Wait only for form tasks, immediately before
-    // local profile resolution.
-    const needsLocalProfile = String(taskIntent || '').toUpperCase() === 'FILL_FORM' ||
-      /\b(fill|form|application|register|sign\s*up|profile)\b/i.test(String(task.prompt || ''));
-    if (needsLocalProfile) {
-      taskManager.updateState(AgentState.PLANNING, 'Loading local profile values…', task);
-      this.notify('STATE_CHANGED', { state: AgentState.PLANNING });
-      await this._awaitOwned(task, token, measureStage(task, 'local_profile_ready_ms', () => defaultLocalVault.ready));
-    }
+    // The vault backs symbolic value resolution at execution time. Warm it
+    // before planning: with the intent regexes gone there is no cheap way to
+    // know in advance whether a task needs profile values, and awaiting the
+    // ready promise costs a storage read either way.
+    taskManager.updateState(AgentState.PLANNING, 'Loading local profile values…', task);
+    this.notify('STATE_CHANGED', { state: AgentState.PLANNING });
+    await this._awaitOwned(task, token, measureStage(task, 'local_profile_ready_ms', () => defaultLocalVault.ready));
     taskManager.updateState(AgentState.PLANNING, `Planning next action for "${task.taskState.getActiveSubgoal()}"…`, task);
     this.notify('STATE_CHANGED', { state: AgentState.PLANNING, active_subgoal: task.taskState.getActiveSubgoal() });
 
@@ -791,27 +813,24 @@ export class AgentController {
     // L6: If the subgoal advanced, reset consecutive failures
     const newSubgoal = task.taskState.getActiveSubgoal();
     if (prevSubgoal !== newSubgoal) {
-      console.log(`[SUBGOAL_ADVANCED] "${prevSubgoal}" → "${newSubgoal}"`);
+      log.info('SUBGOAL_ADVANCED', { from: prevSubgoal, to: newSubgoal });
       task.consecutiveFailures = 0;
     }
 
-    if (planResult.remoteCallAttempted !== false) taskManager.updatePrivacyMetrics({ serverCallsCount: 1 }, task);
-    if (planResult?.privacyBlocked) taskManager.updatePrivacyMetrics({ privacyBlocks: 1 }, task);
+    if (!this._handlePlannerFailure(task, planResult)) return false;
     let proposedAction = planResult.action;
 
-    // A model's DONE is not evidence that a form is complete. Reconcile the
-    // latest local observation against configured local sources before
-    // accepting terminal output.
-    const guarded = this._guardProfileFormCompletion(task, taskIntent, planResult, sanitizedElements);
-    proposedAction = guarded.action;
+    // The Critique's stop decision is authoritative only when paired with its
+    // final answer. The backend coerces a bare termination flag to false; this
+    // client check keeps the contract fail-closed if a nonstandard backend
+    // returns one. Critic termination and a final answer go together.
+    if (this._completeFromCriticTermination(task, planResult, proposedAction)) return false;
 
-    // A model's terminal flag is advisory only. Complete the task only when
-    // it emits the explicit DONE action; otherwise a malformed response can
-    // report success while asking the browser to WAIT or keep interacting.
     if (proposedAction?.action === ActionType.DONE) {
-      taskManager.completeTask(planResult.thought, task);
+      const finalResponse = planResult.final_response || planResult.thought;
+      taskManager.completeTask(finalResponse, task);
       this.clearOverlays(task.tabId);
-      this.notify('TASK_COMPLETED', { result: planResult.thought });
+      this.notify('TASK_COMPLETED', { result: finalResponse });
       return false;
     }
 
@@ -821,13 +840,14 @@ export class AgentController {
 
     const preValidation = defaultActionValidator.validatePreExecution(proposedAction, fusedObservation, task.taskState);
     if (!preValidation.valid) {
-      console.warn(`[AgentController] Action failed pre-validation: ${preValidation.reason}. Retrying observation.`);
+      log.warn('Action failed pre-validation; retrying observation.', { reason: preValidation.reason });
       await this._awaitOwned(task, token, measureStage(task, 'prevalidation_recovery_wait_ms', () => this.sleep(500)));
       taskManager.recordStep({
         thought: preValidation.reason || 'Target changed; re-analyzing the page.',
         action: proposedAction,
         success: false,
-        error: preValidation.reason
+        error: preValidation.reason,
+        ...plannerStepMetadata(planResult)
       }, task);
       this.notify('STEP_FAILED', {
         stepNumber: task.currentStep,
@@ -878,7 +898,7 @@ export class AgentController {
         reason: confirmReason,
         privacySummary: {
           dataKeptLocal: proposedAction.value_source || 'No secrets disclosed',
-          dataSharedWithServer: 'Sanitized layout metadata only'
+          dataSharedWithServer: 'Sanitized task request and page context; saved profile values stay local'
         }
       });
 
@@ -970,7 +990,7 @@ export class AgentController {
             try {
               await this._awaitOwned(task, token, defaultLocalVault.updateSecret(item.key, item.value));
             } catch (vErr) {
-              console.warn('[AgentController] Could not save vault secret:', vErr);
+              log.exception('Could not save a vault secret', vErr);
             }
           }
         }
@@ -1016,7 +1036,7 @@ export class AgentController {
               const answerResult = await this._awaitOwned(task, token, defaultActionExecutor.execute(task.tabId, answerAction));
               if (answerResult?.success) resolvedFieldIds.push(fieldId);
             } catch {
-              console.warn('[AgentController] Could not apply a user-provided field value.');
+              log.warn('Could not apply a user-provided field value.', { field_id: fieldId });
             }
           }
         }
@@ -1038,7 +1058,8 @@ export class AgentController {
           skippedFieldIds,
           answeredFieldIds: answerIds.filter((id) => resolvedFieldIds.includes(id))
         },
-        success: true
+        success: true,
+        ...plannerStepMetadata(planResult)
       }, task);
 
       this.notify('STEP_COMPLETED', {
@@ -1064,6 +1085,7 @@ export class AgentController {
         result: execResult,
         success: false,
         error: String(errMsg).slice(0, 200),
+        ...plannerStepMetadata(planResult),
         diagnostic: { model_trace: task.lastLLMPayload?.modelTrace || null }
       }, task);
       this.notify('STEP_FAILED', {
@@ -1087,6 +1109,7 @@ export class AgentController {
       action: proposedAction,
       result: execResult,
       success: true,
+      ...plannerStepMetadata(planResult),
       diagnostic: {
         task_understanding: planResult.task_understanding,
         page_understanding: planResult.page_understanding,
@@ -1130,20 +1153,36 @@ export class AgentController {
     return true;
   }
 
-  _guardProfileFormCompletion(task, taskIntent, planResult, sanitizedElements) {
-    let action = planResult?.action;
-    const profileDrivenForm = /\b(saved profile|my profile|local vault|saved details|profile details)\b/i.test(String(task?.prompt || ''));
-    if (action?.action === ActionType.DONE && taskIntent === 'FILL_FORM' && profileDrivenForm) {
-      const formDecision = this.formPlanBuilder.decide(sanitizedElements, task.prompt, task.steps);
-      if (formDecision.status === 'REMAINING' || formDecision.status === 'ASK_USER') {
-        action = formDecision.action;
-        planResult.isTerminal = false;
-        planResult.thought = formDecision.status === 'REMAINING'
-          ? 'The form still has configured profile fields to resolve.'
-          : 'The form has fields that require user input or an explicit skip decision.';
-      }
+  _completeFromCriticTermination(task, planResult, proposedAction) {
+    if (planResult?.terminate_assessment !== true || proposedAction?.action === ActionType.DONE) return false;
+    const finalResponse = typeof planResult.final_response === 'string'
+      ? planResult.final_response.trim()
+      : '';
+    if (!finalResponse) return false;
+
+    taskManager.completeTask(finalResponse, task);
+    this.clearOverlays(task.tabId);
+    this.notify('TASK_COMPLETED', { result: finalResponse });
+    return true;
+  }
+
+  _handlePlannerFailure(task, planResult) {
+    if (planResult?.remoteCallAttempted !== false) taskManager.updatePrivacyMetrics({ serverCallsCount: 1 }, task);
+    if (planResult?.privacyBlocked) taskManager.updatePrivacyMetrics({ privacyBlocks: 1 }, task);
+    if (planResult?.plannerUnavailable) {
+      taskManager.failTask('The AI planner is unavailable. Check the backend configuration and try again.', task);
+      this.clearOverlays(task.tabId);
+      this.notify('TASK_FAILED', { error: task.error, hint: task.hint });
+      return false;
     }
-    return { action, planResult };
+    if (planResult?.privacyBlocked) {
+      this.notify('PRIVACY_UPDATED', task.privacyMetrics);
+      taskManager.failTask('Privacy protection blocked this AI request. Remove or rephrase the sensitive content, then try again.', task);
+      this.clearOverlays(task.tabId);
+      this.notify('TASK_FAILED', { error: task.error, hint: task.hint });
+      return false;
+    }
+    return true;
   }
 
   /**
@@ -1174,7 +1213,7 @@ export class AgentController {
 
     if (goal?.url) {
       const validation = validateNavigationUrl(goal.url);
-      console.log(`[NAVIGATION] target=${validation.normalizedUrl || goal.url} validated=${validation.valid}`);
+      log.info('NAVIGATION', { phase: 'validated', target: validation.normalizedUrl || goal.url, valid: validation.valid });
       if (!validation.valid) {
         taskManager.failTask(`Navigation blocked: ${validation.reason}`, task);
         this.clearOverlays(task.tabId);
@@ -1232,7 +1271,7 @@ export class AgentController {
     if (home) {
       const validation = validateNavigationUrl(home);
       if (!validation.valid) return notHandled;
-      console.log(`[NAVIGATION] target=${validation.normalizedUrl} validated=true`);
+      log.info('NAVIGATION', { phase: 'bootstrap', target: validation.normalizedUrl, valid: true });
       return await this._awaitOwned(task, token, this._executeBootstrapNavigation(task, currentTab, validation.normalizedUrl, {
         pure: false,
         thought: `Navigate to ${home.includes('google') ? 'Google' : site} first, then continue the task.`
@@ -1267,7 +1306,7 @@ export class AgentController {
         pageTitle: currentTab?.title || ''
       });
     } catch (e) {
-      console.warn('[AgentController] Risk evaluation failed, continuing with LOW:', e?.message);
+      log.exception('Risk evaluation failed; continuing with LOW', e);
     }
     if (!riskAssessment.allowed) {
       taskManager.failTask(`Safety Gate Blocked Action: ${riskAssessment.reason}`, task);
@@ -1280,7 +1319,7 @@ export class AgentController {
     // leaves an honest EXECUTING task (with history), never a fake DONE.
     taskManager.updateState(AgentState.EXECUTING, `Navigating to ${normalizedUrl}…`, task);
     this.notify('STATE_CHANGED', { state: AgentState.EXECUTING, action: navAction });
-    console.log(`[NAVIGATION] tabId=${task.tabId} status=started`);
+    log.info('NAVIGATION', { phase: 'started', tab_id: task.tabId });
 
     let execResult;
     try {
@@ -1292,15 +1331,15 @@ export class AgentController {
     }
     if (!execResult || execResult.success === false) {
       const errMsg = String(execResult?.error || 'Navigation did not complete').slice(0, 200);
-      console.log('[NAVIGATION] status=failed');
+      log.warn('NAVIGATION', { phase: 'failed', reason: errMsg });
       taskManager.recordStep({ thought, action: navAction, result: execResult, success: false, error: errMsg }, task);
       this.notify('STEP_FAILED', { stepNumber: task.currentStep, thought, action: navAction, success: false, timestamp: Date.now() });
       return { handled: true, shouldContinue: true };
     }
 
     const verification = await this._awaitOwned(task, token, measureStage(task, 'navigation_verification_ms', () => this._verifyNavigation(task.tabId, normalizedUrl, task, token)));
-    console.log(`[NAVIGATION] status=${verification.ok ? 'completed' : 'failed'}`);
-    console.log(`[VERIFY] url=${verification.actualUrl || '(unknown)'} success=${verification.ok}`);
+    log.info('NAVIGATION', { phase: verification.ok ? 'completed' : 'failed' });
+    log.info('VERIFY', { url: verification.actualUrl || '(unknown)', success: verification.ok });
     if (!verification.ok) {
       const errMsg = verification.actualUrl
         ? `Navigation reached ${verification.actualUrl} instead of the requested destination.`
@@ -1415,7 +1454,7 @@ export class AgentController {
         // Check that no actual progress is being made (page state unchanged)
         const states = last4.map(stateFingerprint);
         if (states[0] === states[2] && states[1] === states[3]) {
-          console.warn('[AgentController] Alternating stuck loop detected:', keys);
+          log.warn('Alternating stuck loop detected', { keys });
           return true;
         }
       }
@@ -1429,7 +1468,7 @@ export class AgentController {
       if (recentFails.every(s => s.success === false)) {
         const errors = recentFails.map(s => (s.error || '').slice(0, 50));
         if (errors[0] && new Set(errors).size === 1) {
-          console.warn('[AgentController] Repeated identical failures detected');
+          log.warn('Repeated identical failures detected', { count: recentFails.length });
           return true;
         }
       }
@@ -1522,7 +1561,7 @@ export class AgentController {
     }
 
     if (quarantined > 0) {
-      console.warn(`[AgentController] Quarantined ${quarantined} injected element(s)/text from webpage content.`);
+      log.warn('Quarantined injected element(s)/text from webpage content.', { count: quarantined });
     }
   }
 
@@ -1600,7 +1639,7 @@ export class AgentController {
   async _gateUserAnswer(task, token, answerAction, fieldId, fieldMeta) {
     const preValidation = defaultActionValidator.validatePreExecution(answerAction, this._lastFusedObservation || {}, task?.taskState);
     if (!preValidation.valid) {
-      console.warn(`[AgentController] User answer for "${fieldId}" failed validation: ${preValidation.reason}`);
+      log.warn('User answer failed validation.', { field_id: fieldId, reason: preValidation.reason });
       taskManager.recordStep({
         thought: `The answer for "${fieldId}" no longer matches the page.`,
         action: answerAction,
@@ -1643,7 +1682,7 @@ export class AgentController {
         reason: riskAssessment.reason,
         privacySummary: {
           dataKeptLocal: 'No secrets disclosed',
-          dataSharedWithServer: 'Sanitized layout metadata only'
+          dataSharedWithServer: 'Sanitized task request and page context; saved profile values stay local'
         }
       });
       const approved = await this._awaitOwned(task, token, new Promise((resolve) => {

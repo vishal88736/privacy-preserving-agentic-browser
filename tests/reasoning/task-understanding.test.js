@@ -3,6 +3,34 @@ import assert from 'node:assert';
 import { validateReasonPayload } from '../../extension/shared/schemas.js';
 import { GPTOSSClient } from '../../extension/reasoning/gpt-oss-client.js';
 
+function blockedClient() {
+  const client = new GPTOSSClient('http://backend.test');
+  client.policyEngine = {
+    enforceOutboundSafety() {
+      const error = new Error('synthetic outbound block');
+      error.name = 'OutboundPolicyViolationError';
+      throw error;
+    }
+  };
+  return client;
+}
+
+function response(data) {
+  return { ok: true, json: async () => data };
+}
+
+async function withMockFetch(handler, run) {
+  const original = globalThis.fetch;
+  globalThis.fetch = handler;
+  try {
+    return await run();
+  } finally {
+    globalThis.fetch = original;
+  }
+}
+
+const observation = { page: { page_type: 'SEARCH' }, elements: [] };
+
 test('Task Understanding Reasoning Schema', () => {
   const payload = {
     task: 'Fill application form',
@@ -17,109 +45,65 @@ test('Task Understanding Reasoning Schema', () => {
   assert.doesNotThrow(() => validateReasonPayload(payload));
 });
 
-test('Constraint: "ask before submitting" sets confirmBeforeSubmit', () => {
-  const client = new GPTOSSClient('http://localhost:9999'); // unreachable → forces fallback
-  const observation = {
-    page: { page_type: 'application_form' },
-    elements: [
-      { id: 'el_1', dom: { tag: 'button', type: 'submit', label: 'Submit Application' }, interaction: { clickable: true, typeable: false, uploadable: false } }
-    ]
-  };
-
-  const result = client._localPlannerFallback(
-    'Fill this form using my saved profile and ask before submitting.',
-    observation,
-    []
-  );
-
-  assert.ok(result.task_understanding, 'Should contain task_understanding');
-  assert.ok(result.task_understanding.constraints.includes('must ask user before submitting'), 
-    `Constraints should include "must ask user before submitting", got: ${JSON.stringify(result.task_understanding.constraints)}`);
+test('unreachable planner returns plannerUnavailable and WAIT', async () => {
+  const client = new GPTOSSClient('http://backend.test');
+  client.post = async () => { throw new Error('backend offline'); };
+  const result = await client.planNextStep('Search for laptops', observation);
+  assert.equal(result.action.action, 'WAIT');
+  assert.equal(result.plannerUnavailable, true);
+  assert.equal(result.remoteCallMade, false);
+  assert.equal(result.remoteCallAttempted, true);
 });
 
-test('Constraint: "don\'t submit" blocks SUBMIT and returns DONE', () => {
-  const client = new GPTOSSClient('http://localhost:9999');
-  const observation = {
-    page: { page_type: 'application_form' },
-    elements: [
-      { id: 'el_1', dom: { tag: 'button', type: 'submit', label: 'Submit' }, interaction: { clickable: true, typeable: false, uploadable: false } }
-    ]
-  };
-
-  const result = client._localPlannerFallback(
-    "Don't submit the form.",
-    observation,
-    []
-  );
-
-  assert.ok(result.task_understanding, 'Should contain task_understanding');
-  assert.ok(result.task_understanding.constraints.includes('must NOT submit the form'),
-    `Constraints should include "must NOT submit the form", got: ${JSON.stringify(result.task_understanding.constraints)}`);
-  assert.strictEqual(result.action.action, 'DONE', 'Action should be DONE when user says don\'t submit');
-  assert.strictEqual(result.isTerminal, true, 'Should be terminal');
+test('malformed remote action waits for a new observation without plannerUnavailable', async () => {
+  await withMockFetch(async () => response({ action: { action: 'NOT_AN_ACTION' } }), async () => {
+    const result = await new GPTOSSClient('http://backend.test').planNextStep('Search for laptops', observation);
+    assert.equal(result.action.action, 'WAIT');
+    assert.equal(result.plannerUnavailable, undefined);
+    assert.equal(result.remoteCallMade, true);
+  });
 });
 
-test('Diagnostic output: page_understanding included', () => {
-  const client = new GPTOSSClient('http://localhost:9999');
-  const observation = {
-    page: { page_type: 'login', title: 'Login' },
-    elements: [
-      { id: 'el_1', dom: { tag: 'input', type: 'text', label: 'Full name', name: 'fullname' }, interaction: { clickable: false, typeable: true, uploadable: false } }
-    ]
-  };
-
-  const result = client._localPlannerFallback(
-    'Fill my name.',
-    observation,
-    []
-  );
-
-  assert.ok(result.page_understanding, 'Should contain page_understanding');
-  assert.strictEqual(result.page_understanding.page_type, 'login');
-  // 'Fill my name.' triggers the bulk FormAnalyzer path (fused-shape aware),
-  // so a single-field form yields FILL_FORM_PLAN, not per-field TYPE.
-  assert.strictEqual(result.action.action, 'FILL_FORM_PLAN', 'Should bulk-fill the field');
-  assert.ok((result.action.value.fields || []).some((f) => f.field_id === 'el_1'));
+test('privacy block returns WAIT and privacyBlocked without sending a request', async () => {
+  const client = blockedClient();
+  const result = await client.planNextStep('Search for laptops', observation);
+  assert.equal(result.action.action, 'WAIT');
+  assert.ok(result.privacyBlocked);
+  assert.equal(result.remoteCallMade, false);
+  assert.equal(result.remoteCallAttempted, false);
 });
 
-test('FormAnalyzer - a field labelled Username is never filled with the full name', () => {
-  // "Username"/name="name" used to classify as full_name and receive the user's
-  // legal name. An account identifier is not a personal detail, so the field
-  // must go to the user instead of being silently populated.
-  const client = new GPTOSSClient('http://localhost:9999');
-  const observation = {
-    page: { page_type: 'login', title: 'Login' },
-    elements: [
-      { id: 'el_1', dom: { tag: 'input', type: 'text', label: 'Username', name: 'user_name' }, interaction: { clickable: false, typeable: true, uploadable: false } }
-    ]
-  };
-
-  const result = client._localPlannerFallback('Fill my name.', observation, []);
-  const filled = result.action.value?.fields || [];
-  const el1 = filled.find((f) => f.field_id === 'el_1');
-  assert.ok(!el1, 'a username field must not be filled from the vault');
-  assert.ok(!JSON.stringify(result.action.value?.fields || []).includes('LOCAL_FULL_NAME'));
+test('valid mocked response passes through the action, plan, and planner feedback', async () => {
+  let sentBody;
+  await withMockFetch(async (_url, options) => {
+    sentBody = JSON.parse(options.body);
+    return response({
+      action: { action: 'CLICK', target: { element_id: 'el_search' } },
+      plan: 'Search the catalog, then inspect the results.',
+      planner_feedback: 'The search field is ready.',
+      terminate_assessment: false,
+      final_response: ''
+    });
+  }, async () => {
+    const result = await new GPTOSSClient('http://backend.test').planNextStep(
+      'Search the catalog',
+      { ...observation, elements: [{ id: 'el_search', dom: { tag: 'button', label: 'Search' } }] }
+    );
+    assert.equal(result.action.target.element_id, 'el_search');
+    assert.equal(result.remoteCallMade, true);
+    assert.equal(result.plan, 'Search the catalog, then inspect the results.');
+    assert.equal(result.planner_feedback, 'The search field is ready.');
+  });
+  assert.equal(sentBody.task, 'Search the catalog');
 });
 
-test('Simple click task produces correct action', () => {
-  const client = new GPTOSSClient('http://localhost:9999');
-  const observation = {
-    page: { page_type: 'application_form' },
-    elements: [
-      { id: 'el_1', dom: { tag: 'button', type: 'submit', label: 'Submit Application' }, interaction: { clickable: true, typeable: false, uploadable: false } }
-    ]
-  };
-
-  const result = client._localPlannerFallback(
-    'Click the submit button.',
-    observation,
-    []
-  );
-
-  // "Click the submit button" doesn't say "don't submit", so it should not be blocked
-  assert.ok(result.task_understanding, 'Should contain task_understanding');
-  assert.ok(!result.task_understanding.constraints.includes('must NOT submit the form'),
-    'Should NOT have doNotSubmit constraint for "click submit"');
+test('interpretTask transport failure stays unknown and records the attempted call', async () => {
+  const client = new GPTOSSClient('http://backend.test');
+  client.post = async () => { throw new Error('backend offline'); };
+  const result = await client.interpretTask('Search for laptops');
+  assert.equal(result.intent, 'unknown');
+  assert.equal(result.remoteCallAttempted, true);
+  assert.equal(result.privacyBlocked, false);
 });
 
 test('Semantic Task Understanding: "open youtube and most popular karan aujla"', async () => {
@@ -233,88 +217,9 @@ test('Action Validator: Rejects irrelevant actions inconsistent with active subg
   assert.strictEqual(valSearch.valid, true, 'TYPE into search should be valid');
 });
 
-test('Planner Flow: "open youtube and most popular karan aujla" executes clean subgoals sequentially', async () => {
-  const client = new GPTOSSClient('http://localhost:9999'); // forces local deterministic planner
-  const { TaskState } = await import('../../extension/reasoning/task-understanding.js');
-  const state = new TaskState('open youtube and most popular karan aujla');
-
-  // Initial step: on YouTube, search input and Mix button exist
-  const observation = {
-    page: { domain: 'youtube.com', title: 'YouTube' },
-    elements: [
-      { id: 'el_search', dom: { tag: 'input', id: 'search', name: 'search_query', placeholder: 'Search' }, interaction: { typeable: true } },
-      { id: 'el_search_btn', dom: { tag: 'button', id: 'search-icon-legacy', label: 'Search' }, interaction: { clickable: true } },
-      { id: 'el_mix', dom: { tag: 'a', label: 'Mix', href: '/watch?v=mix123' }, interaction: { clickable: true } }
-    ]
-  };
-
-  // Navigation already happened
-  const history = [
-    { action: { action: 'NAVIGATE', target: { url: 'https://www.youtube.com' } }, success: true }
-  ];
-  state.advance(history[0].action, observation, { success: true });
-
-  // Step 1 of reasoning: Planner MUST type clean query "karan aujla", NOT the raw prompt, and MUST NOT click Mix
-  const step1 = client._localPlannerFallback(
-    'open youtube and most popular karan aujla',
-    observation,
-    history,
-    state
-  );
-
-  assert.strictEqual(step1.action.action, 'TYPE', 'Should type into search input');
-  assert.strictEqual(step1.action.target.element_id, 'el_search');
-  assert.strictEqual(step1.action.value, 'karan aujla', 'Must type clean query "karan aujla", NOT the full prompt!');
-
-  // Record typing in history
-  history.push({ action: step1.action, success: true });
-
-  // Step 2: Click search button
-  const step2 = client._localPlannerFallback(
-    'open youtube and most popular karan aujla',
-    observation,
-    history,
-    state
-  );
-  assert.strictEqual(step2.action.action, 'CLICK', 'Should click search button');
-  assert.strictEqual(step2.action.target.element_id, 'el_search_btn');
-
-  // Record search click and advance state
-  history.push({ action: step2.action, success: true });
-  state.advance(step2.action, observation, { success: true });
-
-  // Step 3: On search results page, find popular video result
-  const resultsObservation = {
-    page: { domain: 'youtube.com/results', title: 'karan aujla - YouTube' },
-    elements: [
-      { id: 'el_search', dom: { tag: 'input', id: 'search', name: 'search_query', value: 'karan aujla' }, interaction: { typeable: true } },
-      { id: 'el_prev_btn', dom: { tag: 'button', label: 'Previous' }, interaction: { clickable: true } },
-      { id: 'el_video_1', dom: { tag: 'a', id: 'video-title', label: 'Karan Aujla - Tauba Tauba (100M views)', href: '/watch?v=abc' }, interaction: { clickable: true } }
-    ]
-  };
-
-  const step3 = client._localPlannerFallback(
-    'open youtube and most popular karan aujla',
-    resultsObservation,
-    history,
-    state
-  );
-  assert.strictEqual(step3.action.action, 'CLICK', 'Should click video result');
-  assert.strictEqual(step3.action.target.element_id, 'el_video_1');
-  assert.ok(!step3.action.target.label.includes('Previous'), 'Must not click Previous button');
-
-  // Record video click and advance state
-  history.push({ action: step3.action, success: true });
-  state.advance(step3.action, resultsObservation, { success: true });
-
-  // Step 4: Verification / Goal achieved
-  const step4 = client._localPlannerFallback(
-    'open youtube and most popular karan aujla',
-    resultsObservation,
-    history,
-    state
-  );
-  assert.strictEqual(step4.action.action, 'DONE', 'Should mark task as DONE after result is playing');
-  assert.strictEqual(step4.isTerminal, true);
+test('interpretTask privacy failure stays unknown and reports a blocked unsent call', async () => {
+  const result = await blockedClient().interpretTask('Search for laptops');
+  assert.equal(result.intent, 'unknown');
+  assert.equal(result.remoteCallAttempted, false);
+  assert.equal(result.privacyBlocked, true);
 });
-

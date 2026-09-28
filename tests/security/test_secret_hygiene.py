@@ -115,6 +115,26 @@ class SecretHygieneTests(unittest.TestCase):
             "credential-shaped values found in tracked files:\n  " + "\n  ".join(offenders),
         )
 
+    def test_agentic_vendor_material_contains_no_live_credential(self):
+        """Scan agentic prompts and vendored references before they are tracked."""
+        vendor_dir = ROOT / "backend" / "agentic"
+        candidates = list(vendor_dir.glob("*.py"))
+        candidates.extend((vendor_dir / "_upstream").glob("*.py"))
+        candidates.append(vendor_dir / "LICENSE.TheAgentic")
+        offenders = []
+        for path in candidates:
+            if not path.is_file():
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            for label, pattern in SECRET_PATTERNS.items():
+                if pattern.search(text):
+                    offenders.append(f"{path.relative_to(ROOT)}: {label}")
+
+        self.assertEqual(
+            offenders, [],
+            "credential-shaped values found in TheAgentic vendor material:\n  " + "\n  ".join(offenders),
+        )
+
     def test_packaging_would_reject_a_planted_key(self):
         """The build's secret scan must still match real provider key shapes.
 

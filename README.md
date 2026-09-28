@@ -5,7 +5,7 @@
 [![Firefox MV3](https://img.shields.io/badge/Firefox%20Addon-MV3%20Sidebar-orange.svg)](https://extensionworkshop.com/)
 [![Local Vision](https://img.shields.io/badge/Client%20Vision-Local%20ViT%20%2B%20ONNX%20Web-indigo.svg)](#client-side-vision-processing)
 [![Local Privacy](https://img.shields.io/badge/Privacy-Fail--Closed%20Redaction-emerald.svg)](#privacy-preserving-filter--redaction-engine)
-[![Tests Passing](https://img.shields.io/badge/Tests-359%20Passed%20%7C%200%20Failed-brightgreen.svg)](#-testing--verification-suite)
+[![Tests Passing](https://img.shields.io/badge/Tests-453%20Passed%20%7C%200%20Failed-brightgreen.svg)](#-testing--verification-suite)
 [![License](https://img.shields.io/badge/License-Apache%202.0%20%2F%20MIT%20Attribution-lightgrey.svg)](docs/REUSE_AND_ATTRIBUTION.md)
 
 > **Official Problem Statement Alignment**: A client-side, privacy-preserving browser vision agent built with **Transformers.js**, **ONNX Runtime Web (WASM/WebGPU)**, and **Tesseract.js OCR**, combined with an open-weights/cloud-hosted multimodal reasoning server (**FastAPI + VLM / GPT-OSS 120B**). It dynamically detects and redacts personal identifiers and faces/people on the user's machine *before* any network transmission, passing only anonymized visual context to the central server, and executes actionable browser commands under human-in-the-loop safety gates.
@@ -300,6 +300,7 @@ PrivAgent incorporates a shared pattern registry across the DOM sanitizer, outbo
 │   │   ├── service-worker.js           # Extension lifecycle entry point
 │   │   └── task-manager.js             # Task history, goal persistence, and telemetry
 │   ├── content/                        # Content scripts injected into web pages
+│   │   ├── log-forwarder.js            # Content-world log shim (forwards to the worker)
 │   │   ├── browser-executor.js         # Synthetic browser event dispatcher
 │   │   ├── content.js                  # In-page message coordinator
 │   │   ├── dom-extractor.js            # Bounded accessibility tree & DOM extractor
@@ -327,7 +328,7 @@ PrivAgent incorporates a shared pattern registry across the DOM sanitizer, outbo
 │   │   ├── action-parser.js            # JSON action extractor and sanitizer
 │   │   ├── form-analyzer.js            # Form structure and field mapping analyzer
 │   │   ├── form-plan-builder.js        # Multi-input batched form plan generator
-│   │   ├── gpt-oss-client.js           # Client for reasoning backend & local fallback
+│   │   ├── gpt-oss-client.js           # Client for the reasoning backend
 │   │   ├── prompt-builder.js           # Compact prompt generator with quarantined DOM
 │   │   └── task-understanding.js       # Intent and subgoal semantic parser
 │   ├── executor/                       # Safety validation & symbolic execution
@@ -339,8 +340,9 @@ PrivAgent incorporates a shared pattern registry across the DOM sanitizer, outbo
 │   │   ├── app.js                      # Reactive UI controller & telemetry dashboard
 │   │   ├── index.html                  # Glassmorphic side panel markup
 │   │   └── styles.css                  # Dark/light mode theme & responsive styling
-│   ├── shared/                         # Shared constants, types, and schemas
+│   ├── shared/                         # Shared constants, types, schemas & logging
 │   │   ├── constants.js                # FSM states, action types, risk levels
+│   │   ├── logger.js                    # Structured logger, redaction, JSONL export
 │   │   ├── messages.js                 # IPC message contract identifiers
 │   │   ├── schemas.js                  # Request/response validation schemas
 │   │   └── types.js                    # Core type definitions
@@ -349,6 +351,11 @@ PrivAgent incorporates a shared pattern registry across the DOM sanitizer, outbo
 ├── backend/                            # Fast-API Multimodal & Reasoning Backend
 │   ├── server.py                       # FastAPI application with origin verification
 │   ├── config.py                       # Settings, environment, and provider configuration
+│   ├── agentic/                         # Universal task prompt and pinned reference
+│   │   ├── _upstream/                   # Pristine audit copies; never imported
+│   │   ├── prompts.py                   # Live universal reasoning prompt
+│   │   └── VENDORING.md                 # Commit pin, hashes, adaptations, exclusions
+│   ├── logging_config.py               # Rotating JSONL file + console logging setup
 │   ├── vlm_service.py                  # Vision provider rotator with fallback
 │   ├── gpt_oss_service.py              # LLM reasoning engine & output verification
 │   ├── privacy_rules.py                # Server-side defense-in-depth sanitization checks
@@ -418,6 +425,25 @@ VLM_MAX_ATTEMPTS=2
 VLM_REQUEST_TIMEOUT_SECONDS=4
 REASONING_REQUEST_TIMEOUT_SECONDS=12
 ```
+
+### Agent reasoning: Universal Task Prompt
+
+Each `/reason` request sends one system prompt, `UNIVERSAL_TASK_PROMPT` in
+[`backend/agentic/prompts.py`](backend/agentic/prompts.py). It combines plan
+management, grounding to the sanitized observation, and critique of the prior
+step into one model call per browser action. The extension carries the plan,
+feedback, and action history between calls and remains responsible for
+execution, privacy checks, and risk confirmations. The model emits one action
+from the extension's supported vocabulary; secrets use `LOCAL_*` tokens.
+
+Uploads remain user-directed: the prompt asks the user to choose a file in the
+webpage, and the client converts any accidental model-emitted `UPLOAD` action
+to `ASK_USER` before it can reach the executor. If the reasoning backend is
+unavailable or rejects the request, the live path fails closed instead of
+falling back to local heuristic planning. The older separate Planner/Critique
+prompts and builders are retained only for isolated contract tests. The
+adaptation and pinned upstream source are documented in
+[`backend/agentic/VENDORING.md`](backend/agentic/VENDORING.md).
 
 ---
 
@@ -496,9 +522,9 @@ npm test
 ```
 **Current Test Suite Status**:
 ```
-ℹ tests 359
+ℹ tests 453
 ℹ suites 0
-ℹ pass 359
+ℹ pass 453
 ℹ fail 0
 ℹ cancelled 0
 ℹ skipped 0
@@ -517,9 +543,9 @@ npm test
 ### 2. Backend Security & Provenance Tests
 Validate backend loopback protections, origin verification, and fallback provenance:
 ```bash
-python3 -m unittest tests/security/test_backend_security.py
+python3 -m unittest discover -s tests/security -p 'test_*.py'
 ```
-*Output: 10 tests passed (0 failures).*
+*Output: 57 tests passed (0 failures).* Covers the request-guard boundary, provider-rotation provenance, agentic prompt contracts, and `logging_config` redaction.
 
 ### 3. Master End-to-End Hardening Suite
 Run the 12-scenario Playwright integration suite in Chromium:
@@ -548,6 +574,36 @@ To score visual accuracy, PII detection, redaction precision, latency, and clien
 npm run evaluate:vision -- annotations.jsonl --iou 0.5
 ```
 This generates the exact metric breakdown matching the competition scoring criteria.
+
+### 5. Error Logging
+
+Both tiers write JSON Lines (one JSON object per line) so entries can be read with `jq`, `grep`, or any log ingester. Tracebacks are embedded in a single string, because a record that spans several lines would break that contract.
+
+**Backend** — a real rotating file at `backend/logs/backend.jsonl` (8 MiB × 5 rotations), alongside human-readable console output. It contains the application's records *and* uvicorn's startup/access logs.
+
+```bash
+# Errors and stack traces
+jq -r 'select(.level=="error") | "\(.ts) \(.logger) \(.message)"' backend/logs/backend.jsonl
+
+# Why a VLM provider was skipped
+jq -r 'select(.logger=="vlm_service") | .message' backend/logs/backend.jsonl
+
+# Auth-guard rejections (extension origin / token / rate limit)
+jq -r 'select(.message|startswith("Rejected")) | .message' backend/logs/backend.jsonl
+```
+
+Configure in `.env`: `LOG_LEVEL` (console threshold; the file always receives `DEBUG`+), `LOG_TO_FILE`, `LOG_DIR`, `LOG_FILE`, `LOG_MAX_BYTES`, `LOG_BACKUP_COUNT`. An unwritable log directory degrades to console-only with a warning rather than preventing startup.
+
+**Extension** — a Manifest V3 service worker has no filesystem, so entries are buffered (500 per surface) in `chrome.storage` and exported as a `.jsonl` file: open **Settings → Developer → Download error log (.jsonl)**, or the button in the diagnostics panel. The export merges the service worker, side panel, and page-script records in time order, so a worker suspension does not cost you the log.
+
+**What is captured:** uncaught exceptions and unhandled promise rejections in the worker and side panel (previously unhandled, and lost on worker suspension); every `console.*` call site, converted to a levelled record; backend `traceback.print_exc()` and the bare `print()` diagnostics in `vlm_service`; and request-guard rejections, which previously returned a 401/403/429 with no record at all.
+
+Raise the level for a debugging session by writing `privagent_log_level` (`debug`/`info`/`warn`/`error`) into `chrome.storage.local`; every surface reads it.
+
+**Privacy:** messages, structured fields, and error stacks are redacted before anything is written. Credential shapes (the same ones the packaging guard fails the build on) and detected PII categories are replaced, so a log file is safe to attach to a report. Only allow-listed `extra` field names reach the backend log — an arbitrary `logger.info(..., body=payload)` drops its payload rather than writing it to disk. `backend/logs/` is gitignored for the same reason `.env` is.
+
+### 6. Packaging Guards
+`npm run build:extensions` fails the build on: a manifest/package version mismatch, a shipped `*.test.js`, a provider-key or private-key pattern, a script that does not parse (checked as ESM, and as a classic script for content scripts), or a package over the 50 MiB budget.
 
 ---
 
@@ -609,4 +665,3 @@ PrivAgent incorporates audited design patterns from open-source agent architectu
   - `tesseract.js` & `tesseract.js-core` (Apache-2.0): Local OCR engine and WebAssembly core.
 
 See [docs/REUSE_AND_ATTRIBUTION.md](docs/REUSE_AND_ATTRIBUTION.md) for full licensing notices, clean-room declarations, and component mapping.
-

@@ -288,7 +288,7 @@
           </div>
           <div class="metric">
             <span id="metric-server-calls" class="metric-num">0</span>
-            <span class="metric-name">Sanitized AI calls</span>
+            <span class="metric-name">Backend requests</span>
           </div>
           <div class="metric">
             <span id="metric-steps" class="metric-num">0</span>
@@ -302,12 +302,12 @@
       <section class="card llm-card" aria-labelledby="llm-label">
         <div class="card-head">
           <div class="privacy-head-group">
-            <span class="card-label" id="llm-label">What is sent to the AI</span>
+            <span class="card-label" id="llm-label">What is sent to the backend</span>
             <span class="pill-ok">Privacy checks</span>
           </div>
-          <span id="llm-calls" class="card-meta-text">0 AI calls</span>
+          <span id="llm-calls" class="card-meta-text">0 backend requests</span>
         </div>
-        <p class="llm-sub">AI calls carry sanitized page data where recognized patterns are detected. Privacy filtering is best-effort and cannot identify every sensitive value or image.</p>
+        <p class="llm-sub">Requests send the sanitized task and page context to your configured backend. Privacy filtering is best-effort and cannot identify every sensitive value or image.</p>
 
         <div class="privacy-cols">
           <div class="privacy-col">
@@ -359,7 +359,7 @@
 
         <details class="llm-details">
           <summary>View last sanitized payload</summary>
-          <div id="llm-payload-preview" class="llm-payload">No AI calls yet. Start a task to see exactly what leaves this device.</div>
+          <div id="llm-payload-preview" class="llm-payload">No backend requests yet. Start a task to see what leaves this device.</div>
         </details>
       </section>
 
@@ -682,6 +682,21 @@
           </div>
           <input type="checkbox" id="settings-debug" class="styled-checkbox">
         </label>
+        <!--
+          The log export lives here as well as in the diagnostics panel: the
+          panel is hidden unless the toggle above is on, and "download the error
+          log" must stay reachable in exactly the situation it is needed - a
+          failure, with diagnostics still switched off.
+        -->
+        <div class="settings-section" style="padding-top:10px">
+          <button id="export-error-log-btn" class="btn btn-secondary" style="width:100%" type="button">
+            Download error log (.jsonl)
+          </button>
+          <p class="muted small" style="margin:6px 0 0">
+            Errors, warnings and traces from the service worker, side panel and page scripts. Credentials
+            and detected PII are redacted before anything is written.
+          </p>
+        </div>
       </div>
 
       <div class="settings-section settings-about">

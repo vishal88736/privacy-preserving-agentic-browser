@@ -6,9 +6,11 @@
 
 import { ActionType } from '../shared/constants.js';
 import { MessageType } from '../shared/messages.js';
+import { createLogger } from '../shared/logger.js';
 import { validateNavigationUrl } from '../navigation/navigation.js';
 import { defaultLocalValueResolver } from './local-value-resolver.js';
 
+const log = createLogger({ scope: 'ActionExecutor', surface: 'background' });
 const CHROME_API_TIMEOUT_MS = 10000;
 
 function withTimeout(promise, ms = CHROME_API_TIMEOUT_MS, message = 'The browser did not respond in time.') {
@@ -121,7 +123,7 @@ export class ActionExecutor {
         resolvedValue = this.valueResolver.resolve(action);
       }
     } catch (e) {
-      console.error("[ActionExecutor] Value resolver error:", e);
+      log.exception('Value resolver failed', e);
       return { success: false, error: e.message };
     }
 
@@ -167,7 +169,7 @@ export class ActionExecutor {
         await new Promise((resolve) => setTimeout(resolve, 250));
         result = await send();
       } catch (injectErr) {
-        console.error('[ActionExecutor] Injection error:', injectErr);
+        log.exception('Content script injection failed', injectErr);
         return { success: false, error: injectErr?.message || 'Could not initialize the page action executor.' };
       }
     }

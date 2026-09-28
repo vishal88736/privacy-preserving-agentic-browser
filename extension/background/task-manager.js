@@ -57,6 +57,12 @@ export function friendlyError(rawMessage) {
       hint: 'The agent will try a safer alternative, or you can adjust the task.'
     };
   }
+  if (low.includes('privacy protection blocked')) {
+    return {
+      error: 'A local privacy check blocked the AI request.',
+      hint: 'The request was not sent. Remove or rephrase the sensitive content, then retry. The value itself was not shown.'
+    };
+  }
   if (low.includes('outbound policy') || low.includes('unmasked')) {
     // Policy messages contain category/token names only. Extract that safe
     // metadata so a generic warning does not leave the user guessing, and
@@ -91,6 +97,12 @@ export function friendlyError(rawMessage) {
     return {
       error: 'The AI service is temporarily unavailable.',
       hint: 'Check that the backend is running, then retry the current step.'
+    };
+  }
+  if (low.includes('ai planner is unavailable')) {
+    return {
+      error: 'The AI planner is temporarily unavailable.',
+      hint: 'Check that the backend is running and configured, then start the task again.'
     };
   }
   if (low.includes('stale dom') || low.includes('no longer present') || low.includes('not found')) {

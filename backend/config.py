@@ -3,6 +3,12 @@ import logging
 import re
 from pathlib import Path
 
+# Imported for its side effect later in this module. The root logger is
+# unconfigured until then, which drops INFO records and sends WARNING+ to
+# stderr — so a LOG_LEVEL read from .env would otherwise be ignored, and
+# provider-rotation diagnostics would vanish.
+import logging_config
+
 logger = logging.getLogger(__name__)
 
 
@@ -62,6 +68,12 @@ def load_env():
                 )
 
 load_env()
+
+# Sinks are installed only after .env is in os.environ, so LOG_LEVEL, LOG_DIR
+# and LOG_TO_FILE can be set there. No log call above this point is lost: the
+# first one is inside _env_int, which runs while the Settings class below is
+# being defined, i.e. after this call.
+logging_config.configure_logging()
 
 _OPENROUTER_KEYS = _read_api_keys("OPENROUTER_API_KEYS", "OPENROUTER_API_KEY")
 _HUGGINGFACE_KEYS = _read_api_keys(

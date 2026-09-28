@@ -19,6 +19,9 @@ export const MessageType = Object.freeze({
   UPDATE_SETTINGS: 'UPDATE_SETTINGS',
   LOCAL_VISION_ANALYZE: 'LOCAL_VISION_ANALYZE',
 
+  // Content Script -> Background (diagnostics only, one-way)
+  LOG_EVENT: 'LOG_EVENT',
+
   // Background <-> Content Script
   EXTRACT_DOM: 'EXTRACT_DOM',
   EXTRACT_DOM_RESPONSE: 'EXTRACT_DOM_RESPONSE',

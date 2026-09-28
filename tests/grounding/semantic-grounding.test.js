@@ -14,7 +14,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { classifyElement, rankCandidates, requiredCapabilities, ambiguousCandidates, SemanticType } from '../../extension/perception/semantic-capability.js';
-import { defaultGPTOSSClient } from '../../extension/reasoning/gpt-oss-client.js';
+import { GPTOSSClient } from '../../extension/reasoning/gpt-oss-client.js';
 import { defaultPageStateModeler } from '../../extension/perception/page-state-modeler.js';
 import { defaultPromptBuilder } from '../../extension/reasoning/prompt-builder.js';
 import { defaultActionValidator } from '../../extension/executor/action-validator.js';
@@ -74,10 +74,6 @@ function layoutDisabledAndNested() {
     { id: 'el_card_btn', role: 'button', interaction: { clickable: true }, dom: { tag: 'button', type: 'button', label: 'View details', name: 'view', bbox: [20, 90, 120, 30] } }
   ];
 }
-
-const HISTORY_TYPED = (inputId) => [
-  { success: true, action: { action: 'TYPE', target: { element_id: inputId, label: 'Search' }, value: 'task text' } }
-];
 
 // ── 1. Semantic classification (general browser semantics) ─────────────────
 
@@ -168,82 +164,61 @@ test('ranking is deterministic regardless of DOM order (visual order independenc
   assert.equal(forward[0].element_id, reversed[0].element_id);
 });
 
-// ── 4. Local planner: correct target, negative actions ─────────────────────
+// ── 4. Grounding evidence and remote-planner fail-closed behavior ──────────
 
-test('planner clicks the search submit, never the nearby voice control', () => {
+test('semantic ranking puts a search submit ahead of nearby voice controls', () => {
   const els = layoutVoiceVsSubmit();
-  const plan = defaultGPTOSSClient._localPlannerFallback(
-    'search for laptops', { elements: els, page: { page_type: 'SEARCH' } }, HISTORY_TYPED('el_input'), null
-  );
-  assert.equal(plan.action.action, 'CLICK');
-  assert.equal(plan.action.target.element_id, 'el_submit');
-  // Negative action: the nearby incorrect controls were NOT selected.
-  assert.notEqual(plan.action.target.element_id, 'el_voice');
-  assert.notEqual(plan.action.target.element_id, 'el_lucky');
-  assert.ok(plan.selection_evidence, 'selection evidence is recorded');
-  assert.equal(plan.selection_evidence.selected_candidate, 'el_submit');
+  const ranked = rankCandidates(els, { required: new Set([SemanticType.SUBMIT]), taskText: 'search for laptops' });
+  assert.equal(ranked[0].element_id, 'el_submit');
+  assert.notEqual(ranked[0].element_id, 'el_voice');
+  assert.notEqual(ranked[0].element_id, 'el_lucky');
 });
 
-test('planner never clicks media controls adjacent to a search box', () => {
+test('semantic ranking excludes media controls from search-submit candidates', () => {
   const els = layoutMediaControls();
-  const plan = defaultGPTOSSClient._localPlannerFallback(
-    'search for videos', { elements: els, page: { page_type: 'SEARCH' } }, HISTORY_TYPED('el_input'), null
-  );
-  assert.equal(plan.action.target.element_id, 'el_search_btn');
-  for (const wrong of ['el_play', 'el_pause', 'el_next', 'el_prev']) {
-    assert.notEqual(plan.action.target.element_id, wrong);
-  }
+  const ranked = rankCandidates(els, { required: new Set([SemanticType.SUBMIT]), taskText: 'search for videos' });
+  assert.equal(ranked[0].element_id, 'el_search_btn');
+  assert.ok(ranked.filter((candidate) => candidate.conflict).every((candidate) =>
+    ['el_play', 'el_pause', 'el_next', 'el_prev'].includes(candidate.element_id)));
 });
 
-test('planner sends a message icon control to voice semantics, never clicks it', () => {
+test('icon-only controls retain voice and upload semantics for the validator', () => {
   const els = layoutIconOnly();
-  const plan = defaultGPTOSSClient._localPlannerFallback(
-    'send a message to John', { elements: els, page: { page_type: 'FORM' } }, HISTORY_TYPED('el_input'), null
-  );
-  if (plan.action.action === 'CLICK') {
-    assert.notEqual(plan.action.target.element_id, 'el_mic');
-    assert.notEqual(plan.action.target.element_id, 'el_attach');
-  }
+  const mic = classifyElement(els.find((element) => element.id === 'el_mic'));
+  const attach = classifyElement(els.find((element) => element.id === 'el_attach'));
+  assert.equal(mic.semantic_type, SemanticType.VOICE_INPUT);
+  assert.equal(attach.semantic_type, SemanticType.UPLOAD);
 });
 
-test('genuinely ambiguous equal candidates surface to the user instead of guessing', () => {
+test('ambiguous equivalent controls remain explicit grounding evidence', () => {
   const els = layoutAmbiguousSubmits();
   const ranked = rankCandidates(els, { required: new Set([SemanticType.SUBMIT]), taskText: 'search for laptops' });
   const ambiguous = ambiguousCandidates(ranked, { taskText: 'search for laptops' });
-  assert.ok(ambiguous, 'two identical Search buttons are genuinely ambiguous');
-  const plan = defaultGPTOSSClient._localPlannerFallback(
-    'search for laptops', { elements: els, page: { page_type: 'SEARCH' } }, HISTORY_TYPED('el_input'), null
-  );
-  assert.equal(plan.action.action, 'ASK_USER');
-  const choice = plan.action.value?.ambiguousFields?.[0];
-  assert.equal(choice?.field_id, 'candidate_choice');
-  assert.equal(choice?.options?.length, 2);
+  assert.deepEqual(ambiguous.map((candidate) => candidate.element_id), ['el_search_a', 'el_search_b']);
 });
 
-test('task text disambiguates near-identical candidates without asking', () => {
+test('task text ranks the matching search control ahead of a generic match', () => {
   const els = [
     { id: 'el_input', role: 'input', interaction: { typeable: true }, dom: { tag: 'input', type: 'text', label: 'Query', name: 'q', bbox: [10, 10, 190, 30] } },
     { id: 'el_search_flights', role: 'button', interaction: { clickable: true }, dom: { tag: 'button', type: 'submit', label: 'Search flights', name: 'a', bbox: [210, 10, 120, 30] } },
     { id: 'el_search', role: 'button', interaction: { clickable: true }, dom: { tag: 'button', type: 'submit', label: 'Search', name: 'b', bbox: [340, 10, 90, 30] } }
   ];
-  const plan = defaultGPTOSSClient._localPlannerFallback(
-    'search flights from Pune to Delhi', { elements: els, page: { page_type: 'SEARCH' } }, HISTORY_TYPED('el_input'), null
-  );
-  assert.equal(plan.action.action, 'CLICK');
-  assert.equal(plan.action.target.element_id, 'el_search_flights');
+  const ranked = rankCandidates(els, { required: new Set([SemanticType.SUBMIT]), taskText: 'search flights from Pune to Delhi' });
+  assert.equal(ranked[0].element_id, 'el_search_flights');
 });
 
-test('planner waits instead of guessing when no semantically compatible control exists', () => {
+test('unreachable planner waits instead of inventing a grounded action', async () => {
   const els = [
     { id: 'el_input', role: 'input', interaction: { typeable: true }, dom: { tag: 'input', type: 'text', label: 'Query', name: 'q' } },
     { id: 'el_mic', role: 'button', interaction: { clickable: true }, dom: { tag: 'button', type: 'button', label: 'Dictate', name: 'mic' } },
     { id: 'el_play', role: 'button', interaction: { clickable: true }, dom: { tag: 'button', type: 'button', label: 'Play', name: 'play' } }
   ];
-  const plan = defaultGPTOSSClient._localPlannerFallback(
-    'search for laptops', { elements: els, page: { page_type: 'SEARCH' } }, HISTORY_TYPED('el_input'), null
-  );
-  // No submit control and no compatible click target: WAIT, never a guess.
+  const client = new GPTOSSClient('http://backend.test');
+  client.post = async () => { throw new Error('backend offline'); };
+  const plan = await client.planNextStep('search for laptops', { elements: els, page: { page_type: 'SEARCH' } });
   assert.equal(plan.action.action, 'WAIT');
+  assert.equal(plan.plannerUnavailable, true);
+  assert.equal(plan.action.target, undefined);
 });
 
 // ── 5. Page representation the model receives ──────────────────────────────

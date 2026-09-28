@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from typing import Dict, Any, List, Optional
 import re
 import hmac
+import logging
 import threading
 import time
 import uvicorn
@@ -21,6 +22,9 @@ from starlette.responses import JSONResponse
 from vlm_service import vlm_service
 from gpt_oss_service import gpt_oss_service
 from config import settings
+import logging_config
+
+logger = logging.getLogger(__name__)
 
 _EXTENSION_ORIGIN_REGEX = r"^(?:chrome-extension://[a-p]{32}|moz-extension://[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
 _MODEL_ENDPOINTS = {"/vision", "/reason", "/interpret"}
@@ -44,6 +48,17 @@ def _security_response(scope, receive, send, status_code, detail):
     return JSONResponse({"detail": detail}, status_code=status_code)(scope, receive, send)
 
 
+def _client_label(scope):
+    """Peer address for a rejection record, or 'unknown'.
+
+    Only used so repeated rejections from one local process are attributable.
+    """
+    try:
+        return (scope.get("client") or ("unknown", 0))[0]
+    except Exception:
+        return "unknown"
+
+
 class RequestGuardMiddleware:
     """Authenticate model calls and cap request bytes before JSON parsing."""
     def __init__(self, app):
@@ -63,15 +78,33 @@ class RequestGuardMiddleware:
         headers = {key.decode("latin1").lower(): value.decode("latin1") for key, value in scope.get("headers", [])}
         origin = headers.get("origin", "")
         if not re.fullmatch(_EXTENSION_ORIGIN_REGEX, origin):
+            logger.warning(
+                "Rejected %s %s: Origin header is not a valid extension origin.",
+                method, path, extra={"privagent_client": _client_label(scope)},
+            )
             return await _security_response(scope, receive, send, 403, "Extension origin required.")
         if settings.EXTENSION_ORIGINS and origin not in settings.EXTENSION_ORIGINS:
+            logger.warning(
+                "Rejected %s %s: origin is not in the configured allowlist.",
+                method, path, extra={"privagent_client": _client_label(scope), "privagent_origin": origin},
+            )
             return await _security_response(scope, receive, send, 403, "This extension origin is not allowed.")
 
         configured_secret = settings.BACKEND_SHARED_SECRET
         if len(configured_secret) < 32:
+            logger.error(
+                "Cannot serve %s %s: BACKEND_SHARED_SECRET is unset or shorter than 32 characters.",
+                method, path,
+            )
             return await _security_response(scope, receive, send, 503, "Backend shared secret is not configured.")
         supplied_secret = headers.get("x-privagent-token", "")
         if not supplied_secret or not hmac.compare_digest(supplied_secret, configured_secret):
+            # Never log the presented token, not even truncated: it is a
+            # credential and this file is meant to be attachable to a report.
+            logger.warning(
+                "Rejected %s %s: missing or invalid backend access token.",
+                method, path, extra={"privagent_client": _client_label(scope)},
+            )
             return await _security_response(scope, receive, send, 401, "Backend access token is invalid.")
 
         client = scope.get("client") or ("unknown", 0)
@@ -91,14 +124,25 @@ class RequestGuardMiddleware:
                     if timestamp < stale_before:
                         _rate_buckets.pop(key, None)
         if rate_limited:
+            logger.warning(
+                "Rate limited %s %s.", method, path,
+                extra={"privagent_client": _client_label(scope), "endpoint": path},
+            )
             return await _security_response(scope, receive, send, 429, "Too many model requests. Try again shortly.")
 
         if method in {"POST", "PUT", "PATCH"}:
             try:
                 content_length = int(headers.get("content-length", "0"))
             except ValueError:
+                logger.warning("Rejected %s %s: unparseable Content-Length.", method, path,
+                               extra={"privagent_client": _client_label(scope)})
                 return await _security_response(scope, receive, send, 400, "Invalid Content-Length header.")
             if content_length > _MAX_REQUEST_BYTES:
+                logger.warning(
+                    "Rejected %s %s: Content-Length %s exceeds the %s byte cap.",
+                    method, path, content_length, _MAX_REQUEST_BYTES,
+                    extra={"privagent_client": _client_label(scope), "content_length": content_length},
+                )
                 return await _security_response(scope, receive, send, 413, "Request body is too large.")
 
             body_parts = []
@@ -112,6 +156,11 @@ class RequestGuardMiddleware:
                 part = message.get("body", b"")
                 body_size += len(part)
                 if body_size > _MAX_REQUEST_BYTES:
+                    logger.warning(
+                        "Rejected %s %s: streamed body exceeded the %s byte cap.",
+                        method, path, _MAX_REQUEST_BYTES,
+                        extra={"privagent_client": _client_label(scope)},
+                    )
                     return await _security_response(scope, receive, send, 413, "Request body is too large.")
                 body_parts.append(part)
                 if not message.get("more_body", False):
@@ -181,10 +230,15 @@ def process_vision(req: VisionRequest):
         )
         return {"status": "success", "visual_observation": result}
     except ValueError as val_err:
-        import traceback; traceback.print_exc()
+        # A ValueError here is a controlled privacy/security rejection, not a
+        # defect: the full traceback would be noise on every rejected payload.
+        logger.info("Vision request rejected by the boundary gate: %s", val_err)
         raise HTTPException(status_code=400, detail=str(val_err))
     except Exception as e:
-        import traceback; traceback.print_exc()
+        # exc_info records the traceback in the log file. The response body
+        # still carries only the exception type, because the text can name
+        # provider URLs and upstream bodies.
+        logger.exception("VLM processing error (%s)", type(e).__name__, extra={"task_id": req.task_id})
         raise HTTPException(status_code=500, detail=f"VLM processing error: {type(e).__name__}")
 
 @app.post("/reason")
@@ -201,11 +255,12 @@ def process_reason(req: ReasonRequest):
     except ValueError as val_err:
         # Outbound privacy / security rejections are controlled messages,
         # mapped to 400 like the /vision endpoint.
+        logger.info("Reasoning request rejected by the boundary gate: %s", val_err)
         raise HTTPException(status_code=400, detail=str(val_err))
     except Exception as e:
-        import traceback; traceback.print_exc()
         # Log the type only: exception text can carry provider URLs, status
         # codes, or internal details that must not reach clients.
+        logger.exception("Reasoning error (%s)", type(e).__name__)
         raise HTTPException(status_code=500, detail=f"Reasoning error: {type(e).__name__}")
 
 @app.post("/interpret")
@@ -214,8 +269,21 @@ def process_interpret(req: InterpretRequest):
         interpretation = gpt_oss_service.interpret_task(req.task)
         return interpretation
     except Exception as e:
-        import traceback; traceback.print_exc()
+        logger.exception("Interpretation error (%s)", type(e).__name__)
         raise HTTPException(status_code=500, detail=f"Interpretation error: {type(e).__name__}")
 
 if __name__ == "__main__":
-    uvicorn.run(app, host=settings.HOST, port=settings.PORT)
+    logger.info(
+        "Starting PrivAgent backend on %s:%s (vlm=%s, reasoning=%s); log file %s",
+        settings.HOST, settings.PORT, settings.VLM_MODEL, settings.REASONING_MODEL,
+        logging_config.log_file_path(),
+    )
+    # log_config routes uvicorn's startup banner and access log into the same
+    # JSONL file; without it uvicorn reinstalls its own handlers and the access
+    # log never reaches the file.
+    uvicorn.run(
+        app,
+        host=settings.HOST,
+        port=settings.PORT,
+        log_config=logging_config.uvicorn_log_config(),
+    )

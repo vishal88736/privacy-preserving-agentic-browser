@@ -6,7 +6,26 @@
 
 import { MessageType } from '../shared/messages.js';
 import { AgentState } from '../shared/constants.js';
+import {
+  buildLogExport,
+  collectLogEntries,
+  createLogger,
+  getLogStore,
+  installGlobalErrorHandlers,
+  LOG_LEVEL_STORAGE_KEY,
+  normalizeLevel
+} from '../shared/logger.js';
 import { setupLocalVisionMessageHandler } from '../perception/local-vision.js';
+
+const log = createLogger({ scope: 'SidePanel', surface: 'sidepanel' });
+
+// The panel is a long-lived document, so an uncaught error or a rejected
+// promise here previously left the UI silently stale — the background kept
+// running while the panel stopped reflecting it.
+installGlobalErrorHandlers(log);
+
+// Restore this surface's persisted entries before appending new ones.
+getLogStore('sidepanel').hydrate().catch(() => {});
 
 const FRIENDLY_STATE = {
   [AgentState.IDLE]: { label: 'Ready', detail: 'Tell me what to do on this page.', band: 'idle', dot: 'idle' },
@@ -161,6 +180,26 @@ class SidePanelApp {
     this.listen();
     this.pollStatus();
     this.renderPrivacyStatic();
+    this.applyConfiguredLogLevel();
+  }
+
+  /**
+   * Match the service worker's threshold.
+   *
+   * Both surfaces read the same storage key, so a level raised for debugging
+   * the agent loop applies to the panel's own diagnostics too instead of the
+   * two contexts disagreeing about what counts as a warning.
+   */
+  async applyConfiguredLogLevel() {
+    try {
+      if (chrome.storage?.local) {
+        const stored = await chrome.storage.local.get(LOG_LEVEL_STORAGE_KEY);
+        const requested = stored?.[LOG_LEVEL_STORAGE_KEY];
+        if (requested) log.setLevel(normalizeLevel(requested));
+      }
+    } catch (error) {
+      log.warn('Could not read the configured log level; using the default.', { error });
+    }
   }
 
   cache() {
@@ -201,7 +240,7 @@ class SidePanelApp {
     this.metricSteps = this.$('metric-steps');
     this.privacyCats = this.$('privacy-categories');
     this.localList = this.$('local-items-list');
-    // LLM transparency ("What is sent to the AI")
+    // Transparency about what the configured backend receives.
     this.llmCalls = this.$('llm-calls');
     this.llmElCount = this.$('llm-el-count');
     this.llmRedacted = this.$('llm-redacted-count');
@@ -266,6 +305,7 @@ class SidePanelApp {
     this.$('settings-btn').addEventListener('click', () => this.openSettings());
     this.$('close-settings-btn').addEventListener('click', () => this.closeModal(this.settingsModal));
     this.$('save-settings-btn').addEventListener('click', () => this.saveSettings());
+    this.$('export-error-log-btn').addEventListener('click', (event) => this.downloadErrorLog(event.currentTarget));
 
     this.$('theme-btn').addEventListener('click', () => this.toggleTheme());
   }
@@ -276,14 +316,14 @@ class SidePanelApp {
     try {
       chrome.runtime.sendMessage({ type, payload }, (res) => {
         if (chrome.runtime.lastError) {
-          console.warn('[SidePanel] Message failed:', chrome.runtime.lastError.message);
+          log.warn('Message to the background failed.', { type, notice: chrome.runtime.lastError.message });
           cb?.(null);
           return;
         }
         cb?.(res);
       });
     } catch (err) {
-      console.warn('[SidePanel] Message failed:', err?.message || err);
+      log.exception('Message to the background threw', err, { type });
       cb?.(null);
     }
   }
@@ -569,7 +609,7 @@ class SidePanelApp {
     const payload = t?.lastLLMPayload || null;
 
     if (this.llmCalls) {
-      this.llmCalls.textContent = calls === 0 ? '0 AI calls' : `${calls} AI call${calls === 1 ? '' : 's'} (sanitized)`;
+      this.llmCalls.textContent = calls === 0 ? '0 backend requests' : `${calls} backend request${calls === 1 ? '' : 's'}`;
     }
     if (this.llmElCount) this.llmElCount.textContent = payload ? String(payload.elementsSent ?? 0) : '0';
     if (this.llmRedacted) this.llmRedacted.textContent = String(payload ? (payload.redactedCount ?? redacted) : redacted);
@@ -590,14 +630,17 @@ class SidePanelApp {
     if (this.llmTokens) this.llmTokens.textContent = String(tokenSet.size);
 
     if (!payload && calls === 0) {
-      this.llmPreview.textContent = 'No AI calls yet. Start a task to see exactly what leaves this device.';
+      this.llmPreview.textContent = 'No backend requests yet. Start a task to see what leaves this device.';
       return;
     }
     const lines = [];
-    lines.push(`task_sent: "${payload ? payload.taskSent : String(t?.prompt || '').slice(0, 140)}"`);
-    lines.push(`elements_sent: ${payload ? payload.elementsSent : 0} (roles + redacted labels only)`);
+    lines.push(`sanitized_task_sent: "${payload ? payload.taskSent : String(t?.prompt || '').slice(0, 140)}"`);
+    const contextSent = payload
+      ? `${payload.elementsSent} sanitized elements, page text excerpts, and task state`
+      : 'none (task interpretation request)';
+    lines.push(`page_context_sent: ${contextSent}`);
     lines.push(`sensitive fields redacted: ${payload ? payload.redactedCount : redacted}`);
-    lines.push(`screenshot: ${payload ? payload.screenshot : 'sanitized before upload'}`);
+    lines.push(`screenshot: ${payload ? payload.screenshot : 'not sent'}`);
     const timings = t?.lastStepTimings;
     if (timings) {
       lines.push(`last_step_ms: ${timings.total_ms ?? '—'}`);
@@ -1087,6 +1130,11 @@ class SidePanelApp {
     if (this.debugPanel.style.display === 'none') return;
     const t = this.task;
     this.debugBody.replaceChildren();
+    const exportButton = el('button', 'btn btn-secondary', 'Download error log (.jsonl)');
+    exportButton.type = 'button';
+    exportButton.title = 'Errors, warnings and info traces from the side panel, service worker and content scripts.';
+    exportButton.addEventListener('click', () => this.downloadErrorLog(exportButton));
+    this.debugBody.appendChild(exportButton);
     if (!t) { this.debugBody.appendChild(el('p', 'muted small', 'No task data yet.')); return; }
     const rows = [
       ['task id', t.id || '—'],
@@ -1107,16 +1155,52 @@ class SidePanelApp {
       row.appendChild(el('span', null, v));
       this.debugBody.appendChild(row);
     }
-    const exportButton = el('button', 'btn btn-secondary', 'Download local vision labels');
-    exportButton.type = 'button';
-    exportButton.disabled = !(t.visionSamples || []).length;
-    exportButton.addEventListener('click', () => this.downloadVisionEvaluation());
-    this.debugBody.appendChild(exportButton);
+    const visionButton = el('button', 'btn btn-secondary', 'Download local vision labels');
+    visionButton.type = 'button';
+    visionButton.disabled = !(t.visionSamples || []).length;
+    visionButton.addEventListener('click', () => this.downloadVisionEvaluation());
+    this.debugBody.appendChild(visionButton);
     const taskTraceButton = el('button', 'btn btn-secondary', 'Download task timing trace');
     taskTraceButton.type = 'button';
     taskTraceButton.disabled = !(t.steps || []).length && !t.terminalStepTimings;
     taskTraceButton.addEventListener('click', () => this.downloadTaskTimingTrace());
     this.debugBody.appendChild(taskTraceButton);
+  }
+
+  /**
+   * Write the merged log to a .jsonl file.
+   *
+   * A Manifest V3 extension cannot write to the filesystem, so the log lives in
+   * chrome.storage and this is the only way to get it out as a file. Entries
+   * from every surface are merged and time-ordered, because the service
+   * worker's buffer does not survive its own suspension.
+   */
+  async downloadErrorLog(button) {
+    // Trimmed: the settings-modal markup is indented, and restoring the raw
+    // textContent would leave the button label padded with newlines.
+    const original = (button?.textContent || '').trim();
+    if (button) button.disabled = true;
+    if (button) button.textContent = 'Collecting…';
+    try {
+      const entries = await collectLogEntries();
+      if (!entries.length) {
+        log.info('No log entries to export yet.');
+        return;
+      }
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      downloadText(
+        buildLogExport(entries, { surface: 'sidepanel' }),
+        `privagent-error-log-${stamp}.jsonl`
+      );
+      log.info('Exported the error log.', { entries: entries.length });
+    } catch (error) {
+      log.exception('Could not export the error log', error);
+    } finally {
+      if (button) {
+        button.textContent = original;
+        button.disabled = false;
+      }
+    }
   }
 
   downloadTaskTimingTrace() {
@@ -1172,6 +1256,7 @@ class SidePanelApp {
     anchor.download = `${task.id || 'browser-agent'}-task-timing.jsonl`;
     anchor.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+    log.info('Exported the task timing trace.', { steps: steps.length });
   }
 
   downloadVisionEvaluation() {
@@ -1196,7 +1281,25 @@ class SidePanelApp {
     anchor.download = `${task.id || 'privacy-agent'}-vision-evaluation.jsonl`;
     anchor.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+    log.info('Exported the local vision labels.', { samples: task.visionSamples.length });
   }
+}
+
+/**
+ * Trigger a file download from generated text.
+ *
+ * Shared by all three exports so they agree on the JSONL MIME type and on
+ * revoking the object URL: a revoked-too-early URL makes the download fail
+ * silently in Firefox, and a leaked one pins the whole export in memory.
+ */
+function downloadText(text, filename) {
+  const blob = new Blob([text], { type: 'application/x-ndjson' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function truncate(s, n) {

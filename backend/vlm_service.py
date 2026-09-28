@@ -5,6 +5,7 @@ builds a high-signal layout summary from the ENRICHED DOM (cards, prices,
 headings) instead of re-labeling inputs only.
 """
 
+import logging
 import re
 import threading
 from typing import Dict, Any, List, Optional
@@ -12,6 +13,8 @@ import json
 import requests
 from config import settings
 from privacy_rules import find_sensitive_category
+
+logger = logging.getLogger(__name__)
 
 
 _PROVIDERS = {
@@ -193,7 +196,7 @@ class VLMService:
         # 'inline_data.data'"), wasting the whole rotation.
         fitted_screenshot = _truncate_image_data_url(screenshot, 1200000)
         if fitted_screenshot is None:
-            print(f"[VLM] screenshot payload exceeds {1200000} chars; using DOM heuristic instead of corrupting the image")
+            logger.warning("Screenshot payload exceeds %d chars; using the DOM heuristic instead of corrupting the image", 1200000)
             return None
 
         prompt = (
@@ -259,19 +262,23 @@ class VLMService:
                     timeout=settings.VLM_REQUEST_TIMEOUT_SECONDS,
                 )
                 if resp.status_code != 200:
-                    print(f"[VLM] {candidate['provider']} returned HTTP {resp.status_code}; rotating provider/key")
+                    logger.warning("Provider returned HTTP %s; rotating provider/key", resp.status_code,
+                                   extra={"provider": candidate["provider"], "model": candidate["model"],
+                                          "status_code": resp.status_code})
                     continue
 
                 content = (resp.json().get("choices") or [{}])[0].get("message", {}).get("content") or ""
                 if not isinstance(content, str) or not content.strip():
-                    print(f"[VLM] {candidate['provider']} returned empty content; rotating provider/key")
+                    logger.warning("Provider returned empty content; rotating provider/key",
+                                   extra={"provider": candidate["provider"], "model": candidate["model"]})
                     continue
                 # Gateways sometimes return HTTP 200 whose content IS the
                 # provider error text ("ERROR: Cannot read 'clipboard' ...").
                 # That text must never become visual grounding — reject and
                 # rotate like any other provider failure.
                 if _looks_like_provider_error(content):
-                    print(f"[VLM] {candidate['provider']} returned provider error text (model={candidate['model']}); rotating provider/key")
+                    logger.warning("Provider returned provider error text as content; rotating provider/key",
+                                   extra={"provider": candidate["provider"], "model": candidate["model"]})
                     continue
                 # Balanced parse of the first well-formed {...} block. A
                 # greedy first-{-to-last-} span wraps prose between braces
@@ -280,7 +287,8 @@ class VLMService:
                 # is never returned as visual grounding.
                 parsed = _extract_json_object(content)
                 if parsed is None:
-                    print(f"[VLM] {candidate['provider']} returned non-JSON text; rotating provider/key")
+                    logger.warning("Provider returned non-JSON text; rotating provider/key",
+                                   extra={"provider": candidate["provider"], "model": candidate["model"]})
                     continue
                 # The same gateway errors can arrive JSON-wrapped inside the
                 # layout fields — reject those too.
@@ -289,7 +297,8 @@ class VLMService:
                     for v in (parsed.get("spatial_layout"), parsed.get("visual_state"), parsed.get("page_type"))
                     if isinstance(v, str)
                 ):
-                    print(f"[VLM] {candidate['provider']} JSON fields contained provider error text; rotating provider/key")
+                    logger.warning("Provider JSON fields contained provider error text; rotating provider/key",
+                                   extra={"provider": candidate["provider"], "model": candidate["model"]})
                     continue
                 out = {}
                 if parsed.get("spatial_layout"):
@@ -308,7 +317,9 @@ class VLMService:
                         r"\b(?:sk|pk|api)[-_][A-Za-z0-9_-]{16,}\b", json.dumps(out), re.I
                     )
                     if fabricated:
-                        print(f"[VLM] {candidate['provider']} output contained fabricated sensitive content; rotating provider/key")
+                        logger.warning("Provider output contained fabricated sensitive content; rotating provider/key",
+                                       extra={"provider": candidate["provider"], "model": candidate["model"],
+                                              "category": "SYNTHETIC_PII"})
                         continue
                     # Report the active provider/model so downstream task
                     # diagnostics can distinguish actual visual inference
@@ -320,17 +331,22 @@ class VLMService:
                         "model": candidate["model"],
                     }
                     return out
-                print(f"[VLM] {candidate['provider']} response missing layout keys; rotating provider/key")
+                logger.warning("Provider response missing layout keys; rotating provider/key",
+                               extra={"provider": candidate["provider"], "model": candidate["model"]})
             except Exception as exc:
                 # Exception messages may include request details. Log only
                 # provider and exception type, never tokens or payload text.
                 if isinstance(exc, requests.exceptions.Timeout):
-                    print(f"[VLM] {candidate['provider']} timed out; using DOM heuristic")
+                    logger.warning("Provider timed out after %ss; using the DOM heuristic",
+                                   settings.VLM_REQUEST_TIMEOUT_SECONDS,
+                                   extra={"provider": candidate["provider"], "model": candidate["model"],
+                                          "timeout_s": settings.VLM_REQUEST_TIMEOUT_SECONDS})
                     # Keep a slow provider from multiplying the wait. The
                     # cursor advances, so the next vision request starts on
                     # the next configured credential/provider.
                     break
-                print(f"[VLM] {candidate['provider']} request failed ({type(exc).__name__}); rotating provider/key")
+                logger.warning("Provider request failed (%s); rotating provider/key", type(exc).__name__,
+                               extra={"provider": candidate["provider"], "model": candidate["model"]})
         return None
 
     def _from_dom(self, sanitized_dom: Dict[str, Any], metadata: Dict[str, Any]) -> Dict[str, Any]:

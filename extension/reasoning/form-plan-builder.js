@@ -1,3 +1,9 @@
+/**
+ * @deprecated Legacy local form-plan heuristic. The live agent path must use
+ * the remote Planner output; this module remains only for isolated tests and
+ * migration comparison. Do not connect it to the live task loop.
+ */
+
 import { ActionType, RiskLevel } from '../shared/constants.js';
 import { defaultFormAnalyzer } from './form-analyzer.js';
 import { defaultLocalValueResolver } from '../executor/local-value-resolver.js';
