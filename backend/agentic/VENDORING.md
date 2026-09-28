@@ -44,7 +44,7 @@ The complete license text is in [`LICENSE.TheAgentic`](LICENSE.TheAgentic). This
 The adapted modules identify their exact upstream source files and modifications in their module headers. In summary:
 
 - The Planner and Critique `pydantic-ai` `result_type` declarations became ordinary Pydantic models validated from the existing backend client's JSON response.
-- The live `/reason` call uses one universal prompt for plan management, action grounding, and critique. Planner inputs remain sanitized-only, value echo is forbidden, and protected values use device-local `LOCAL_*` tokens. The isolated Critique builder accepts an observation delta, and termination thresholds align with the extension's three-consecutive-failure breaker.
+- The live `/reason` call uses one universal prompt for plan management, action grounding, and critique. Planner inputs remain sanitized-only, value echo is forbidden, and protected values use device-local `LOCAL_*` tokens. The isolated Critique builder accepts an observation delta, and termination thresholds align with the extension's three-consecutive-failure breaker. The per-step user message is compacted by `context.py` (short history summary + relevant observation only + current request, 12K-char budget) after providers rejected oversized requests with HTTP 413; key names are unchanged.
 - The upstream Playwright tools and `mmid` selectors are not part of the adapted execution path. The extension remains the browser executor and owns tabs, confirmations, and the vault.
 - The server-side orchestration loop was relocated to the extension. The backend composes one fused Planner + Critique reasoning call per step.
 

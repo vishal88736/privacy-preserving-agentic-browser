@@ -8,6 +8,7 @@ from config import settings
 from privacy_rules import find_sensitive_category
 from vlm_service import _looks_like_provider_error
 from agentic.orchestrator import compose_reasoning_messages
+from agentic.context import build_page_evidence
 
 logger = logging.getLogger(__name__)
 _SAFE_ACTION_TYPES = {
@@ -25,10 +26,73 @@ def _log_safe_plan_shape(parsed: dict) -> None:
     logger.info("plan_step resolved an action type", extra={"action_type": action_type})
 
 
+# Reasoning models (gpt-oss on Bedrock, and Groq's gpt-oss family) return the
+# chain-of-thought and the answer in the SAME `content` field, wrapped in
+# <think>/<reasoning> tags, with the JSON after it. Parsing that as bare JSON
+# always failed with "Model returned invalid schema", which is exactly what the
+# logs recorded on every attempt.
+_THINK_TAGS = ("reasoning", "think")
+
+
+def _strip_reasoning(content: str) -> str:
+    """Return only the answer portion of a reasoning model's content.
+
+    Handles the two shapes seen in practice:
+      * tagged   — ``<reasoning>...</reasoning>{...}``
+      * untagged  — ``Thought: ...\n{...}`` with no closing tag
+
+    The answer is whatever follows the last closing tag, or — when no tag
+    closed — the first ``{``. A response that is already pure JSON passes
+    through unchanged.
+    """
+    if not isinstance(content, str):
+        return ""
+    text = content
+    for tag in _THINK_TAGS:
+        closing = re.search(rf"</{tag}\s*>", text, re.I)
+        if closing:
+            return _tidy_answer(text[closing.end():])
+        opening = re.search(rf"<{tag}\s*>", text, re.I)
+        if opening:
+            # An unterminated block means the model never finished its answer.
+            # Only trust it when the answer starts immediately; otherwise return
+            # nothing so the caller reports a clean parse failure. Scanning the
+            # rest of the reasoning prose instead would find whatever JSON
+            # snippet the model quoted while thinking and treat it as a plan.
+            tail = text[opening.end():].lstrip()
+            return tail if tail.startswith("{") else ""
+    return _tidy_answer(text)
+
+
+def _tidy_answer(answer: str) -> str:
+    """Normalize the answer tail: drop code fences and any prose lead-in.
+
+    Safe to run only once the reasoning trace is already removed, so scanning
+    forward to the first ``{`` cannot pick up a JSON snippet the model quoted
+    while thinking. Intermittently the model wraps the object in ```json
+    fences or prefixes it with "Here is the JSON:", which previously surfaced
+    as "Model returned invalid schema".
+    """
+    text = answer.strip()
+    fence = re.match(r"^```(?:json)?\s*", text, re.I)
+    if fence:
+        text = text[fence.end():]
+        closing_fence = re.search(r"```\s*$", text)
+        if closing_fence:
+            text = text[:closing_fence.start()]
+    text = text.strip()
+    if not text.startswith("{") and "{" in text:
+        text = text[text.index("{"):]
+    return text
+
+
 def _extract_json(content: str) -> dict:
     # Fast path first: most well-behaved providers return a bare JSON object.
     if not isinstance(content, str) or not content.strip():
         raise Exception("No JSON object found in response")
+    stripped = _strip_reasoning(content)
+    if stripped and stripped != content.strip():
+        content = stripped
     text = content.strip()
     if text.startswith("{") and text.endswith("}"):
         try:
@@ -52,6 +116,51 @@ def _extract_json(content: str) -> dict:
             pass
         start = text.find("{", start + 1)
     raise Exception("No JSON object found in response")
+
+
+def _try_parse_plan(content: str) -> Optional[Dict[str, Any]]:
+    """Parse a model reply into a plan, or None when it is not one.
+
+    Deliberately returns None instead of raising: a non-plan body is a
+    recoverable condition (one repair retry), not an exception, and letting it
+    raise here would skip the retry and end the task.
+    """
+    try:
+        parsed = _extract_json(_strip_reasoning(content))
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) and "action" in parsed else None
+
+
+def _repair_retry(headers: Dict[str, str], payload: Dict[str, Any], user_content: str) -> str:
+    """Re-ask once, demanding a bare JSON object and nothing else.
+
+    Capped at a single attempt: a second failure is a real provider problem,
+    and retrying further would only add latency to an already-failing task.
+    """
+    repair = dict(payload)
+    repair["messages"] = compose_reasoning_messages(user_content) + [{
+        "role": "user",
+        "content": (
+            "Your previous reply could not be parsed. Reply with ONLY the JSON "
+            "object required by the output schema: no reasoning tags, no prose, "
+            "no markdown fences. The object must contain an \"action\" object."
+        ),
+    }]
+    repair["temperature"] = 0.0
+    resp = requests.post(
+        f"{settings.AI_BASE_URL}/chat/completions",
+        headers=headers,
+        json=repair,
+        timeout=settings.REASONING_REQUEST_TIMEOUT_SECONDS,
+    )
+    if resp.status_code != 200:
+        raise Exception(f"Model API error: {resp.status_code}")
+    choices = resp.json().get("choices") or []
+    content = (choices[0].get("message") or {}).get("content") if choices else None
+    if not isinstance(content, str) or not content.strip():
+        raise Exception("Empty response from reasoning model")
+    return content
 
 
 def _allowed_ids(fused_observation: Dict[str, Any], page_state: Optional[Dict[str, Any]]) -> set:
@@ -237,7 +346,7 @@ Output ONLY a valid JSON object. Do NOT include markdown blocks:
                 content = message.get("content")
                 if not isinstance(content, str) or not content.strip():
                     raise Exception("Empty response from interpretation model")
-                return _extract_json(content)
+                return _extract_json(_strip_reasoning(content))
             raise Exception(f"Model error: {resp.status_code}")
         except Exception as e:
             logger.warning("Task interpretation failed (%s); using the local interpreter.",
@@ -266,27 +375,13 @@ Output ONLY a valid JSON object. Do NOT include markdown blocks:
             # contract. The extension's step history is the loop memory; see
             # agentic/orchestrator.py for why the loop itself stays in the
             # extension.
-            compact_elements = fused_observation.get("elements", [])
-            page_evidence = {
-                "PAGE_STATE": {
-                    "url": (page_state or {}).get("url"),
-                    "title": (page_state or {}).get("title"),
-                    "page_type": (page_state or {}).get("page_type"),
-                    "summary": (page_state or {}).get("summary"),
-                    "headings": (page_state or {}).get("headings"),
-                    "result_sets": (page_state or {}).get("result_sets") or fused_observation.get("result_sets"),
-                    "ranked_candidates": (page_state or {}).get("ranked_candidates"),
-                    "resolved_references": (page_state or {}).get("resolved_references") or fused_observation.get("resolved_references"),
-                    "suggested_search_element": (page_state or {}).get("suggested_search_element"),
-                    "budget": (page_state or {}).get("budget"),
-                    "optimization": (page_state or {}).get("optimization"),
-                    "visible_text_excerpt": (page_state or {}).get("visible_text_excerpt") or fused_observation.get("visible_text"),
-                    "visible_text_omitted_chars": (page_state or {}).get("visible_text_omitted_chars") or 0,
-                },
-                "ALLOWED_ELEMENT_IDS": sorted(allowed),
-                "AVAILABLE_ELEMENTS": compact_elements,
-                "ACTION_HISTORY": task_history[-5:] if task_history else [],
-            }
+            # Compact request composition (agentic/context.py): short history
+            # summary + relevant observation only + current request. Key names
+            # stay stable for the live prompt's contract; values compact.
+            # ALLOWED_ELEMENT_IDS is never truncated (grounding authority).
+            page_evidence = build_page_evidence(
+                fused_observation, page_state, allowed, task_history
+            )
             user_msg = {
                 "ORIGINAL_USER_REQUEST": task,
                 "TASK_STATE": task_state or {},
@@ -309,7 +404,11 @@ Output ONLY a valid JSON object. Do NOT include markdown blocks:
                 "model": settings.REASONING_MODEL,
                 "messages": compose_reasoning_messages(user_content),
                 "temperature": 0.1,
-                "max_tokens": 1500
+                # Reasoning models spend completion tokens on the chain of
+                # thought before emitting JSON. 1500 truncated the tail of the
+                # object (the logs show an unparseable body ending mid-plan);
+                # 4000 leaves room for the trace plus the full contract.
+                "max_tokens": 4000
             }
 
             resp = requests.post(
@@ -330,7 +429,19 @@ Output ONLY a valid JSON object. Do NOT include markdown blocks:
                 # error text; that must never be parsed as a plan.
                 if _looks_like_provider_error(content):
                     raise Exception("Reasoning provider returned an error instead of a plan")
-                parsed = _extract_json(content)
+                parsed = _try_parse_plan(content)
+                if parsed is None:
+                    # Reasoning models comply intermittently: roughly one call
+                    # in several returns a body whose JSON cannot be parsed,
+                    # which used to end the task with "invalid schema". One
+                    # repair retry costs nothing in the happy path and turns
+                    # that terminal failure into a usable step.
+                    logger.warning(
+                        "Reasoning response was not parseable JSON; retrying once with a repair instruction.",
+                        extra={"endpoint": "/reason"},
+                    )
+                    content = _repair_retry(headers, payload, user_content)
+                    parsed = _try_parse_plan(content)
                 if isinstance(parsed, dict) and "action" in parsed:
                     act = parsed.get("action")
                     if not isinstance(act, dict):

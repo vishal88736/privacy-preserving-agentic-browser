@@ -101,9 +101,18 @@ class RequestGuardMiddleware:
         if not supplied_secret or not hmac.compare_digest(supplied_secret, configured_secret):
             # Never log the presented token, not even truncated: it is a
             # credential and this file is meant to be attachable to a report.
+            # Distinguish "header absent" from "wrong value" and report the
+            # presented length: an empty header means the extension never
+            # stored a token, a full-length mismatch means the secret changed
+            # after it was saved. Both look identical as a bare 401 otherwise,
+            # and that ambiguity costs a debugging round every time.
             logger.warning(
-                "Rejected %s %s: missing or invalid backend access token.",
-                method, path, extra={"privagent_client": _client_label(scope)},
+                "Rejected %s %s: %s (presented length %d, expected %d).",
+                method, path,
+                "no backend access token presented" if not supplied_secret
+                else "backend access token does not match BACKEND_SHARED_SECRET",
+                len(supplied_secret), len(configured_secret),
+                extra={"privagent_client": _client_label(scope)},
             )
             return await _security_response(scope, receive, send, 401, "Backend access token is invalid.")
 
