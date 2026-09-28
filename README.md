@@ -426,6 +426,11 @@ VLM_REQUEST_TIMEOUT_SECONDS=4
 REASONING_REQUEST_TIMEOUT_SECONDS=12
 ```
 
+Amazon Bedrock is also supported for reasoning. Set `AI_BASE_URL` to the
+Bedrock Runtime OpenAI-compatible endpoint, provide `AWS_BEARER_TOKEN_BEDROCK`
+and choose a Bedrock model ID in `REASONING_MODEL`. This accepts Bedrock API
+keys; see [provider setup and limits](docs/model-providers.md#amazon-bedrock).
+
 ### Agent reasoning: Universal Task Prompt
 
 Each `/reason` request sends one system prompt, `UNIVERSAL_TASK_PROMPT` in

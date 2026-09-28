@@ -135,7 +135,10 @@ class VLMProviderRotator:
         )
         # Preserve the original single-endpoint configuration (AI_API_KEY,
         # OpenAI-compatible local servers, etc.) if provider keys are absent.
-        if not profiles and not any_supported_keys and settings.API_KEY:
+        # A Bedrock reasoning bearer token is not a VLM credential: do not send
+        # it with the default unrelated VLM model to a Bedrock endpoint.
+        is_bedrock_endpoint = "bedrock" in str(settings.AI_BASE_URL).lower()
+        if not profiles and not any_supported_keys and settings.API_KEY and not is_bedrock_endpoint:
             profiles.append({
                 "provider": "configured endpoint",
                 "url": f"{settings.AI_BASE_URL.rstrip('/')}/chat/completions",

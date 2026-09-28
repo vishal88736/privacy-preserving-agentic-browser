@@ -80,7 +80,19 @@ _HUGGINGFACE_KEYS = _read_api_keys(
     "HUGGINGFACE_API_KEYS", "HUGGINGFACE_API_KEY", "HF_API_KEYS", "HF_API_KEY", "HF_TOKEN"
 )
 _GROQ_KEYS = _read_api_keys("GROQ_API_KEYS", "GROQ_API_KEY")
+_BEDROCK_KEYS = _read_api_keys("AWS_BEARER_TOKEN_BEDROCK", "BEDROCK_API_KEY")
 _CONFIGURED_AI_BASE_URL = os.getenv("AI_BASE_URL")
+
+
+def _bedrock_region():
+    """Return a configured AWS region suitable for a Bedrock runtime URL."""
+    region = (
+        os.getenv("BEDROCK_REGION") or
+        os.getenv("AWS_REGION") or
+        os.getenv("AWS_DEFAULT_REGION") or
+        ""
+    ).strip()
+    return region if re.fullmatch(r"[a-z0-9-]+", region) else ""
 
 
 def _default_ai_base_url():
@@ -94,6 +106,8 @@ def _default_ai_base_url():
         return "https://api.x.ai/v1"
     if _GROQ_KEYS:
         return "https://api.groq.com/openai/v1"
+    if _BEDROCK_KEYS and _bedrock_region():
+        return f"https://bedrock-runtime.{_bedrock_region()}.amazonaws.com/openai/v1"
     return "https://api.openai.com/v1"
 
 
@@ -105,6 +119,8 @@ def _reasoning_api_key(base_url):
     if os.getenv("AI_API_KEY"):
         return os.getenv("AI_API_KEY")
     host = str(base_url or "").lower()
+    if "bedrock" in host and _BEDROCK_KEYS:
+        return _BEDROCK_KEYS[0]
     if "groq.com" in host and _GROQ_KEYS:
         return _GROQ_KEYS[0]
     if "openrouter.ai" in host and _OPENROUTER_KEYS:
@@ -144,7 +160,8 @@ class Settings:
         origin.strip() for origin in os.getenv("EXTENSION_ORIGINS", "").split(",") if origin.strip()
     )
 
-    # Supports one general reasoning key plus provider-specific keys.
+    # Supports one general reasoning key plus provider-specific keys, including
+    # the Bedrock API bearer token (AWS_BEARER_TOKEN_BEDROCK).
     API_KEY: str = _reasoning_api_key(_CONFIGURED_AI_BASE_URL or _default_ai_base_url())
 
     # Base URL for reasoning calls; VLM provider endpoints rotate independently.
