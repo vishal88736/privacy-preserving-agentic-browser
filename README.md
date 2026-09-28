@@ -5,7 +5,7 @@
 [![Firefox MV3](https://img.shields.io/badge/Firefox%20Addon-MV3%20Sidebar-orange.svg)](https://extensionworkshop.com/)
 [![Local Vision](https://img.shields.io/badge/Client%20Vision-Local%20ViT%20%2B%20ONNX%20Web-indigo.svg)](#client-side-vision-processing)
 [![Local Privacy](https://img.shields.io/badge/Privacy-Fail--Closed%20Redaction-emerald.svg)](#privacy-preserving-filter--redaction-engine)
-[![Tests Passing](https://img.shields.io/badge/Tests-453%20Passed%20%7C%200%20Failed-brightgreen.svg)](#-testing--verification-suite)
+[![Tests Passing](https://img.shields.io/badge/Tests-454%20Passed%20%7C%200%20Failed-brightgreen.svg)](#-testing--verification-suite)
 [![License](https://img.shields.io/badge/License-Apache%202.0%20%2F%20MIT%20Attribution-lightgrey.svg)](docs/REUSE_AND_ATTRIBUTION.md)
 
 > **Official Problem Statement Alignment**: A client-side, privacy-preserving browser vision agent built with **Transformers.js**, **ONNX Runtime Web (WASM/WebGPU)**, and **Tesseract.js OCR**, combined with an open-weights/cloud-hosted multimodal reasoning server (**FastAPI + VLM / GPT-OSS 120B**). It dynamically detects and redacts personal identifiers and faces/people on the user's machine *before* any network transmission, passing only anonymized visual context to the central server, and executes actionable browser commands under human-in-the-loop safety gates.
@@ -436,6 +436,14 @@ feedback, and action history between calls and remains responsible for
 execution, privacy checks, and risk confirmations. The model emits one action
 from the extension's supported vocabulary; secrets use `LOCAL_*` tokens.
 
+Its task playbooks cover search/navigation, forms, extraction/comparison,
+media controls, staged bookings, DOM-grounded sheet cells, login walls, and
+downloads. Booking submission waits at the existing high-risk confirmation
+card, which can display the latest successful extracted review. Sheet actions
+still require an observed element ID, keyboard events are synthetic, and a
+download is reported complete only when the page exposes that evidence. This
+is broad task routing, not a guarantee for every site or canvas interface.
+
 Uploads remain user-directed: the prompt asks the user to choose a file in the
 webpage, and the client converts any accidental model-emitted `UPLOAD` action
 to `ASK_USER` before it can reach the executor. If the reasoning backend is
@@ -522,9 +530,9 @@ npm test
 ```
 **Current Test Suite Status**:
 ```
-ℹ tests 453
+ℹ tests 454
 ℹ suites 0
-ℹ pass 453
+ℹ pass 454
 ℹ fail 0
 ℹ cancelled 0
 ℹ skipped 0

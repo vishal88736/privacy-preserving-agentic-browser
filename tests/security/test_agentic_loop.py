@@ -95,6 +95,14 @@ class AgenticLoopTests(unittest.TestCase):
         self.assertIn("Never emit\nSWITCH_TAB", UNIVERSAL_TASK_PROMPT)
         self.assertIn("runtime confirmation is\nstill required for SUBMIT", UNIVERSAL_TASK_PROMPT)
         self.assertIn("three consecutive failed steps", UNIVERSAL_TASK_PROMPT)
+        for playbook in (
+            "[PLAY/MEDIA]", "[BOOK/TICKETS]", "[SHEETS/GRID WRITING]",
+            "[VISIT ANY WEBSITE]", "[LOGIN]", "[DOWNLOAD]",
+        ):
+            self.assertIn(playbook, UNIVERSAL_TASK_PROMPT)
+        self.assertIn("ArrowDown/ArrowRight/ArrowLeft/ArrowUp/Tab", UNIVERSAL_TASK_PROMPT)
+        self.assertIn("booking correctly parked", UNIVERSAL_TASK_PROMPT)
+        self.assertIn("Spreadsheet and booking values are user data", UNIVERSAL_TASK_PROMPT)
         self.assertIn("Never emit UPLOAD", ACTION_CONTRACT_PROMPT)
         self.assertNotIn("SUBMIT | UPLOAD |", ACTION_CONTRACT_PROMPT)
 

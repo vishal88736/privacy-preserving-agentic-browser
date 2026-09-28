@@ -28,6 +28,9 @@ from logging_config import (
     uvicorn_log_config,
 )
 
+_FAKE_OPENROUTER_KEY = "sk-or-v1-" + "abcdefghijklmnopqrstuvwx"
+_FAKE_GROQ_KEY = "gsk_" + "ABCDEFGHIJKLMNOPQRST"
+
 
 def make_record(msg='hello', level=logging.INFO, args=(), exc_info=None, **extra):
     record = logging.LogRecord(
@@ -44,9 +47,9 @@ class RedactionTests(unittest.TestCase):
 
     def test_provider_key_shapes_are_removed(self):
         for secret in (
-            'sk-or-v1-abcdefghijklmnopqrstuvwx',
+            _FAKE_OPENROUTER_KEY,
             'sk-proj-abcdefghijklmnopqrst',
-            'gsk_ABCDEFGHIJKLMNOPQRST',
+            _FAKE_GROQ_KEY,
             'hf_abcdefghijklmnopqrstuvwxyz01',
             'pk-live-abcdefghij1234',
         ):
@@ -86,9 +89,9 @@ class RedactionTests(unittest.TestCase):
 
     def test_nested_structures_are_scrubbed(self):
         out = redact({
-            'token': 'gsk_ABCDEFGHIJKLMNOPQRST',
+            'token': _FAKE_GROQ_KEY,
             'nested': {'note': 'aadhaar 2345 6789 0123'},
-            'items': ['sk-or-v1-abcdefghijklmnopqrst'],
+            'items': [_FAKE_OPENROUTER_KEY[:29]],
         })
         blob = json.dumps(out)
         self.assertNotIn('ABCDEFGHIJKLMNOP', blob)
@@ -131,7 +134,7 @@ class JsonLinesFormatterTests(unittest.TestCase):
 
     def test_exception_message_is_redacted(self):
         try:
-            raise ValueError('token was gsk_ABCDEFGHIJKLMNOPQRST')
+            raise ValueError('token was ' + _FAKE_GROQ_KEY)
         except ValueError:
             import sys as _sys
             exc_info = _sys.exc_info()
@@ -160,11 +163,11 @@ class JsonLinesFormatterTests(unittest.TestCase):
         self.assertNotIn('fields', JsonLinesFormatter().format(record))
 
     def test_field_values_are_redacted(self):
-        record = make_record('rotating', provider='gsk_ABCDEFGHIJKLMNOPQRST')
+        record = make_record('rotating', provider=_FAKE_GROQ_KEY)
         self.assertNotIn('ABCDEFGHIJKLMNOP', JsonLinesFormatter().format(record))
 
     def test_plan_and_feedback_fields_are_redacted_in_jsonl(self):
-        api_key = 'sk-or-v1-abcdefghijklmnopqrstuvwx'
+        api_key = _FAKE_OPENROUTER_KEY
         email = 'synthetic.person@example.invalid'
         plan_fields = redact({
             'plan': f'Key seen: {api_key}',
@@ -195,7 +198,7 @@ class ConsoleFormatterTests(unittest.TestCase):
 
     def test_long_text_is_redacted_on_console_too(self):
         self.assertNotIn('gsk_ABCDEFGHIJKLMNOP', ConsoleFormatter().format(
-            make_record('key gsk_ABCDEFGHIJKLMNOPQRST')))
+            make_record('key ' + _FAKE_GROQ_KEY)))
 
 
 class ConfigurationTests(unittest.TestCase):
@@ -336,7 +339,7 @@ class EndToEndTests(unittest.TestCase):
                 log = logging.getLogger('e2e')
                 log.setLevel(logging.INFO)
                 log.info('rotation decision', extra={'provider': 'Groq', 'status_code': 429})
-                log.warning('key leaked here: sk-or-v1-abcdefghijklmnopqrstuvwx')
+                log.warning('key leaked here: %s', _FAKE_OPENROUTER_KEY)
                 for attached in logging.getLogger().handlers:
                     attached.flush()
                 handler.close()

@@ -755,6 +755,11 @@ class SidePanelApp {
     this.currentConfirmationData = data;
     this.closeModal(this.userInputModal);
     this.$('confirm-reason').textContent = data.reason || 'This action needs your approval.';
+    const reviewBox = this.$('confirm-review-box');
+    const reviewText = this.$('confirm-review-text');
+    const reviewSummary = typeof data.reviewSummary === 'string' ? data.reviewSummary.trim() : '';
+    if (reviewText) reviewText.textContent = reviewSummary;
+    if (reviewBox) reviewBox.hidden = !reviewSummary;
     this.$('confirm-action-verb').textContent = data.action.action || 'ACTION';
     this.$('confirm-action-target').textContent = data.action.target?.label || data.action.target?.element_id || data.action.target?.url || 'Page element';
     this.$('confirm-data-local').textContent = data.action.value_source ? `${data.action.value_source} (stays local)` : (data.privacySummary?.dataKeptLocal || 'Personal identifiers (stays local)');

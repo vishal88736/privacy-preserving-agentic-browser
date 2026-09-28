@@ -1520,6 +1520,30 @@ summary:focus-visible {
   line-height: 1.35;
 }
 
+.confirm-review-box {
+  background: var(--bg-sunken);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 8px 10px;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.confirm-review-box h4 {
+  margin: 0 0 5px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.confirm-review-box p {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+}
+
 .disclosure {
   margin: 0;
   background: var(--bg-sunken);

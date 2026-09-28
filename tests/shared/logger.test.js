@@ -32,6 +32,9 @@ import {
   serializeError
 } from '../../extension/shared/logger.js';
 
+const fakeOpenRouterKey = ['sk-or-v1-', 'abcdefghijklmnopqrstuvwx'].join('');
+const fakeGroqKey = ['gsk_', 'ABCDEFGHIJKLMNOPQRST'].join('');
+
 /** Swap console methods for recorders, run fn, restore. */
 function captureConsole(fn) {
   const original = {};
@@ -57,9 +60,9 @@ function memoryStore(options = {}) {
 
 test('redactLogText removes provider API key shapes', () => {
   for (const secret of [
-    'sk-or-v1-abcdefghijklmnopqrstuvwx',
+    fakeOpenRouterKey,
     'sk-proj-abcdefghijklmnopqrst',
-    'gsk_ABCDEFGHIJKLMNOPQRST',
+    fakeGroqKey,
     'hf_abcdefghijklmnopqrstuvwxyz01',
     'pk-live-abcdefghij1234'
   ]) {
@@ -139,7 +142,7 @@ test('serializeError keeps name, message and stack', () => {
 });
 
 test('serializeError redacts credentials inside the error message', () => {
-  const out = serializeError(new Error('request failed for sk-or-v1-abcdefghijklmnopqrst'));
+  const out = serializeError(new Error(`request failed for ${fakeOpenRouterKey.slice(0, 29)}`));
   assert.ok(!out.message.includes('abcdefghijklmnop'));
 });
 
@@ -192,7 +195,7 @@ test('sanitizeFields converts Errors, Maps, Sets and functions', () => {
 });
 
 test('sanitizeFields redacts values, not just the message', () => {
-  const out = sanitizeFields({ token: 'gsk_ABCDEFGHIJKLMNOPQRST', note: 'aadhaar 2345 6789 0123' });
+  const out = sanitizeFields({ token: fakeGroqKey, note: 'aadhaar 2345 6789 0123' });
   assert.ok(!out.token.includes('ABCDEFGHIJKL'));
   assert.ok(!out.note.includes('2345'));
 });

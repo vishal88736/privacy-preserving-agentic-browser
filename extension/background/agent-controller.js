@@ -144,6 +144,13 @@ function visualEvidenceNeed(task, rawDOM) {
   };
 }
 
+export function latestConfirmationReview(steps) {
+  const latest = Array.isArray(steps) && steps.length ? steps[steps.length - 1] : null;
+  if (latest?.action?.action !== ActionType.EXTRACT || latest.success !== true ||
+      typeof latest.result?.extractedText !== 'string') return '';
+  return defaultDOMSanitizer.sanitizeUserPrompt(latest.result.extractedText).slice(0, 3500);
+}
+
 export class AgentController {
   constructor() {
     this.activeTabId = null;
@@ -896,6 +903,7 @@ export class AgentController {
         taskId: task.id,
         action: { ...proposedAction, risk: riskAssessment.risk },
         reason: confirmReason,
+        reviewSummary: latestConfirmationReview(task.steps),
         privacySummary: {
           dataKeptLocal: proposedAction.value_source || 'No secrets disclosed',
           dataSharedWithServer: 'Sanitized task request and page context; saved profile values stay local'

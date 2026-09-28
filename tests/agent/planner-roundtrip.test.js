@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { AgentController, plannerStepMetadata } from '../../extension/background/agent-controller.js';
+import { AgentController, latestConfirmationReview, plannerStepMetadata } from '../../extension/background/agent-controller.js';
 import { taskManager } from '../../extension/background/task-manager.js';
 import { GPTOSSClient } from '../../extension/reasoning/gpt-oss-client.js';
 import { ActionType } from '../../extension/shared/constants.js';
@@ -28,6 +28,25 @@ test('critic termination with a final answer completes before action validation'
   } finally {
     taskManager.completeTask = originalCompleteTask;
   }
+});
+
+test('booking confirmation can display only the latest successful extracted review', () => {
+  const valid = latestConfirmationReview([{
+    action: { action: ActionType.EXTRACT },
+    success: true,
+    result: { extractedText: 'Flight: 8:10 PM. Total: $820.' }
+  }]);
+  assert.equal(valid, 'Flight: 8:10 PM. Total: $820.');
+  assert.equal(latestConfirmationReview([{
+    action: { action: ActionType.EXTRACT },
+    success: false,
+    result: { extractedText: 'Do not show a failed review.' }
+  }]), '');
+  assert.equal(latestConfirmationReview([{
+    action: { action: ActionType.CLICK },
+    success: true,
+    result: { extractedText: 'Do not reuse stale extraction.' }
+  }]), '');
 });
 
 test('critic cannot terminate without a final answer and DONE remains the primary terminal action', () => {
