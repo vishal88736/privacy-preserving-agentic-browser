@@ -132,6 +132,11 @@ export class DOMSanitizer {
     return out;
   }
 
+  /** Canonical page fields use an explicit redaction marker, never a sample value. */
+  sanitizeCanonicalText(text) {
+    return String(this.sanitizeUserPrompt(String(text || '')) || '').replace(/\[example\]/gi, '[REDACTED]');
+  }
+
   /**
    * Lighter sanitizer for page-authored text (headings, result titles,
    * visible text). Only scrubs exact vault secrets and credential-shaped
@@ -221,14 +226,14 @@ export class DOMSanitizer {
       sanitized.placeholder = this.scrubPlaceholderText(sanitized.placeholder, fieldContext);
       if (sanitized.label) sanitized.label = this.scrubPlaceholderText(sanitized.label, sanitized.name || '');
       if (sanitized.ariaLabel) sanitized.ariaLabel = this.sanitizeUserPrompt(sanitized.ariaLabel);
-      sanitized.accessible_name = this.sanitizeUserPrompt(
+      sanitized.accessible_name = this.sanitizeCanonicalText(
         sanitized.label || sanitized.ariaLabel || sanitized.accessible_name || ''
       );
-      sanitized.text = this.sanitizeUserPrompt(String(sanitized.text || '')).slice(0, 180);
-      sanitized.title = this.sanitizeUserPrompt(String(sanitized.title || '')).slice(0, 180);
-      if (sanitized.ariaDescribedBy) sanitized.ariaDescribedBy = this.sanitizeUserPrompt(sanitized.ariaDescribedBy);
-      if (sanitized.fieldset_legend) sanitized.fieldset_legend = this.sanitizeUserPrompt(sanitized.fieldset_legend);
-      if (sanitized.context) sanitized.context = this.sanitizeUserPrompt(sanitized.context);
+      sanitized.text = this.sanitizeCanonicalText(sanitized.text).slice(0, 180);
+      sanitized.title = this.sanitizeCanonicalText(sanitized.title).slice(0, 180);
+      if (sanitized.ariaDescribedBy) sanitized.ariaDescribedBy = this.sanitizeCanonicalText(sanitized.ariaDescribedBy);
+      if (sanitized.fieldset_legend) sanitized.fieldset_legend = this.sanitizeCanonicalText(sanitized.fieldset_legend);
+      if (sanitized.context) sanitized.context = this.sanitizeCanonicalText(sanitized.context);
       if (sanitized.href) sanitized.href = this.sanitizeLink(sanitized.href);
       if (Array.isArray(sanitized.options)) {
         // Options are {text, value, selected} objects. Page-authored example
@@ -240,8 +245,8 @@ export class DOMSanitizer {
           if (typeof o === 'string') return this.sanitizeUserPrompt(this.scrubPlaceholderText(o, fieldContext));
           if (o && typeof o === 'object') {
             const clean = { ...o };
-            if (typeof clean.text === 'string') clean.text = this.sanitizeUserPrompt(this.scrubPlaceholderText(clean.text, fieldContext));
-            if (typeof clean.label === 'string') clean.label = this.sanitizeUserPrompt(this.scrubPlaceholderText(clean.label, fieldContext));
+            if (typeof clean.text === 'string') clean.text = this.sanitizeCanonicalText(this.scrubPlaceholderText(clean.text, fieldContext));
+            if (typeof clean.label === 'string') clean.label = this.sanitizeCanonicalText(this.scrubPlaceholderText(clean.label, fieldContext));
             if (typeof clean.value === 'string' && clean.value.trim() &&
                 (findPIIMatches(clean.value, fieldContext).length || this.sanitizeUserPrompt(clean.value) !== clean.value)) {
               clean.value = '[REDACTED]';
@@ -260,8 +265,8 @@ export class DOMSanitizer {
           ? { index: sanitized.selected_option.index, text: selected.text || '', value: selected.value || '' }
           : {
               index: sanitized.selected_option.index,
-              text: this.sanitizeUserPrompt(String(sanitized.selected_option.text || '')),
-              value: this.sanitizeUserPrompt(String(sanitized.selected_option.value || ''))
+              text: this.sanitizeCanonicalText(sanitized.selected_option.text),
+              value: this.sanitizeCanonicalText(sanitized.selected_option.value)
             };
       }
 

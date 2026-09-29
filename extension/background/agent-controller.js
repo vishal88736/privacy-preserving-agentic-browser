@@ -1045,6 +1045,7 @@ export class AgentController {
     // STEP 7: LOCAL EXECUTION (secrets resolved strictly locally)
     this._assertTaskOwner(task, token);
     loop.assertObservation(task.observationContext?.snapshotId);
+    this._transitionLoop(task, loop, AgentLoopState.EXECUTE);
     taskManager.updateState(AgentState.EXECUTING, 'Performing the action in the page…', task);
     this.notify('STATE_CHANGED', { state: AgentState.EXECUTING, action: proposedAction });
 

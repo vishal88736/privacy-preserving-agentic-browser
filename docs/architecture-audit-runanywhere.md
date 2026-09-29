@@ -128,13 +128,14 @@ The browser-agent README contains status prose describing inference as still bei
 | Local LLM/VLM | None. |
 | Server VLM | Qwen2.5-VL-72B-Instruct default, configurable/provider-rotated in the backend. It receives only the screenshot after the local sanitizer has permitted it, plus sanitized DOM/context. |
 | Server reasoning/planning | GPT-OSS-120B default, configurable in the backend. `/interpret` and `/reason` receive sanitized task/page context. |
-| WebGPU/WASM | The current uncommitted local-vision change prefers an actual WebGPU adapter and requests the same packaged ONNX pipeline with `device: webgpu`; pipeline initialization falls back to `device: wasm`. Firefox without WebGPU continues through WASM. There is no benchmark in the repository proving WebGPU is faster. |
+| WebGPU/WASM | The local-vision runtime prefers an actual WebGPU adapter and requests the same packaged ONNX pipeline with `device: webgpu`; pipeline initialization falls back to `device: wasm`. Firefox without WebGPU continues through WASM. There is no benchmark proving WebGPU is faster. |
 
 ## Code changes after the audit
 
 The audit identified two functional gaps, so the implementation changes attach to those seams rather than replacing PrivAgent's architecture:
 
 - `extension/agent/state-machine.js` defines the explicit per-step states `OBSERVE`, `UNDERSTAND`, `GROUND`, `PLAN`, `VALIDATE`, `EXECUTE`, `VERIFY`, `REPLAN`, `DONE`, and `BLOCKED`. The controller now advances those states and persists the current phase.
+- `extension/agent/verifier/action-verifier.js` compares the pre-action sanitized observation with the next fresh, fused observation before another plan is requested. It records whether visible page/target state changed and avoids claiming that a dispatched click achieved a site-level goal.
 - DOM extraction now returns an opaque `snapshot_id` plus `mutation_revision`. Fusion preserves both, the controller carries them into execution, and the content executor rejects actions if either value is stale. Targeted actions recheck after scrolling, and form plans stop when an intervening page mutation invalidates the remaining element map.
 - `extension/perception/provenance.js` normalizes provenance to `DOM_ONLY`, `DOM_PLUS_HEURISTIC`, `REAL_VLM`, `LOCAL_MODEL`, and per-element `DOM`. The backend labels its heuristic annotations as DOM annotations and emits an empty screenshot-detection list. Fusion accepts screenshot element detections only with both real-VLM and detection provenance.
 - `extension/runtime/capability-detection.js` and `model-runtime.js` move packaged ONNX capability checks and load/fallback policy behind `ModelRuntime` and `InferenceProvider`. WebGPU is attempted only after a real adapter is returned; failed initialization falls through to WASM. Packaged model loading keeps remote assets disabled and the browser cache off.
@@ -144,6 +145,8 @@ The audit identified two functional gaps, so the implementation changes attach t
 - DOM sanitization now applies to canonical accessible name, text, title, and selected-option fields as well as the original field/value fields.
 
 Added regression tests cover state-machine transitions, stale snapshot/revision rejection, DOM heuristic versus real-VLM provenance, packaged WebGPU-to-WASM fallback, no remote model loading, and PII in canonical DOM fields. Existing semantic, vault, privacy, safety, and browser-flow coverage remains in the full suite.
+
+The packaged bundle grew by about 34 KB. A local-only headless Chromium smoke measured DOM extraction, local object detection, OCR, screenshot sanitization, JS heap use, and WASM execution; detailed values and the missing pre-change/runtime backend trace are recorded in [architecture.md](architecture.md#measurements). No local LLM model or download/cache subsystem was added.
 
 ## Resulting architecture map
 
