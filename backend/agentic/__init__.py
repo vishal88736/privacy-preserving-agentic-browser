@@ -59,3 +59,11 @@ __all__ = [
     "StepReasoning",
     "compose_reasoning_messages",
 ]
+
+# The role-specific prompt constants (PLANNER_SYSTEM_PROMPT,
+# CRITIC_SYSTEM_PROMPT, ACTION_CONTRACT_PROMPT) and their builder/parser
+# helpers were removed: nothing on the request path referenced them, and the
+# live `/reason` call composes exactly one UNIVERSAL_TASK_PROMPT. Keeping
+# unreachable adapted code from a restrictive upstream license shipped dead in
+# the backend is a compliance and review liability, so the adaptation now lives
+# only where it runs. The upstream originals remain in _upstream/ for audit.

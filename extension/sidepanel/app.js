@@ -1063,6 +1063,7 @@ class SidePanelApp {
     this.$('settings-backend').value = s.backendUrl || '';
     this.$('settings-backend-token').value = s.backendToken || '';
     this.$('settings-maxsteps').value = s.maxSteps || '';
+    if (this.$('settings-allow-remote')) this.$('settings-allow-remote').checked = s.allowRemoteBackend === true;
     this.$('settings-confirm').checked = s.alwaysConfirm !== false;
     this.$('settings-debug').checked = !!s.showDebug;
     this.debugPanel.style.display = s.showDebug ? '' : 'none';
@@ -1076,16 +1077,27 @@ class SidePanelApp {
   }
 
   saveSettings() {
+    // A rejected backend URL must be visible; updateSettings throws with the
+    // reason and the modal stays open so the value can be corrected.
     const settings = {
       backendUrl: this.$('settings-backend').value.trim(),
       backendToken: this.$('settings-backend-token').value.trim(),
       maxSteps: Math.min(50, Math.max(1, parseInt(this.$('settings-maxsteps').value, 10) || 25)),
       alwaysConfirm: this.$('settings-confirm').checked,
-      showDebug: this.$('settings-debug').checked
+      showDebug: this.$('settings-debug').checked,
+      allowRemoteBackend: this.$('settings-allow-remote')?.checked === true
     };
     this.reflectSettings(settings);
-    this.send(MessageType.UPDATE_SETTINGS, settings);
-    this.closeModal(this.settingsModal);
+    this.send(MessageType.UPDATE_SETTINGS, settings, (res) => {
+      if (res && res.success === false) {
+        this.$('settings-error')?.removeAttribute('hidden');
+        const box = this.$('settings-error');
+        if (box) box.textContent = res.error || 'Settings could not be saved.';
+        return;
+      }
+      this.$('settings-error')?.setAttribute('hidden', '');
+      this.closeModal(this.settingsModal);
+    });
   }
 
   applyTheme() {

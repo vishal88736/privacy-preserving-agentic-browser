@@ -28,6 +28,9 @@ import { defaultGPTOSSClient } from '../reasoning/gpt-oss-client.js';
 import { defaultRiskGate } from '../executor/risk-gate.js';
 import { defaultActionValidator } from '../executor/action-validator.js';
 import { defaultActionExecutor } from '../executor/action-executor.js';
+import { AgentLoopState, AgentLoopStateMachine } from '../agent/state-machine.js';
+import { actionVerificationSummary, defaultActionVerifier } from '../agent/verifier/action-verifier.js';
+import { createDefaultPlannerChain } from '../reasoning/providers/planner-provider.js';
 import { TaskState } from '../reasoning/task-understanding.js';
 import { defaultPageStateModeler } from '../perception/page-state-modeler.js';
 import {
@@ -152,7 +155,7 @@ export function latestConfirmationReview(steps) {
 }
 
 export class AgentController {
-  constructor() {
+  constructor({ plannerProvider = createDefaultPlannerChain(defaultGPTOSSClient) } = {}) {
     this.activeTabId = null;
     this.isPaused = false;
     this.isCancelled = false;
@@ -162,6 +165,26 @@ export class AgentController {
     this.runToken = 0;
     this.pauseResolver = null;
     this.pausedFromState = null;
+    this.plannerProvider = plannerProvider;
+    this.loopMachines = new WeakMap();
+  }
+
+  _createLoopMachine(task) {
+    const machine = new AgentLoopStateMachine((state) => {
+      task.agentLoopState = state;
+      taskManager.persist();
+    });
+    this.loopMachines.set(task, machine);
+    machine.transition(AgentLoopState.OBSERVE);
+    return machine;
+  }
+
+  _transitionLoop(task, machine, state) {
+    if (machine && machine.state !== state && ![AgentLoopState.DONE, AgentLoopState.BLOCKED].includes(machine.state)) {
+      machine.transition(state);
+    }
+    if (task) task.agentLoopState = machine?.state || state;
+    return machine?.state || state;
   }
 
   subscribe(listener) {
@@ -246,6 +269,16 @@ export class AgentController {
       taskManager.updatePrivacyMetrics({ serverCallsCount: 1 }, task);
     }
     log.info('TASK_INTERPRETED', { task_state: task.taskState.toPayload() });
+
+    if (interpretation.authRejected) {
+      taskManager.failTask(
+        'The extension is not authenticated with the backend. Open Settings and paste the BACKEND_SHARED_SECRET value from your .env into "Backend access token", then save.',
+        task
+      );
+      this.clearOverlays(task.tabId);
+      this.notify('TASK_FAILED', { error: task.error, hint: task.hint });
+      return;
+    }
 
     if (interpretation.privacyBlocked) {
       taskManager.updatePrivacyMetrics({ privacyBlocks: 1 }, task);
@@ -344,7 +377,7 @@ export class AgentController {
         continue;
       }
 
-      if (task.currentStep >= task.maxSteps) {
+      if (task.currentStep >= task.maxSteps && !task.pendingVerification) {
         taskManager.failTask('Maximum step limit reached without achieving goal', task);
         this.clearOverlays(task.tabId);
         this.notify('TASK_FAILED', { error: task.error, hint: task.hint });
@@ -376,6 +409,7 @@ export class AgentController {
         // Deterministic privacy failure: retrying cannot help (same redacted
         // input would be blocked again). Fail fast with a user-safe message.
         if (stepErr && stepErr.name === 'OutboundPolicyViolationError') {
+          this._transitionLoop(task, this.loopMachines.get(task), AgentLoopState.BLOCKED);
           log.error('Outbound privacy block; aborting the task.', { violation: stepErr.message });
           taskManager.failTask(stepErr.message, task);
           this.clearOverlays(task.tabId);
@@ -383,6 +417,7 @@ export class AgentController {
           break;
         }
         if (stepErr && stepErr.name === 'LocalVisionRequiredError') {
+          this._transitionLoop(task, this.loopMachines.get(task), AgentLoopState.BLOCKED);
           taskManager.failTask('Local screenshot analysis is unavailable. No screenshot was sent to the server.', task);
           this.clearOverlays(task.tabId);
           this.notify('TASK_FAILED', { error: task.error, hint: stepErr.message });
@@ -392,11 +427,13 @@ export class AgentController {
         if (stepErr?.message?.includes('Chrome does not permit extensions on internal') ||
             stepErr?.message?.includes('browser internal page') ||
             stepErr?.message?.includes('cannot run inside its own panel tab')) {
+          this._transitionLoop(task, this.loopMachines.get(task), AgentLoopState.BLOCKED);
           taskManager.failTask(stepErr.message, task);
           this.clearOverlays(task.tabId);
           this.notify('TASK_FAILED', { error: task.error, hint: task.hint });
           break;
         }
+        this._transitionLoop(task, this.loopMachines.get(task), AgentLoopState.REPLAN);
         log.exception('Step failed; recovering by re-observing', stepErr);
         await this._awaitOwned(task, token, measureStage(task, 'step_error_recovery_wait_ms', () => this.sleep(700)));
         taskManager.recordStep({
@@ -462,6 +499,8 @@ export class AgentController {
       }
       throw new Error(`This page cannot be automated (browser internal page: ${capability}). Open a website or test portal (e.g. http://localhost:5000), then start the task again.`);
     }
+
+    const loop = this._createLoopMachine(task);
 
     // L1/L5: Wait for page to stabilize before observing (handles SPA transitions, AJAX)
     await this._awaitOwned(task, token, measureStage(task, 'stability_wait_ms', () => this._waitForPageStability(task.tabId)));
@@ -766,7 +805,9 @@ export class AgentController {
           headings: extras.headings,
           result_items: extras.result_items,
           visible_text: extras.visible_text,
-          local_vision_context: sanitizedDOM.local_vision_context
+          local_vision_context: sanitizedDOM.local_vision_context,
+          snapshot_id: rawDOM.snapshot_id,
+          mutation_revision: rawDOM.mutation_revision
         }
       );
       this.quarantineInjectedElements(fusedObservation);
@@ -776,12 +817,61 @@ export class AgentController {
     }));
 
     // STEP 4.5: TASK-CONDITIONAL PAGE STATE MODELING
+    const observationId = fusedObservation.observation_id;
+    if (!observationId || !Number.isInteger(fusedObservation.mutation_revision)) {
+      throw new Error('The page observation is missing its freshness token. Re-observation is required before planning.');
+    }
+    loop.bindObservation(observationId);
+    task.observationContext = {
+      snapshotId: observationId,
+      mutationRevision: fusedObservation.mutation_revision
+    };
+    this._transitionLoop(task, loop, AgentLoopState.UNDERSTAND);
     task.pageState = pageState;
+    this._transitionLoop(task, loop, AgentLoopState.GROUND);
     // Retained for the ASK_USER answer path, which runs a step later and must
     // gate the user's own answer against the same observation the prompt was
     // built from rather than re-deriving one.
+    task.lastFusedObservation = fusedObservation;
     this._lastFusedObservation = fusedObservation;
     log.info('PAGE_OBSERVED', { page_state: pageState });
+
+    // This is the first point after execution where a fresh DOM has been
+    // fused and task-grounded. Verify the previous action against that new
+    // observation before asking the planner for the next action.
+    const pendingVerification = task.pendingVerification;
+    if (pendingVerification) {
+      taskManager.updateState(AgentState.VERIFYING, 'Checking the new page state…', task);
+      const verification = defaultActionVerifier.verify({
+        action: pendingVerification.action,
+        execution: pendingVerification.execution,
+        beforeObservation: pendingVerification.beforeObservation,
+        afterObservation: fusedObservation
+      });
+      task.lastVerification = verification;
+      const previousStep = (task.steps || []).find((step) => step.stepNumber === pendingVerification.stepNumber);
+      if (previousStep) {
+        previousStep.diagnostic = {
+          ...(previousStep.diagnostic || {}),
+          post_action_verification: verification
+        };
+      }
+      delete task.pendingVerification;
+      taskManager.persist();
+      this.notify('STEP_VERIFIED', {
+        stepNumber: pendingVerification.stepNumber,
+        verification
+      });
+      this._transitionLoop(task, loop, AgentLoopState.VERIFY);
+      this._transitionLoop(task, loop, AgentLoopState.REPLAN);
+      if (task.currentStep >= task.maxSteps) {
+        taskManager.failTask('Maximum step limit reached without achieving goal', task);
+        this.clearOverlays(task.tabId);
+        this.notify('TASK_FAILED', { error: task.error, hint: task.hint });
+        this._transitionLoop(task, loop, AgentLoopState.BLOCKED);
+        return false;
+      }
+    }
 
     // STEP 5: REASONING & PLANNING
     // Storage initialization must not block task creation or the initial UI
@@ -795,13 +885,23 @@ export class AgentController {
     taskManager.updateState(AgentState.PLANNING, `Planning next action for "${task.taskState.getActiveSubgoal()}"…`, task);
     this.notify('STATE_CHANGED', { state: AgentState.PLANNING, active_subgoal: task.taskState.getActiveSubgoal() });
 
-    const planResult = await this._awaitOwned(task, token, measureStage(task, 'reasoning_request_ms', () => defaultGPTOSSClient.planNextStep(
-      task.prompt,
-      fusedObservation,
-      task.steps,
-      task.taskState,
-      pageState
-    )));
+    // PageStateModeler has converted the sanitized observation into semantic
+    // candidates and task-relevant state. The server planner consumes only
+    // that sanitized representation; provider selection cannot grant action
+    // authority or bypass the local validation/risk stages below.
+    this._transitionLoop(task, loop, AgentLoopState.PLAN);
+    const providerOutcome = await this._awaitOwned(task, token, measureStage(task, 'reasoning_request_ms', () =>
+      this.plannerProvider.plan({
+        task: task.prompt,
+        fusedObservation,
+        taskHistory: task.steps,
+        taskState: task.taskState,
+        pageState
+      })
+    ));
+    const planResult = providerOutcome?.available && providerOutcome.result
+      ? providerOutcome.result
+      : { plannerUnavailable: true, remoteCallAttempted: false };
     if (task.lastLLMPayload) {
       task.lastLLMPayload.modelTrace ||= { vision: null, reasoning: null };
       task.lastLLMPayload.modelTrace.reasoning = planResult?.model_trace || {
@@ -824,24 +924,32 @@ export class AgentController {
       task.consecutiveFailures = 0;
     }
 
-    if (!this._handlePlannerFailure(task, planResult)) return false;
+    if (!this._handlePlannerFailure(task, planResult)) {
+      this._transitionLoop(task, loop, AgentLoopState.BLOCKED);
+      return false;
+    }
     let proposedAction = planResult.action;
 
     // The Critique's stop decision is authoritative only when paired with its
     // final answer. The backend coerces a bare termination flag to false; this
     // client check keeps the contract fail-closed if a nonstandard backend
     // returns one. Critic termination and a final answer go together.
-    if (this._completeFromCriticTermination(task, planResult, proposedAction)) return false;
+    if (this._completeFromCriticTermination(task, planResult, proposedAction)) {
+      this._transitionLoop(task, loop, AgentLoopState.DONE);
+      return false;
+    }
 
     if (proposedAction?.action === ActionType.DONE) {
       const finalResponse = planResult.final_response || planResult.thought;
       taskManager.completeTask(finalResponse, task);
       this.clearOverlays(task.tabId);
       this.notify('TASK_COMPLETED', { result: finalResponse });
+      this._transitionLoop(task, loop, AgentLoopState.DONE);
       return false;
     }
 
     // STEP 6: LOCAL SAFETY GATE & RISK VALIDATION
+    this._transitionLoop(task, loop, AgentLoopState.VALIDATE);
     taskManager.updateState(AgentState.VALIDATING_ACTION, 'Validating action and privacy…', task);
     this.notify('STATE_CHANGED', { state: AgentState.VALIDATING_ACTION, action: proposedAction });
 
@@ -863,6 +971,7 @@ export class AgentController {
         success: false,
         timestamp: Date.now()
       });
+      this._transitionLoop(task, loop, AgentLoopState.REPLAN);
       return true;
     }
 
@@ -880,6 +989,7 @@ export class AgentController {
       taskManager.failTask(`Safety Gate Blocked Action: ${riskAssessment.reason}`, task);
       this.clearOverlays(task.tabId);
       this.notify('TASK_FAILED', { error: task.error, hint: task.hint });
+      this._transitionLoop(task, loop, AgentLoopState.BLOCKED);
       return false;
     }
 
@@ -926,6 +1036,7 @@ export class AgentController {
         taskManager.cancelTask(task);
         this.clearOverlays(task.tabId);
         this.notify('TASK_CANCELLED', { reason: 'User declined action confirmation' });
+        this._transitionLoop(task, loop, AgentLoopState.BLOCKED);
         return false;
       }
       taskManager.updateState(AgentState.EXECUTING, 'Approval received — continuing…', task);
@@ -933,12 +1044,15 @@ export class AgentController {
 
     // STEP 7: LOCAL EXECUTION (secrets resolved strictly locally)
     this._assertTaskOwner(task, token);
+    loop.assertObservation(task.observationContext?.snapshotId);
     taskManager.updateState(AgentState.EXECUTING, 'Performing the action in the page…', task);
     this.notify('STATE_CHANGED', { state: AgentState.EXECUTING, action: proposedAction });
 
     let execResult;
     try {
-      execResult = await this._awaitOwned(task, token, measureStage(task, 'action_execution_ms', () => defaultActionExecutor.execute(task.tabId, proposedAction)));
+      execResult = await this._awaitOwned(task, token, measureStage(task, 'action_execution_ms', () =>
+        defaultActionExecutor.execute(task.tabId, proposedAction, task.observationContext)
+      ));
     } catch (execErr) {
       if (execErr?.name === 'SupersededTaskError') throw execErr;
       execResult = { success: false, error: execErr?.message || 'Execution failed' };
@@ -987,6 +1101,7 @@ export class AgentController {
         taskManager.cancelTask(task);
         this.clearOverlays(task.tabId);
         this.notify('TASK_CANCELLED', { reason: 'User cancelled input request' });
+        this._transitionLoop(task, loop, AgentLoopState.BLOCKED);
         return false;
       }
 
@@ -1008,43 +1123,65 @@ export class AgentController {
       // only; answer strings can contain personal values.
       const resolvedFieldIds = [];
       const answerIds = Object.keys(userInput?.answers || {});
+      let verificationAction = null;
+      let verificationExecution = null;
       if (userInput?.answers && Object.keys(userInput.answers).length > 0) {
-        for (const [fieldId, val] of Object.entries(userInput.answers)) {
-          if (val !== undefined && val !== null && val !== '') {
-            const fieldMeta = (askData.ambiguousFields || []).find(f => f.field_id === fieldId);
-            try {
-              let answerAction;
-              if (fieldId === 'candidate_choice') {
-                // Semantic-candidate choice from the ambiguity modal: the
-                // answer is the chosen element's id — click it.
-                answerAction = { action: ActionType.CLICK, target: { element_id: val } };
-              } else if (fieldMeta?.control_type === 'SELECT' || fieldMeta?.element_type === 'select') {
-                answerAction = { action: ActionType.SELECT, target: { element_id: fieldId }, value: val };
-              } else if (fieldMeta?.control_type === 'CHECKBOX' || fieldMeta?.input_type === 'checkbox') {
-                const checked = val === true || ['yes', 'true', '1', 'checked', 'agree', 'accepted'].includes(String(val).toLowerCase());
-                answerAction = { action: checked ? ActionType.CHECK : ActionType.UNCHECK, target: { element_id: fieldId } };
-              } else if (fieldMeta?.control_type === 'RADIO' || fieldMeta?.input_type === 'radio') {
-                answerAction = {
-                  action: ActionType.FILL_FORM_PLAN,
-                  value: { fields: [{ field_id: fieldId, control_type: 'RADIO', semantic_type: fieldMeta.semantic_type, value: String(val) }] }
-                };
-              } else {
-                answerAction = { action: ActionType.TYPE, target: { element_id: fieldId }, value: String(val) };
+        const candidateChoice = userInput.answers.candidate_choice;
+        if (candidateChoice !== undefined && candidateChoice !== null && candidateChoice !== '') {
+          // A candidate choice is a page action, not a field value. Execute it
+          // alone and let the next loop iteration observe the resulting page.
+          const answerAction = { action: ActionType.CLICK, target: { element_id: candidateChoice } };
+          if (await this._gateUserAnswer(task, token, answerAction, 'candidate_choice', null)) {
+            loop.assertObservation(task.observationContext?.snapshotId);
+            const answerResult = await this._awaitOwned(task, token,
+              defaultActionExecutor.execute(task.tabId, answerAction, task.observationContext));
+            if (answerResult?.success) {
+              resolvedFieldIds.push('candidate_choice');
+              verificationAction = actionVerificationSummary(answerAction);
+              verificationExecution = { success: true };
+            }
+          }
+        } else {
+          // A single form-plan command keeps all user-provided field values
+          // local and allows the content executor to resolve and type-check
+          // every field against this one observation before it makes a page
+          // mutation. A re-render that detaches a later field fails closed;
+          // the next step then observes and grounds the changed form again.
+          const fields = [];
+          for (const [fieldId, value] of Object.entries(userInput.answers)) {
+            if (value === undefined || value === null || value === '') continue;
+            const fieldMeta = (askData.ambiguousFields || []).find((field) => field.field_id === fieldId) || {};
+            const inputType = String(fieldMeta.input_type || fieldMeta.element_type || '').toLowerCase();
+            const controlType = String(fieldMeta.control_type || (
+              inputType === 'select' ? 'SELECT'
+                : inputType === 'checkbox' ? 'CHECKBOX'
+                  : inputType === 'radio' ? 'RADIO'
+                    : inputType === 'textarea' ? 'TEXTAREA'
+                      : inputType === 'email' ? 'EMAIL'
+                        : inputType === 'tel' ? 'PHONE'
+                          : inputType === 'number' ? 'NUMBER'
+                            : inputType === 'date' ? 'DATE' : 'TEXT'
+            )).toUpperCase();
+            fields.push({
+              field_id: fieldId,
+              control_type: controlType,
+              semantic_type: fieldMeta.semantic_type,
+              value
+            });
+          }
+          if (fields.length) {
+            const answerAction = { action: ActionType.FILL_FORM_PLAN, value: { fields } };
+            if (await this._gateUserAnswer(task, token, answerAction, 'user_answers', null)) {
+              loop.assertObservation(task.observationContext?.snapshotId);
+              const answerResult = await this._awaitOwned(task, token,
+                defaultActionExecutor.execute(task.tabId, answerAction, task.observationContext));
+              for (const detail of answerResult?.details || []) {
+                if (detail?.success) resolvedFieldIds.push(detail.field);
               }
-              // Answers used to go straight to the executor, bypassing both the
-              // grounding validator and the risk gate. That made this the one
-              // path where an irreversible action could be dispatched with no
-              // risk evaluation: the ambiguity modal offers a dropdown of
-              // semantically-equivalent candidates, which the page and the VLM
-              // both influence, and picking "Pay ₹49,999" from it executed a
-              // bare click that the risk gate would have required approval for.
-              if (!(await this._gateUserAnswer(task, token, answerAction, fieldId, fieldMeta))) {
-                continue;
+              if (answerResult?.details?.some((detail) => detail?.success)) {
+                verificationAction = actionVerificationSummary(answerAction);
+                verificationExecution = { success: true };
               }
-              const answerResult = await this._awaitOwned(task, token, defaultActionExecutor.execute(task.tabId, answerAction));
-              if (answerResult?.success) resolvedFieldIds.push(fieldId);
-            } catch {
-              log.warn('Could not apply a user-provided field value.', { field_id: fieldId });
             }
           }
         }
@@ -1053,8 +1190,15 @@ export class AgentController {
         .map((field) => field.field_id)
         .filter((id) => !resolvedFieldIds.includes(id));
 
+      if ([AgentState.FAILED, AgentState.CANCELLED].includes(task.state)) {
+        this._transitionLoop(task, loop, AgentLoopState.BLOCKED);
+        return false;
+      }
+
       task.activeStepTimings.user_input_apply_ms = Math.max(0, Math.round(clockNow() - userInputApplyStarted));
       await this._awaitOwned(task, token, measureStage(task, 'user_input_followup_wait_ms', () => this.sleep(400)));
+
+      this._transitionLoop(task, loop, AgentLoopState.VERIFY);
 
       // Record step in history with user's responses
       taskManager.recordStep({
@@ -1069,6 +1213,14 @@ export class AgentController {
         success: true,
         ...plannerStepMetadata(planResult)
       }, task);
+      if (verificationAction && verificationExecution) {
+        task.pendingVerification = {
+          action: verificationAction,
+          execution: verificationExecution,
+          beforeObservation: fusedObservation,
+          stepNumber: task.currentStep
+        };
+      }
 
       this.notify('STEP_COMPLETED', {
         stepNumber: task.currentStep,
@@ -1077,10 +1229,12 @@ export class AgentController {
         success: true,
         timestamp: Date.now()
       });
+      this._transitionLoop(task, loop, AgentLoopState.REPLAN);
       return true;
     }
 
     // STEP 8: VERIFY — execution result determines recovery
+    this._transitionLoop(task, loop, AgentLoopState.VERIFY);
     taskManager.updateState(AgentState.VERIFYING, 'Checking the result…', task);
     this.notify('STATE_CHANGED', { state: AgentState.VERIFYING });
 
@@ -1096,6 +1250,12 @@ export class AgentController {
         ...plannerStepMetadata(planResult),
         diagnostic: { model_trace: task.lastLLMPayload?.modelTrace || null }
       }, task);
+      task.pendingVerification = {
+        action: actionVerificationSummary(proposedAction),
+        execution: { success: false },
+        beforeObservation: fusedObservation,
+        stepNumber: task.currentStep
+      };
       this.notify('STEP_FAILED', {
         stepNumber: task.currentStep,
         thought: 'That action did not complete. The agent will try another way.',
@@ -1103,6 +1263,7 @@ export class AgentController {
         success: false,
         timestamp: Date.now()
       });
+      this._transitionLoop(task, loop, AgentLoopState.REPLAN);
       return true;
     }
 
@@ -1140,6 +1301,12 @@ export class AgentController {
         }
       }
     });
+    task.pendingVerification = {
+      action: actionVerificationSummary(proposedAction),
+      execution: { success: true },
+      beforeObservation: fusedObservation,
+      stepNumber: task.currentStep
+    };
 
     this.notify('STEP_COMPLETED', {
       stepNumber: task.currentStep,
@@ -1158,6 +1325,7 @@ export class AgentController {
       timestamp: Date.now()
     });
 
+    this._transitionLoop(task, loop, AgentLoopState.REPLAN);
     return true;
   }
 
@@ -1177,6 +1345,17 @@ export class AgentController {
   _handlePlannerFailure(task, planResult) {
     if (planResult?.remoteCallAttempted !== false) taskManager.updatePrivacyMetrics({ serverCallsCount: 1 }, task);
     if (planResult?.privacyBlocked) taskManager.updatePrivacyMetrics({ privacyBlocks: 1 }, task);
+    if (planResult?.authRejected) {
+      // The most common first-run failure, and the one a generic "service
+      // unavailable" message hides completely. Name the actual fix.
+      taskManager.failTask(
+        'The extension is not authenticated with the backend. Open Settings and paste the BACKEND_SHARED_SECRET value from your .env into "Backend access token", then save.',
+        task
+      );
+      this.clearOverlays(task.tabId);
+      this.notify('TASK_FAILED', { error: task.error, hint: task.hint });
+      return false;
+    }
     if (planResult?.plannerUnavailable) {
       taskManager.failTask('The AI planner is unavailable. Check the backend configuration and try again.', task);
       this.clearOverlays(task.tabId);
@@ -1645,24 +1824,31 @@ export class AgentController {
    * Returns true when the answer may be executed.
    */
   async _gateUserAnswer(task, token, answerAction, fieldId, fieldMeta) {
-    const preValidation = defaultActionValidator.validatePreExecution(answerAction, this._lastFusedObservation || {}, task?.taskState);
+    const observation = task?.lastFusedObservation || {};
+    const preValidation = defaultActionValidator.validatePreExecution(answerAction, observation, task?.taskState);
     if (!preValidation.valid) {
       log.warn('User answer failed validation.', { field_id: fieldId, reason: preValidation.reason });
       taskManager.recordStep({
         thought: `The answer for "${fieldId}" no longer matches the page.`,
-        action: answerAction,
+        // User answers may contain PII. Keep only action/target metadata in
+        // task history; never persist the local value or form-plan fields.
+        action: {
+          action: answerAction.action,
+          ...(answerAction.target?.element_id ? { target: { element_id: answerAction.target.element_id } } : {}),
+          user_provided: true
+        },
         success: false,
         error: preValidation.reason
       }, task);
       return false;
     }
 
-    const targetDom = (this._lastFusedObservation?.elements || [])
+    const targetDom = (observation.elements || [])
       .find((element) => element.id === answerAction.target?.element_id)?.dom || null;
     const riskAssessment = defaultRiskGate.evaluate(answerAction, {
       targetElement: answerAction.target,
       targetDom,
-      observationElements: this._lastFusedObservation?.elements || []
+      observationElements: observation.elements || []
     });
 
     if (!riskAssessment.allowed) {

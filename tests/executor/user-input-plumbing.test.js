@@ -162,3 +162,36 @@ test('ActionValidator - ASK_USER requires no target element', () => {
   const res = validator.validatePreExecution({ action: ActionType.ASK_USER }, {});
   assert.equal(res.valid, true);
 });
+
+// --- Navigation policy parity for OPEN_TAB ---------------------------------
+//
+// OPEN_TAB previously reached the content script with only an http(s) regex, so
+// a planner could open a browser-internal or local host that NAVIGATE refuses.
+// The destination policy must not depend on which verb carries it.
+test('OPEN_TAB is held to the same destination policy as NAVIGATE', () => {
+  for (const url of [
+    'chrome://settings',
+    'file:///etc/passwd',
+    'http://localhost:5000',
+    'http://internal.local/admin',
+    'not-a-url'
+  ]) {
+    const v = new ActionValidator();
+    const result = v.validatePreExecution({ action: ActionType.OPEN_TAB, target: { url } });
+    assert.equal(result.valid, false, `OPEN_TAB should refuse ${url}`);
+    assert.match(result.reason, /OPEN_TAB destination rejected/);
+  }
+});
+
+test('OPEN_TAB still allows an ordinary public https destination', () => {
+  const v = new ActionValidator();
+  const result = v.validatePreExecution({ action: ActionType.OPEN_TAB, target: { url: 'https://example.com/results' } });
+  assert.equal(result.valid, true);
+});
+
+test('NAVIGATE destination rejection is reported the same way', () => {
+  const v = new ActionValidator();
+  const result = v.validatePreExecution({ action: ActionType.NAVIGATE, target: { url: 'chrome://settings' } });
+  assert.equal(result.valid, false);
+  assert.match(result.reason, /NAVIGATE destination rejected/);
+});

@@ -46,6 +46,9 @@ test('ObservationFusion - fuses DOM element with overlapping VLM detection by Io
     sensitive: false, is_interactive: true
   }];
   const vlmObs = {
+    grounding_source: 'vision_model',
+    provenance: 'DOM_PLUS_REAL_VLM',
+    detected_elements_provenance: 'REAL_VLM',
     detected_elements: [{ visual_id: 'vis_01', label: 'Submit button', bbox: [100, 200, 150, 40], confidence: 0.97 }],
     spatial_layout: 'single button', visual_state: 'ready'
   };
@@ -71,6 +74,9 @@ test('ObservationFusion - VLM element with no DOM match is VISUAL_ONLY', () => {
   const fusion = new ObservationFusion();
   const domEl = [];
   const vlmObs = {
+    grounding_source: 'vision_model',
+    provenance: 'DOM_PLUS_REAL_VLM',
+    detected_elements_provenance: 'REAL_VLM',
     detected_elements: [{ visual_id: 'vis_99', label: 'Unknown button', bbox: [300, 400, 80, 30], confidence: 0.7 }],
     spatial_layout: 'unknown', visual_state: 'loaded'
   };
@@ -89,12 +95,51 @@ test('ObservationFusion - does not double-match a VLM element', () => {
     { id: 'el_b', tag: 'button', label: 'B', bbox: [105, 103, 48, 28], sensitive: false, is_interactive: true }
   ];
   const vlmObs = {
+    grounding_source: 'vision_model',
+    provenance: 'DOM_PLUS_REAL_VLM',
+    detected_elements_provenance: 'REAL_VLM',
     detected_elements: [{ visual_id: 'vis_x', label: 'Button', bbox: [100, 100, 50, 30], confidence: 0.95 }],
     spatial_layout: 'two buttons', visual_state: 'loaded'
   };
   const fused = fusion.fuse(domEls, vlmObs);
   const matchedCount = fused.elements.filter(e => e.visual?.visual_id === 'vis_x').length;
   assert.equal(matchedCount, 1, 'A VLM element should only be matched once');
+});
+
+test('DOM heuristic annotations are not promoted to fabricated VLM detections', () => {
+  const fusion = new ObservationFusion();
+  const domEl = [{ id: 'el_1', tag: 'button', label: 'Search', bbox: [10, 20, 80, 30], is_interactive: true }];
+  const fused = fusion.fuse(domEl, {
+    grounding_source: 'dom_heuristic',
+    provenance: 'DOM_PLUS_HEURISTIC',
+    detected_elements: [{ visual_id: 'invented', label: 'Search button', bbox: [10, 20, 80, 30], confidence: 0.99 }]
+  });
+
+  assert.equal(fused.provenance, 'DOM_PLUS_HEURISTIC');
+  assert.equal(fused.elements[0].visual, null);
+  assert.equal(fused.elements[0].provenance, 'DOM');
+});
+
+test('canonical fused elements retain semantic state and relationship fields', () => {
+  const fusion = new ObservationFusion();
+  const fused = fusion.fuse([{
+    id: 'el_1', tag: 'select', role: 'combobox', accessible_name: 'Country', label: 'Country',
+    text: 'Country', context: 'Shipping address', placeholder: 'Choose country', title: 'Country selector',
+    type: 'select-one', href: '', bbox: [10, 20, 100, 30], is_visible: true, disabled: false,
+    selected: true, selected_option: { index: 1, text: 'India', value: 'in' },
+    parent_element_id: 'el_2', child_element_ids: ['el_3'], form_id: 'form_1'
+  }], { detected_elements: [] });
+  const element = fused.elements[0];
+
+  assert.equal(element.el_id, 'el_1');
+  assert.equal(element.accessible_name, 'Country');
+  assert.equal(element.nearby_text, 'Shipping address');
+  assert.equal(element.selected_option.value, 'in');
+  assert.equal(element.parent_element_id, 'el_2');
+  assert.deepEqual(element.child_element_ids, ['el_3']);
+  assert.equal(element.form_group_id, 'form_1');
+  assert.equal(element.enabled, true);
+  assert.equal(element.provenance, 'DOM');
 });
 
 test('ObservationFusion - fused elements have interaction object', () => {

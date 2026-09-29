@@ -6,6 +6,7 @@ import { defaultScreenshotService } from '../../extension/perception/screenshot.
 import { defaultScreenshotSanitizer } from '../../extension/privacy/screenshot-sanitizer.js';
 import { defaultVLMClient } from '../../extension/perception/vlm-client.js';
 import { defaultGPTOSSClient } from '../../extension/reasoning/gpt-oss-client.js';
+import { defaultActionExecutor } from '../../extension/executor/action-executor.js';
 import { TaskState, localInterpretTask } from '../../extension/reasoning/task-understanding.js';
 
 function replaceMethod(target, name, value) {
@@ -89,6 +90,8 @@ test('agent skips screenshot work when the sanitized DOM is sufficient', async (
   controller._extractDOM = async () => ({
     success: true,
     data: {
+      snapshot_id: 'snapshot_fast_path',
+      mutation_revision: 0,
       url: 'https://example.test/',
       title: 'Search',
       viewport: { width: 1280, height: 800 },
@@ -112,6 +115,82 @@ test('agent skips screenshot work when the sanitized DOM is sufficient', async (
     assert.equal(visionArgs, undefined);
     assert.equal(task.lastLLMPayload.screenshotStatus, 'skipped');
     assert.equal(task.lastLLMPayload.sampleElements[2].value, '[REDACTED]');
+    assert.equal(task.agentLoopState, 'DONE');
+  } finally {
+    for (const undo of restore.reverse()) undo();
+    taskManager.currentTask = previousTask;
+    taskManager.settings = previousSettings;
+    if (previousChrome === undefined) delete globalThis.chrome;
+    else globalThis.chrome = previousChrome;
+  }
+});
+
+test('controller re-observes and verifies a page change before planning the next action', async () => {
+  const previousChrome = globalThis.chrome;
+  const previousTask = taskManager.currentTask;
+  const previousSettings = taskManager.settings;
+  const restore = [];
+  const pageTitles = ['Continue page', 'Complete page'];
+  let extractionIndex = 0;
+  let planningIndex = 0;
+  const executionContexts = [];
+
+  globalThis.chrome = {
+    tabs: { get: async () => ({ id: 8, url: 'https://example.test/form', windowId: 1 }) }
+  };
+  taskManager.settings = { ...DEFAULT_SETTINGS, alwaysConfirm: false };
+  const task = taskManager.createTask('Click Continue', 8);
+  task.taskState = new TaskState(task.prompt);
+  task.taskState.updateFromModel(localInterpretTask(task.prompt));
+
+  restore.push(replaceMethod(defaultActionExecutor, 'execute', async (_tabId, action, observationContext) => {
+    executionContexts.push(observationContext);
+    return action.action === 'DONE' ? { success: true, isTerminal: true } : { success: true };
+  }));
+  restore.push(replaceMethod(defaultGPTOSSClient, 'planNextStep', async () => {
+    planningIndex++;
+    return planningIndex === 1
+      ? { thought: 'Click the observed Continue button.', action: { action: 'CLICK', target: { element_id: 'el_1' } } }
+      : { thought: 'The page reached its completion state.', action: { action: 'DONE' }, final_response: 'Complete.' };
+  }));
+
+  const controller = new AgentController();
+  controller.notify = () => {};
+  controller.clearOverlays = () => {};
+  controller._waitForPageStability = async () => {};
+  controller._maybeHandleNavigationBootstrap = async () => ({ handled: false });
+  controller._extractDOM = async () => {
+    const title = pageTitles[extractionIndex];
+    const snapshot = `snapshot_${++extractionIndex}`;
+    return {
+      success: true,
+      data: {
+        snapshot_id: snapshot,
+        mutation_revision: 0,
+        url: extractionIndex === 1 ? 'https://example.test/form' : 'https://example.test/complete',
+        title,
+        viewport: { width: 1280, height: 800 },
+        elements: [
+          { id: 'el_1', tag: 'button', type: 'button', label: extractionIndex === 1 ? 'Continue' : 'Start over', value: '', bbox: [10, 10, 100, 30] },
+          { id: 'el_2', tag: 'button', type: 'button', label: 'Help', value: '', bbox: [10, 50, 60, 30] },
+          { id: 'el_3', tag: 'a', type: 'link', label: 'Home', value: '', href: '/', bbox: [10, 90, 60, 30] }
+        ],
+        headings: [], result_items: [],
+        visible_text: 'A stable test page with enough visible content for DOM-first observation. '.repeat(4),
+        scroll: { x: 0, y: 0 }
+      }
+    };
+  };
+
+  try {
+    assert.equal(await controller.runSingleStep(task), true);
+    assert.equal(task.pendingVerification?.stepNumber, 1);
+    assert.equal(await controller.runSingleStep(task), false);
+    assert.equal(extractionIndex, 2);
+    assert.equal(executionContexts[0].snapshotId, 'snapshot_1');
+    assert.equal(task.steps[0].diagnostic.post_action_verification.status, 'OBSERVED_STATE_CHANGE');
+    assert.equal(task.lastVerification.visible_state_changed, true);
+    assert.equal(task.agentLoopState, 'DONE');
   } finally {
     for (const undo of restore.reverse()) undo();
     taskManager.currentTask = previousTask;

@@ -19,8 +19,48 @@ export const DEFAULT_SETTINGS = Object.freeze({
   backendToken: '',
   maxSteps: 25,
   alwaysConfirm: true,
-  showDebug: false
+  showDebug: false,
+  // The backend URL is the single largest egress surface in the extension: it
+  // decides where the sanitized-but-still-sensitive page context is sent. This
+  // project is loopback-only by design (the Python side forces HOST to
+  // 127.0.0.1), so a non-loopback backend is refused unless the user opts in
+  // explicitly. See validateBackendUrl().
+  allowRemoteBackend: false
 });
+
+/**
+ * Validate a user-supplied backend URL.
+ *
+ * Returns { valid, reason, url }. Rejects non-http(s) schemes outright, and
+ * refuses a non-loopback host unless the user has explicitly enabled remote
+ * backends. This is the symmetric counterpart to the server's own loopback
+ * enforcement: without it, a mistyped or edited setting silently redirects
+ * every sanitized observation to an arbitrary host.
+ */
+export function validateBackendUrl(rawUrl, { allowRemote = false } = {}) {
+  const value = String(rawUrl ?? '').trim();
+  if (!value) return { valid: false, reason: 'Backend URL is empty.', url: null };
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return { valid: false, reason: 'Backend URL is not a valid URL.', url: null };
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return { valid: false, reason: 'Backend URL must use http or https.', url: null };
+  }
+  const host = parsed.hostname.toLowerCase();
+  const loopback = host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]'
+    || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+  if (!loopback && !allowRemote) {
+    return {
+      valid: false,
+      reason: `Refusing a non-loopback backend (${host}). This agent sends page context to its backend; enable "Allow a remote backend" in Settings if you really intend that.`,
+      url: null
+    };
+  }
+  return { valid: true, reason: null, url: value.replace(/\/+$/, '') };
+}
 
 /** Map raw technical failures to helpful user-facing messages. Never leaks secrets. */
 export function friendlyError(rawMessage) {
@@ -85,6 +125,15 @@ export function friendlyError(rawMessage) {
         ? `A local privacy check detected a possible ${detected} in page context and blocked the request.`
         : 'A local privacy check blocked a request that may contain sensitive information.',
       hint: 'The blocked request was not sent. Check the page context and retry, or continue manually. The value itself was not shown.'
+    };
+  }
+  if (low.includes('not authenticated with the backend') || low.includes('not authenticated with the local backend')) {
+    // The message is already the actionable instruction. friendlyError would
+    // otherwise replace it with the generic default, which is exactly the
+    // "error with no clue" experience this branch exists to prevent.
+    return {
+      error: String(rawMessage),
+      hint: 'Open the side panel Settings, paste the value of BACKEND_SHARED_SECRET from your .env into "Backend access token", save, then start the task again.'
     };
   }
   if (low.includes('local credential') || low.includes('not configured')) {
@@ -156,6 +205,16 @@ export class TaskManager {
     this.settings = { ...this.settings, ...(patch || {}) };
     this.settings.maxSteps = Math.min(50, Math.max(1, Number(this.settings.maxSteps) || DEFAULT_SETTINGS.maxSteps));
     const token = typeof patch?.backendToken === 'string' ? patch.backendToken.trim() : null;
+    // Refuse to persist a backend URL that would move page context off-device.
+    // Validation runs before any write so a rejected value leaves the previous
+    // working URL in place rather than half-applying the patch.
+    if (typeof patch?.backendUrl === 'string') {
+      const check = validateBackendUrl(patch.backendUrl, {
+        allowRemote: patch.allowRemoteBackend === true || this.settings.allowRemoteBackend === true
+      });
+      if (!check.valid) throw new Error(check.reason);
+      this.settings.backendUrl = check.url;
+    }
     try {
       if (typeof chrome !== 'undefined' && chrome.storage?.local) {
         if (token !== null) {
@@ -165,6 +224,7 @@ export class TaskManager {
         }
         // Never write the token into the settings record.
         const { backendToken, ...persisted } = this.settings;
+        persisted.allowRemoteBackend = this.settings.allowRemoteBackend === true;
         this.settings.backendToken = backendToken;
         await chrome.storage.local.set({ [SETTINGS_STORAGE_KEY]: persisted });
       }
@@ -484,6 +544,7 @@ export class TaskManager {
             privacyMetrics: latest.privacyMetrics,
             lastLLMPayload: latest.lastLLMPayload || null,
             taskIntent: latest.taskIntent || null,
+            agentLoopState: latest.agentLoopState || null,
             startTime: latest.startTime,
             endTime: latest.endTime || null,
             // Heartbeat: written on every persist so a restore can tell a task

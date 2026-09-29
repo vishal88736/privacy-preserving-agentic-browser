@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { AgentController, latestConfirmationReview, plannerStepMetadata } from '../../extension/background/agent-controller.js';
-import { taskManager } from '../../extension/background/task-manager.js';
+import { taskManager, friendlyError } from '../../extension/background/task-manager.js';
 import { GPTOSSClient } from '../../extension/reasoning/gpt-oss-client.js';
 import { ActionType } from '../../extension/shared/constants.js';
 
@@ -150,4 +150,24 @@ test('planner plan and feedback recorded at step N return in step N+1 history', 
   assert.equal(sentBody.task_history[0].plan, 'Search the catalog and inspect a result.');
   assert.equal(sentBody.task_history[0].planner_feedback, 'The query was entered successfully.');
   assert.equal(sentBody.task_history[0].terminate_assessment, false);
+});
+
+test('a backend 401 is reported as an auth fault with the real fix, not a generic outage', () => {
+  // The most common first-run failure. Before this, a 401 surfaced as "The AI
+  // planner is temporarily unavailable", which sent users hunting for a
+  // backend that was running perfectly.
+  const client = new GPTOSSClient('http://127.0.0.1:8000');
+  const rejection = client._backendAuthRejected(401);
+  assert.equal(rejection.authRejected, true);
+  assert.equal(rejection.plannerUnavailable, undefined);
+  assert.match(rejection.thought, /rejected this extension's access token/i);
+  assert.match(rejection.thought, /not authenticated/i);
+  assert.equal(rejection.action.action, 'WAIT');
+});
+
+test('friendlyError keeps the auth instruction instead of the generic default', () => {
+  const message = 'The extension is not authenticated with the backend. Open Settings and paste the BACKEND_SHARED_SECRET value from your .env into "Backend access token", then save.';
+  const { error, hint } = friendlyError(message);
+  assert.match(error, /BACKEND_SHARED_SECRET/);
+  assert.match(hint, /Backend access token/);
 });

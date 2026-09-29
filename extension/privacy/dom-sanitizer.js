@@ -221,6 +221,11 @@ export class DOMSanitizer {
       sanitized.placeholder = this.scrubPlaceholderText(sanitized.placeholder, fieldContext);
       if (sanitized.label) sanitized.label = this.scrubPlaceholderText(sanitized.label, sanitized.name || '');
       if (sanitized.ariaLabel) sanitized.ariaLabel = this.sanitizeUserPrompt(sanitized.ariaLabel);
+      sanitized.accessible_name = this.sanitizeUserPrompt(
+        sanitized.label || sanitized.ariaLabel || sanitized.accessible_name || ''
+      );
+      sanitized.text = this.sanitizeUserPrompt(String(sanitized.text || '')).slice(0, 180);
+      sanitized.title = this.sanitizeUserPrompt(String(sanitized.title || '')).slice(0, 180);
       if (sanitized.ariaDescribedBy) sanitized.ariaDescribedBy = this.sanitizeUserPrompt(sanitized.ariaDescribedBy);
       if (sanitized.fieldset_legend) sanitized.fieldset_legend = this.sanitizeUserPrompt(sanitized.fieldset_legend);
       if (sanitized.context) sanitized.context = this.sanitizeUserPrompt(sanitized.context);
@@ -246,6 +251,18 @@ export class DOMSanitizer {
           }
           return o;
         });
+      }
+      if (sanitized.selected_option && typeof sanitized.selected_option === 'object') {
+        const selected = Array.isArray(sanitized.options)
+          ? sanitized.options.find((option) => option && typeof option === 'object' && option.selected)
+          : null;
+        sanitized.selected_option = selected
+          ? { index: sanitized.selected_option.index, text: selected.text || '', value: selected.value || '' }
+          : {
+              index: sanitized.selected_option.index,
+              text: this.sanitizeUserPrompt(String(sanitized.selected_option.text || '')),
+              value: this.sanitizeUserPrompt(String(sanitized.selected_option.value || ''))
+            };
       }
 
       // 5. Clean up any internal raw references

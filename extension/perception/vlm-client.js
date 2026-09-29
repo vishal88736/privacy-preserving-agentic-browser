@@ -8,6 +8,7 @@ import { ServerDefaults } from '../shared/constants.js';
 import { validateVisionPayload } from '../shared/schemas.js';
 import { createLogger } from '../shared/logger.js';
 import { defaultPolicyEngine } from '../privacy/policy-engine.js';
+import { hasRealVlmDetections, normalizePerceptionProvenance, PerceptionProvenance } from './provenance.js';
 
 const log = createLogger({ scope: 'VLMClient', surface: 'background' });
 
@@ -83,15 +84,19 @@ export class VLMClient {
       }
 
       const data = await response.json();
-      const obs = data.visual_observation || data;
-      // Provenance honesty: the server falls back to a DOM-echo heuristic
-      // when no vision model responds. Never label that "remote-vlm" —
-      // downstream fusion must know it is not visual proof.
-      obs._source = obs?.provenance || (obs?.grounding_source === 'vision_model' ? 'DOM_PLUS_REAL_VLM' : 'DOM_PLUS_HEURISTIC');
+      const rawObservation = data?.visual_observation || data;
+      const obs = rawObservation && typeof rawObservation === 'object' ? rawObservation : {};
+      // Keep one canonical label. A DOM-derived layout summary is useful
+      // reasoning context, but it is not a visual detection. The backend must
+      // explicitly identify both the VLM source and any screenshot-derived
+      // detection list before fusion can treat boxes as visual evidence.
+      obs.provenance = normalizePerceptionProvenance(obs);
+      obs._source = obs.provenance;
+      if (!hasRealVlmDetections(obs)) obs.detected_elements = [];
       obs.remoteCallAttempted = true;
       obs.model_trace ||= {
         component: 'vision',
-        source: obs._source === 'DOM_PLUS_REAL_VLM' ? 'remote' : 'dom_heuristic',
+        source: obs._source === PerceptionProvenance.REAL_VLM ? 'remote' : 'dom_heuristic',
         provider: null,
         model: null
       };
@@ -100,6 +105,7 @@ export class VLMClient {
       log.exception('Remote VLM request failed; using local visual inference', err);
       const fallback = this._domOnlyObservation(sanitizedDom);
       fallback._source = 'DOM_ONLY';
+      fallback.provenance = PerceptionProvenance.DOM_ONLY;
       fallback.model_trace = { component: 'vision', source: 'dom_only', provider: null, model: null };
       fallback._error = String(err?.message || err).slice(0, 200);
       fallback.remoteCallAttempted = true;
@@ -115,6 +121,7 @@ export class VLMClient {
   domOnlyObservation(sanitizedDom, errorNote = null) {
     const fallback = this._domOnlyObservation(sanitizedDom);
     fallback._source = 'DOM_ONLY';
+    fallback.provenance = PerceptionProvenance.DOM_ONLY;
     fallback.model_trace = { component: 'vision', source: 'dom_only', provider: null, model: null };
     fallback.remoteCallAttempted = false;
     if (errorNote) fallback._error = String(errorNote).slice(0, 200);
@@ -144,7 +151,7 @@ export class VLMClient {
 
     return {
       detected_elements: [],
-      provenance: 'DOM_ONLY',
+      provenance: PerceptionProvenance.DOM_ONLY,
       page_type,
       page_purpose: `DOM classification only: likely a ${page_type.replace(/_/g, ' ')} page.`,
       spatial_layout: null,

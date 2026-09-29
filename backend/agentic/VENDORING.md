@@ -13,9 +13,9 @@ The four Python files under `_upstream/` are reference material only. Each begin
 
 | Upstream file at pinned commit | Use in this repository | Upstream payload SHA-256 | Vendored file | Vendored file SHA-256 |
 | :--- | :--- | :--- | :--- | :--- |
-| `core/agents/planner_agent.py` | Adapted as `planner.py`, `prompts.py`, and `schemas.py` | `eda1970a3e2cf22f075dc4af7746ec67c323cfb8b4febe51f045fa5563cba5d5` | [`_upstream/planner_agent.py`](_upstream/planner_agent.py) | `2064f8237f76295d23c1027e2da56e8d9f55e78a7a9766e23368f2aa2a977fac` |
+| `core/agents/planner_agent.py` | Adapted as `prompts.py` and `schemas.py` (the separate `planner.py` role module was later removed as unreachable) | `eda1970a3e2cf22f075dc4af7746ec67c323cfb8b4febe51f045fa5563cba5d5` | [`_upstream/planner_agent.py`](_upstream/planner_agent.py) | `2064f8237f76295d23c1027e2da56e8d9f55e78a7a9766e23368f2aa2a977fac` |
 | `core/agents/browser_agent.py` | Reference only; Playwright tools are excluded | `a34f4b370b1ee85476620b6203b34b769f91eda329ce6af0634abc058708c44a` | [`_upstream/browser_agent.py`](_upstream/browser_agent.py) | `e54b6d0e45addaff66266bab51f60777f3db8f1d3253ec5d5775ce2422981697` |
-| `core/agents/critique_agent.py` | Adapted as `critic.py`, `prompts.py`, and `schemas.py` | `1a034eb300fc3f0a23c3844d2b820bf1d7dc4463184bf2c7a9e432f3371be478` | [`_upstream/critique_agent.py`](_upstream/critique_agent.py) | `1eaf9ab8508c951022a7e5b47b6e53966b789d5eae3cae9c0d9b94a2edf92358` |
+| `core/agents/critique_agent.py` | Adapted as `prompts.py` and `schemas.py` (the separate `critic.py` role module was later removed as unreachable) | `1a034eb300fc3f0a23c3844d2b820bf1d7dc4463184bf2c7a9e432f3371be478` | [`_upstream/critique_agent.py`](_upstream/critique_agent.py) | `1eaf9ab8508c951022a7e5b47b6e53966b789d5eae3cae9c0d9b94a2edf92358` |
 | `core/orchestrator.py` | Adapted as `orchestrator.py`; loop moved to the extension | `84e75681ac2331052549bebd323e47dd99397977ea043eb23160d46b858307a2` | [`_upstream/orchestrator.py`](_upstream/orchestrator.py) | `c54677f398422d04773aefc3962b3fd57d08a29d74c18e7237bb206bc29487ce` |
 | `LICENSE` | License text copied verbatim | `38671919a401868fd74740fec135459aa2b56a38be7c3dd62badff707729ab34` | [`LICENSE.TheAgentic`](LICENSE.TheAgentic) | `38671919a401868fd74740fec135459aa2b56a38be7c3dd62badff707729ab34` |
 

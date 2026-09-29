@@ -47,7 +47,9 @@ test('VLM request receives the masked screenshot and redacted DOM value', async 
   let sent;
   globalThis.fetch = async (_url, init) => {
     sent = JSON.parse(init.body);
-    return { ok: true, json: async () => ({ visual_observation: { provenance: 'DOM_PLUS_REAL_VLM', detected_elements: [] } }) };
+    return { ok: true, json: async () => ({ visual_observation: {
+      provenance: 'DOM_PLUS_REAL_VLM', grounding_source: 'vision_model', detected_elements: []
+    } }) };
   };
   try {
     const client = new VLMClient('http://localhost:8000');
@@ -62,7 +64,7 @@ test('VLM request receives the masked screenshot and redacted DOM value', async 
     assert.notEqual(sent.sanitized_screenshot, raw);
     assert.equal(sent.sanitized_dom.elements[0].value, '[REDACTED]');
     assert.ok(sent.redaction_audit, 'the request must carry the screenshot redaction attestation');
-    assert.equal(result._source, 'DOM_PLUS_REAL_VLM');
+    assert.equal(result._source, 'REAL_VLM');
   } finally { globalThis.fetch = originalFetch; }
 });
 

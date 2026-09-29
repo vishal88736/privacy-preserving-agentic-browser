@@ -57,12 +57,18 @@
     CHECK_PAGE_STABILITY: 'CHECK_PAGE_STABILITY'
   };
 
+  const OBSERVATION_BOUND_ACTIONS = new Set([
+    'CLICK', 'TYPE', 'SELECT', 'CHECK', 'UNCHECK', 'HOVER', 'UPLOAD', 'SUBMIT',
+    'FILL_FORM_PLAN', 'SCROLL', 'PRESS_KEY', 'EXTRACT'
+  ]);
+
   // 1. Element Registry
   class ElementRegistry {
     constructor() {
       this.idToElement = new Map();
       this.elementToId = new WeakMap();
       this.counter = 1;
+      this.snapshotId = null;
     }
 
     clear() {
@@ -72,6 +78,7 @@
       // and every lookup after the first extraction returns null.
       this.elementToId = new WeakMap();
       this.counter = 1;
+      this.snapshotId = null;
     }
 
     register(element) {
@@ -86,6 +93,10 @@
 
     getElement(id) {
       return this.idToElement.get(id) || null;
+    }
+
+    getId(element) {
+      return element && this.elementToId.has(element) ? this.elementToId.get(element) : null;
     }
   }
 
@@ -254,6 +265,16 @@
 
     extractPageElements() {
       registry.clear();
+      const snapshotId = globalThis.crypto?.randomUUID?.() ||
+        `obs_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+      registry.snapshotId = snapshotId;
+      const formGroupIds = new WeakMap();
+      let nextFormGroup = 1;
+      const getFormGroupId = (form) => {
+        if (!form) return null;
+        if (!formGroupIds.has(form)) formGroupIds.set(form, `form_${nextFormGroup++}`);
+        return formGroupIds.get(form);
+      };
       // Prioritized passes: form controls first, then buttons, then links —
       // so form fields are never dropped on complex pages even at the cap.
       // DOM order within each pass is preserved.
@@ -312,11 +333,14 @@
 
         extracted.push({
           id,
+          _node: node,
           tag,
           type: node.type || '',
           name: node.name || '',
           label,
           accessible_name: label,
+          text: String(node.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 180),
+          title: String(node.title || '').slice(0, 180),
           placeholder: node.placeholder || '',
           value: node.value || '',
           autocomplete: node.autocomplete || '',
@@ -327,7 +351,10 @@
           href: node.getAttribute('href') || '',
           disabled: Boolean(node.disabled),
           in_form: Boolean(node.form),
-          form_id: node.form?.id || null,
+          // Never forward page-authored form IDs. A form can encode account or
+          // session data in its id; this local ordinal is enough to model
+          // relationships between controls.
+          form_id: getFormGroupId(node.form),
           // Required-ness drives whether a field gets a vault value at all. A
           // page can mark any field required, so this is treated as a planning
           // hint and never as authorisation on its own — but without it the
@@ -335,6 +362,16 @@
           // "there is an optional marketing field here".
           required: Boolean(node.required || node.getAttribute('aria-required') === 'true'),
           checked: Boolean(node.checked),
+          selected: tag === 'select'
+            ? Boolean(node.options?.[node.selectedIndex]?.selected)
+            : Boolean(node.selected),
+          selected_option: tag === 'select' && node.selectedIndex >= 0
+            ? {
+                index: node.selectedIndex,
+                text: String(node.options?.[node.selectedIndex]?.text || '').trim(),
+                value: String(node.options?.[node.selectedIndex]?.value || '').trim()
+              }
+            : null,
           context,
           price_value,
           options,
@@ -344,10 +381,33 @@
         });
       }
 
+      const extractedIds = new Set(extracted.map((element) => element.id));
+      const childrenByParent = new Map();
+      for (const element of extracted) {
+        let ancestor = element._node?.parentElement || null;
+        let parentId = null;
+        while (ancestor && !parentId) {
+          const candidate = registry.getId(ancestor);
+          if (candidate && extractedIds.has(candidate)) parentId = candidate;
+          ancestor = ancestor.parentElement;
+        }
+        element.parent_element_id = parentId;
+        if (parentId) {
+          if (!childrenByParent.has(parentId)) childrenByParent.set(parentId, []);
+          childrenByParent.get(parentId).push(element.id);
+        }
+      }
+      for (const element of extracted) {
+        element.child_element_ids = (childrenByParent.get(element.id) || []).slice(0, 20);
+        delete element._node;
+      }
+
       const main = document.querySelector('main, [role="main"], #content, .content') || document.body;
       const visible_text = String(main?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 4000);
 
       return {
+        snapshot_id: snapshotId,
+        mutation_revision: stabilityObserver.revision,
         url: window.location.href,
         title: document.title || 'Untitled Document',
         viewport: {
@@ -461,6 +521,10 @@
       root.appendChild(highlight);
 
       (document.documentElement || document.body).appendChild(host);
+      // The page stability observer watches documentElement so it can detect a
+      // replaced body. Keep our closed-shadow overlay out of the observation
+      // revision; otherwise the agent would invalidate its own click target.
+      stabilityObserver.ignoreNode(host);
       this._host = host;
       this._root = root;
       this.cursorEl = cursor;
@@ -519,13 +583,15 @@
   class PageStabilityObserver {
     constructor() {
       this.lastMutationTime = Date.now();
+      this.revision = 0;
       this.observer = null;
+      this.ignoredNodes = new WeakSet();
       this._startObserving();
     }
 
     _startObserving() {
       if (typeof MutationObserver === 'undefined') return;
-      const target = (typeof document !== 'undefined') ? (document.body || document.documentElement) : null;
+      const target = (typeof document !== 'undefined') ? (document.documentElement || document.body) : null;
       if (!target) {
         if (typeof window !== 'undefined' && window.addEventListener) {
           window.addEventListener('DOMContentLoaded', () => this._startObserving(), { once: true });
@@ -535,8 +601,17 @@
       if (this.observer) {
         try { this.observer.disconnect(); } catch {}
       }
-      this.observer = new MutationObserver(() => {
-        this.lastMutationTime = Date.now();
+      this.observer = new MutationObserver((records) => {
+        const changed = Array.from(records || []).some((record) => {
+          if (this.ignoredNodes.has(record.target)) return false;
+          if (record.type !== 'childList') return true;
+          const nodes = [...Array.from(record.addedNodes || []), ...Array.from(record.removedNodes || [])];
+          return nodes.some((node) => !this.ignoredNodes.has(node));
+        });
+        if (changed) {
+          this.lastMutationTime = Date.now();
+          this.revision += 1;
+        }
       });
       try {
         this.observer.observe(target, { childList: true, subtree: true, attributes: true, characterData: true });
@@ -545,6 +620,10 @@
 
     markAction() {
       this.lastMutationTime = Date.now();
+    }
+
+    ignoreNode(node) {
+      if (node && typeof node === 'object') this.ignoredNodes.add(node);
     }
 
     async waitForStability(quietMs = 120, timeoutMs = 1500) {
@@ -564,8 +643,23 @@
 
   // 5. Browser Action Executor
   class BrowserExecutor {
+    _assertFreshObservation(context) {
+      if (!context || context.snapshotId !== registry.snapshotId ||
+          !Number.isInteger(context.mutationRevision) ||
+          context.mutationRevision !== stabilityObserver.revision) {
+        throw new Error('The page changed after this observation. Re-observe and ground the action again.');
+      }
+    }
+
     async execute(actionPayload) {
       const { action, target, resolvedValue, coordinates } = actionPayload;
+
+      // Positional element IDs are scoped to one content-script snapshot. A
+      // DOM mutation, navigation, or user-confirmation delay invalidates the
+      // plan so the background must observe and ground the page again.
+      if (OBSERVATION_BOUND_ACTIONS.has(action)) {
+        this._assertFreshObservation(actionPayload.observationContext);
+      }
 
       let targetElement = null;
       if (target?.element_id) {
@@ -593,6 +687,7 @@
         await this.sleep(SCROLL_SETTLE_MS);
         const settled = registry.getElement(target.element_id);
         if (settled && settled.isConnected) targetElement = settled;
+        if (OBSERVATION_BOUND_ACTIONS.has(action)) this._assertFreshObservation(actionPayload.observationContext);
       }
 
       switch (action) {
@@ -636,7 +731,7 @@
 
         case 'FILL_FORM_PLAN': {
           const plan = resolvedValue?.fields ? resolvedValue : resolvedValue?.value?.fields ? resolvedValue.value : actionPayload.value?.fields ? actionPayload.value : null;
-          return this._executeFormPlan(plan);
+          return this._executeFormPlan(plan, actionPayload.observationContext);
         }
 
         case 'EXTRACT': {
@@ -925,7 +1020,7 @@
      * a field, the field is reported as unresolvable rather than being guessed
      * at from page-controlled attributes.
      */
-    async _executeFormPlan(plan) {
+    async _executeFormPlan(plan, observationContext) {
       const fields = plan?.fields || [];
       if (!fields.length) throw new Error('Form plan has no fields to fill');
       const details = [];
@@ -950,6 +1045,15 @@
 
       // Phase 2: fill, reusing the references captured above.
       for (const item of resolved) {
+        try {
+          this._assertFreshObservation(observationContext);
+        } catch (error) {
+          details.push({ field: item.field.field_id, success: false, reason: error.message });
+          for (const pending of resolved.slice(details.length)) {
+            if (pending.field?.field_id) details.push({ field: pending.field.field_id, success: false, reason: error.message });
+          }
+          break;
+        }
         if (!item.el) {
           details.push({ field: item.field.field_id, success: false, reason: item.reason });
           continue;

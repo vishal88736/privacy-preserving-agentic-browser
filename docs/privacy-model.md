@@ -22,6 +22,10 @@ Untrusted page
 
 OCR text is used transiently for local pattern matching and is discarded before the side panel sends analysis results back to the background. Only object labels, categories, counts, confidences, boxes, and performance measurements are retained. The reasoning backend receives the sanitized task and page context. The vision backend receives a sanitized screenshot with sanitized DOM only when the image passes local checks. If screenshot capture, OCR, or object detection fails, the image is withheld and the task continues from sanitized DOM evidence.
 
+Every outbound model request is made by one of two clients: `extension/perception/vlm-client.js` for `/vision` and `extension/reasoning/gpt-oss-client.js` for `/interpret` and `/reason`. Both enforce the shared outbound policy immediately before the request. Local model asset reads use extension-packaged URLs with remote model loading disabled; no runtime model download is configured.
+
+The content script attaches an opaque snapshot ID and mutation revision to every observation-bound action. The content executor checks that pair before interacting and after scrolling a target into view. If the page changes while the server reasons or while confirmation is pending, the action is refused and the controller observes and grounds again. Multi-field form actions stop when a mutation makes the remaining observation stale.
+
 The backend-driven `/agent` browser automation path is retired. The backend accepts model API requests only from Chrome/Firefox extension origins and binds to loopback by default. This limits browser-page access; it is not protection against another local process or a compromised extension.
 
 ## Detection coverage
@@ -61,11 +65,14 @@ Real local-document selection is not implemented. A `LOCAL_DOCUMENT` action fail
 
 ## Visual provenance
 
-Each observation reports one of:
+Each fused observation reports one canonical provenance value:
 
-- `DOM_ONLY`: the server VLM request failed; local object/OCR checks still ran, with no server VLM result claimed.
-- `DOM_PLUS_HEURISTIC`: the backend derived a layout summary from sanitized DOM without server VLM detections.
-- `DOM_PLUS_REAL_VLM`: a configured remote vision model returned a result.
+- `DOM_ONLY`: no real remote VLM result was used.
+- `DOM_PLUS_HEURISTIC`: the backend derived a layout summary from sanitized DOM without screenshot-derived element detections.
+- `REAL_VLM`: a configured remote vision model returned visual analysis. Fusion admits element boxes only if the response also sets `detected_elements_provenance` to `REAL_VLM`.
+- `LOCAL_MODEL`: identifies packaged local perception metadata; it does not claim remote VLM output.
+
+The current VLM service does not produce screenshot-derived control boxes. Its DOM annotations remain `DOM` provenance, and its heuristic cannot be promoted to visual evidence. A remote VLM failure retains `DOM_ONLY` provenance.
 
 The controller captures screenshots only when visual evidence is needed. A captured image must pass the local vision and redaction checks before it is eligible for the VLM endpoint; otherwise the controller reasons from sanitized DOM without sending an image. A DOM heuristic fallback may be used when no server vision model responds. This guarantee assumes the installed extension is trusted and unmodified. The backend cannot independently prove that an image has been visually redacted; arbitrary local callers and compromised extensions are outside this boundary.
 

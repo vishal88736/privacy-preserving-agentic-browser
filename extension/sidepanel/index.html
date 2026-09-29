@@ -687,6 +687,13 @@
           </div>
           <input type="checkbox" id="settings-debug" class="styled-checkbox">
         </label>
+        <label class="toggle-card">
+          <div class="toggle-info">
+            <span class="toggle-title">Allow a remote backend</span>
+            <span class="toggle-sub">Sends sanitized page context off this device. Off by default.</span>
+          </div>
+          <input type="checkbox" id="settings-allow-remote" class="styled-checkbox">
+        </label>
         <!--
           The log export lives here as well as in the diagnostics panel: the
           panel is hidden unless the toggle above is on, and "download the error
@@ -719,6 +726,8 @@
           <span class="about-val">Zero Outbound Secret Exfiltration</span>
         </div>
       </div>
+
+      <p id="settings-error" class="muted small" style="color:#ef4444;margin:0 0 10px" hidden></p>
 
       <div class="modal-actions">
         <button id="save-settings-btn" class="btn btn-primary" style="width:100%">Save settings</button>

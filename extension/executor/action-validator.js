@@ -6,6 +6,7 @@
 
 import { ActionType } from '../shared/constants.js';
 import { SemanticType } from '../perception/semantic-capability.js';
+import { validateNavigationUrl } from '../navigation/navigation.js';
 
 // L4: Actions that do NOT require a target element_id and should bypass target validation
 const TARGET_OPTIONAL_ACTIONS = new Set([
@@ -43,6 +44,23 @@ export class ActionValidator {
   validatePreExecution(action, fusedObservation = {}, taskState = null) {
     const availableElements = fusedObservation.elements || [];
     const formState = fusedObservation.form_state || { completion: { empty: 0 } };
+
+    // A destination URL is a navigation decision whichever verb carries it.
+    // OPEN_TAB previously reached the content script with only a scheme regex,
+    // so it could open a browser-internal or local host that NAVIGATE refuses
+    // — the same policy, two outcomes. Both are checked here now.
+    if (action.action === ActionType.OPEN_TAB || action.action === ActionType.NAVIGATE) {
+      const url = action.target?.url ?? action.value;
+      if (typeof url === 'string' && url.trim()) {
+        const check = validateNavigationUrl(url.trim());
+        if (!check.valid) {
+          return {
+            valid: false,
+            reason: `${action.action} destination rejected: ${check.reason}`
+          };
+        }
+      }
+    }
 
     if (action.action === ActionType.FILL_FORM_PLAN) {
       const seen = new Set();
@@ -132,11 +150,41 @@ export class ActionValidator {
           reason: `Target element "${action.target.element_id}" is no longer present on the page (stale DOM).`
         };
       }
-      if (match.dom?.disabled) {
+      if (match.actionable === false) {
+        return {
+          valid: false,
+          reason: `Target element "${action.target.element_id}" has no local browser target and cannot be executed.`
+        };
+      }
+      if (match.visible === false || match.dom?.is_visible === false) {
+        return {
+          valid: false,
+          reason: `Target element "${action.target.element_id}" is not visible in the current observation.`
+        };
+      }
+      if (match.dom?.disabled || match.enabled === false) {
         return {
           valid: false,
           reason: `Target element "${action.target.element_id}" is currently disabled.`
         };
+      }
+
+      const domTag = String(match.dom?.tag || match.tag || '').toLowerCase();
+      const domType = String(match.dom?.type || match.input_type || '').toLowerCase();
+      const semanticType = String(match.semantics?.semantic_type || match.semantic_action_type || '').toUpperCase();
+      if (action.action === ActionType.SELECT && domTag !== 'select') {
+        return { valid: false, reason: `SELECT requires a native select element; target "${action.target.element_id}" is ${domTag || 'unknown'}.` };
+      }
+      if ([ActionType.CHECK, ActionType.UNCHECK].includes(action.action) &&
+          !(['checkbox', 'radio'].includes(domType) || ['checkbox', 'radio'].includes(String(match.dom?.role || '').toLowerCase()))) {
+        return { valid: false, reason: `${action.action} requires a checkbox or radio control.` };
+      }
+      if (action.action === ActionType.UPLOAD && domType !== 'file') {
+        return { valid: false, reason: 'UPLOAD requires a file input element.' };
+      }
+      if (action.action === ActionType.SUBMIT &&
+          domTag !== 'form' && domType !== 'submit' && semanticType !== SemanticType.SUBMIT) {
+        return { valid: false, reason: 'SUBMIT requires a form or submit control from the current observation.' };
       }
 
       // ── HARD SEMANTIC COMPATIBILITY GATE ──
@@ -144,7 +192,7 @@ export class ActionValidator {
       // site-specific rules) contradict the requested action is rejected
       // deterministically: re-observe → re-ground → re-plan, never execute
       // the guessed action.
-      const semType = String(match.semantics?.semantic_type || '').toUpperCase();
+      const semType = semanticType;
       if (semType) {
         if (action.action === ActionType.TYPE && SEMANTIC_TYPE_CONFLICTS.TYPE.has(semType)) {
           return {

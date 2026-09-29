@@ -58,6 +58,28 @@ export class GPTOSSClient {
    * The thought names the failure plainly so the user-facing error says
    * "AI service unavailable" instead of something cryptic.
    */
+  /**
+   * The backend rejected our credentials (401/403).
+   *
+   * This is a settings fault in the side panel, not a service outage, and it
+   * is by far the most common first-run failure. It gets its own flag and its
+   * own message so the user is told to paste the token rather than to restart
+   * a backend that is already healthy.
+   */
+  _backendAuthRejected(status) {
+    return {
+      task_understanding: { intent: 'unknown', constraints: [] },
+      page_understanding: { page_type: 'unknown' },
+      thought: `The backend rejected this extension's access token (HTTP ${status}). The backend is running; the extension is not authenticated.`,
+      action: { action: ActionType.WAIT, risk: RiskLevel.LOW, requires_confirmation: false },
+      isTerminal: false,
+      authRejected: true,
+      remoteCallMade: false,
+      remoteCallAttempted: true,
+      model_trace: { component: 'reasoning', source: 'unauthenticated', provider: null, model: null, planner: 'auth_rejected', reason: `http_${status}` }
+    };
+  }
+
   _plannerUnavailable(cause) {
     const detail = cause?.message || cause || 'unknown error';
     return {
@@ -104,7 +126,10 @@ export class GPTOSSClient {
       this.policyEngine.enforceOutboundSafety(payload);
       remoteCallAttempted = true;
       const response = await this.post('/interpret', payload);
-      if (!response.ok) throw new Error(`Interpret returned ${response.status}`);
+      if (!response.ok) {
+        if (response.status === 401 || response.status === 403) return { ...UNKNOWN_INTERPRETATION, authRejected: true };
+        throw new Error(`Interpret returned ${response.status}`);
+      }
       const data = await response.json();
       if (!data || data.intent === 'unknown') {
         return { ...UNKNOWN_INTERPRETATION, remoteCallAttempted };
@@ -188,6 +213,13 @@ export class GPTOSSClient {
       const response = await this.post(ServerDefaults.REASON_ENDPOINT, payload);
 
       if (!response.ok) {
+        // 401/403 are configuration faults, not outages. They are separated
+        // here so the task can name the real fix instead of reporting a
+        // generic "planner unavailable" that sends the user hunting for a
+        // server that is running perfectly well.
+        if (response.status === 401 || response.status === 403) {
+          return this._backendAuthRejected(response.status);
+        }
         throw new Error(`Reasoning server returned status: ${response.status} ${response.statusText}`);
       }
 

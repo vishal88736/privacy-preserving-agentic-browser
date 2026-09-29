@@ -12,6 +12,11 @@ import { defaultLocalValueResolver } from './local-value-resolver.js';
 
 const log = createLogger({ scope: 'ActionExecutor', surface: 'background' });
 const CHROME_API_TIMEOUT_MS = 10000;
+const OBSERVATION_BOUND_ACTIONS = new Set([
+  ActionType.CLICK, ActionType.TYPE, ActionType.SELECT, ActionType.CHECK, ActionType.UNCHECK,
+  ActionType.HOVER, ActionType.UPLOAD, ActionType.SUBMIT, ActionType.FILL_FORM_PLAN,
+  ActionType.SCROLL, ActionType.PRESS_KEY, ActionType.EXTRACT
+]);
 
 function withTimeout(promise, ms = CHROME_API_TIMEOUT_MS, message = 'The browser did not respond in time.') {
   let timer;
@@ -32,9 +37,18 @@ export class ActionExecutor {
    * @param {Object} action - Action specification
    * @returns {Promise<{ success: boolean, result?: any, error?: string }>}
    */
-  async execute(tabId, action) {
+  async execute(tabId, action, observationContext = null) {
     if (!tabId) {
       throw new Error('ActionExecutor requires a valid target tabId');
+    }
+
+    if (OBSERVATION_BOUND_ACTIONS.has(action?.action) &&
+        (!observationContext || typeof observationContext.snapshotId !== 'string' ||
+         !observationContext.snapshotId || !Number.isInteger(observationContext.mutationRevision))) {
+      return {
+        success: false,
+        error: 'This action requires the current page observation. Re-observe before executing it.'
+      };
     }
 
     if (action.action === ActionType.DONE) {
@@ -134,7 +148,11 @@ export class ActionExecutor {
       coordinates: action.target?.coordinates,
       deltaX: action.deltaX || action.target?.deltaX || 0,
       deltaY: action.deltaY || action.target?.deltaY || 300,
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      ...(observationContext ? { observationContext: {
+        snapshotId: observationContext.snapshotId,
+        mutationRevision: observationContext.mutationRevision
+      } } : {})
     };
 
     // Dispatch execution command to Content Script in the tab

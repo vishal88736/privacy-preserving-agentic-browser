@@ -5,6 +5,11 @@
  */
 
 import { findPIIMatches } from '../privacy/pii-rules.js';
+import { createLogger } from '../shared/logger.js';
+import { PerceptionProvider } from './perception-provider.js';
+import { PackagedOnnxRuntime, TransformersOnnxInferenceProvider } from '../runtime/model-runtime.js';
+
+const log = createLogger({ scope: 'LocalVision', surface: 'sidepanel' });
 
 const MODEL_ID = 'Xenova/yolos-tiny';
 const MODEL_REVISION = 'e2f9c7673f0fa61849efe2b56a0d7774779ebb9d';
@@ -150,44 +155,35 @@ function boxesForSpans(lines, imageWidth, imageHeight, viewport) {
   return { regions, unableToLocateSensitiveText };
 }
 
-export class LocalVisionEngine {
-  constructor(api = extensionApi()) {
+export class LocalVisionEngine extends PerceptionProvider {
+  constructor(api = extensionApi(), inferenceProvider = null) {
+    super();
     this.api = api;
     this.detectorPromise = null;
+    this.backendUsed = null;
     this.ocrPromise = null;
     this.assetBytesPromise = null;
+    this.inferenceProvider = inferenceProvider || new TransformersOnnxInferenceProvider(
+      new PackagedOnnxRuntime({ api })
+    );
   }
 
   async _loadDetector() {
-    if (!this.detectorPromise) {
-      this.detectorPromise = (async () => {
-        const { env, pipeline } = await import('../vendor/transformers/transformers.web.min.js');
-        env.allowRemoteModels = false;
-        env.allowLocalModels = true;
-        env.localModelPath = this.api.runtime.getURL('models/');
-        env.useBrowserCache = false;
-        env.logLevel = 40;
-        env.backends = env.backends || {};
-        env.backends.onnx = env.backends.onnx || {};
-        env.backends.onnx.wasm = env.backends.onnx.wasm || {};
-        env.backends.onnx.wasm.numThreads = 1;
-        env.backends.onnx.wasm.proxy = false;
-        // Do not set wasmPaths as a directory string because ort.all.bundle.min.mjs bundles
-        // the wasm loader directly and automatically resolves ort-wasm-simd-threaded.jsep.wasm
-        // via import.meta.url. Setting a string wasmPaths triggers dynamic import of the external
-        // ort-wasm-simd-threaded.jsep.mjs file which fails in extension contexts.
-        delete env.backends.onnx.wasm.wasmPaths;
-        return pipeline('object-detection', MODEL_ID, {
-          device: 'wasm',
-          dtype: 'q4',
-          revision: MODEL_REVISION,
-          progress_callback: () => {}
-        });
-      })().catch((err) => {
-        this.detectorPromise = null;
-        throw err;
-      });
-    }
+    if (this.detectorPromise) return this.detectorPromise;
+    this.detectorPromise = this.inferenceProvider.loadModel({
+      task: 'object-detection',
+      modelId: MODEL_ID,
+      revision: MODEL_REVISION,
+      dtype: 'q4'
+    }).then(() => {
+      this.backendUsed = this.inferenceProvider.backendUsed || 'wasm';
+      return (input, options) => this.inferenceProvider.infer(input, options);
+    }).catch((error) => {
+      this.detectorPromise = null;
+      this.backendUsed = null;
+      log.warn('Packaged local vision model could not initialize.', { error_type: error?.name || 'Error' });
+      throw error;
+    });
     return this.detectorPromise;
   }
 
@@ -304,6 +300,10 @@ export class LocalVisionEngine {
       imageHeight,
       model: MODEL_ID,
       modelRevision: MODEL_REVISION,
+      // Which execution provider actually served this run, so a WebGPU
+      // regression is visible in the side panel and the error log instead of
+      // showing up only as slower latency.
+      backend: this.backendUsed || 'wasm',
       modelLoadMs: Math.round(modelLoadMs),
       inferenceMs: Math.round(inferenceMs),
       totalMs: Math.round(performance.now() - startedAt),

@@ -45,6 +45,18 @@ class BackendBoundaryTests(unittest.TestCase):
         finally:
             settings.API_KEY = previous_key
 
+    def test_dom_layout_annotations_are_not_reported_as_visual_detections(self):
+        result = VLMService()._from_dom({
+            'elements': [{
+                'id': 'el_1', 'tag': 'button', 'label': 'Search',
+                'bbox': [10, 20, 80, 30], 'is_interactive': True
+            }]
+        }, {})
+        self.assertEqual(result['detected_elements'], [])
+        self.assertEqual(result['dom_annotations_provenance'], 'DOM')
+        self.assertEqual(result['dom_annotations'][0]['element_id'], 'el_1')
+        self.assertNotIn('confidence', result['dom_annotations'][0])
+
     def test_vlm_429_keeps_heuristic_provenance(self):
         service = VLMService()
         previous_key = settings.API_KEY

@@ -362,7 +362,7 @@ class VLMService:
         if not isinstance(viewport, dict):
             viewport = {"width": 1280, "height": 800}
 
-        detected_elements: List[Dict[str, Any]] = []
+        dom_annotations: List[Dict[str, Any]] = []
         for idx, el in enumerate([e for e in elements if isinstance(e, dict)]):
             tag = el.get("tag", "div")
             role = el.get("role") or tag
@@ -376,15 +376,13 @@ class VLMService:
                 if is_sensitive
                 else f"Interactive {tag} '{label}'" + (f" context: {context}" if context else "")
             )
-            detected_elements.append({
-                "visual_id": f"vis_{idx + 1}",
+            dom_annotations.append({
+                "element_id": el.get("id"),
                 "role": role,
                 "label": label,
                 "bbox": bbox,
-                # DOM-echo heuristic, not a vision detection: keep confidence
-                # modest so fusion never mistakes it for visual proof.
-                "confidence": 0.6,
-                "visual_description": description
+                "description": description,
+                "provenance": "DOM"
             })
 
         buttons = [e for e in elements if e.get("tag") == "button" or e.get("type") == "submit" or e.get("role") == "button"]
@@ -441,7 +439,12 @@ class VLMService:
         return {
             "page_type": page_type,
             "page_purpose": f"Likely a {page_type.replace('_', ' ')} page.",
-            "detected_elements": detected_elements,
+            # This is DOM evidence. It is intentionally not returned through
+            # the visual-detection field: no model produced these boxes from
+            # pixels, so callers must not treat them as screenshot detections.
+            "detected_elements": [],
+            "dom_annotations": dom_annotations,
+            "dom_annotations_provenance": "DOM",
             "spatial_layout": spatial_layout,
             "visual_state": visual_state
         }

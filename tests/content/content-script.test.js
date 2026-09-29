@@ -63,6 +63,7 @@ function extractClass(source, name) {
 
 test('a plan for an element the extractor never saw is refused, not guessed', async () => {
   const page = bootPage({ elements: [new FakeElement('input', { name: 'email' })] });
+  await page.send('EXTRACT_DOM', {});
 
   const result = await page.send('EXECUTE_ACTION', {
     action: 'FILL_FORM_PLAN',
@@ -71,6 +72,51 @@ test('a plan for an element the extractor never saw is refused, not guessed', as
 
   assert.equal(result.success, false);
   assert.match(result.details[0].reason, /not found|page changed/i);
+});
+
+test('observation-bound actions fail closed when no observation context is supplied', async () => {
+  const button = new FakeElement('button', { innerText: 'Continue' });
+  const page = bootPage({ elements: [button] });
+  await page.send('EXTRACT_DOM', {});
+
+  const result = await page.send('EXECUTE_ACTION', {
+    action: 'CLICK', target: { element_id: 'el_1' }
+  }, { attachObservationContext: false });
+
+  assert.equal(result.success, false);
+  assert.match(result.error, /page changed after this observation/i);
+  assert.equal(button.clickCount, 0);
+});
+
+test('an element id from before a new observation is stale even if the id is reused', async () => {
+  const button = new FakeElement('button', { innerText: 'Continue' });
+  const page = bootPage({ elements: [button] });
+  await page.send('EXTRACT_DOM', {});
+  const staleContext = { ...page.lastObservationContext };
+  await page.send('EXTRACT_DOM', {});
+
+  const result = await page.send('EXECUTE_ACTION', {
+    action: 'CLICK', target: { element_id: 'el_1' }, observationContext: staleContext
+  });
+
+  assert.equal(result.success, false);
+  assert.match(result.error, /page changed after this observation/i);
+  assert.equal(button.clickCount, 0);
+});
+
+test('a changed mutation revision invalidates an otherwise current element id', async () => {
+  const button = new FakeElement('button', { innerText: 'Continue' });
+  const page = bootPage({ elements: [button] });
+  await page.send('EXTRACT_DOM', {});
+  const staleContext = { ...page.lastObservationContext, mutationRevision: page.lastObservationContext.mutationRevision + 1 };
+
+  const result = await page.send('EXECUTE_ACTION', {
+    action: 'CLICK', target: { element_id: 'el_1' }, observationContext: staleContext
+  });
+
+  assert.equal(result.success, false);
+  assert.match(result.error, /page changed after this observation/i);
+  assert.equal(button.clickCount, 0);
 });
 
 test('a plan refuses a field whose control type changed after observation', async () => {

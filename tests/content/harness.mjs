@@ -192,11 +192,26 @@ export function bootPage({ elements = [], devicePixelRatio = 1, innerWidth = 128
 
   if (typeof listener !== 'function') throw new Error('content script did not register a runtime listener');
 
+  let lastObservationContext = null;
   /** Dispatch an extension message and await the async response. */
-  const send = (type, payload) => new Promise((resolve) => {
+  const send = (type, payload = {}, { attachObservationContext = true } = {}) => new Promise((resolve) => {
     let settled = false;
-    const finish = (value) => { if (!settled) { settled = true; resolve(value); } };
-    const returned = listener({ type, payload }, { id: 'test-extension-id' }, finish);
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (type === 'EXTRACT_DOM' && value?.success && value.data?.snapshot_id) {
+        lastObservationContext = {
+          snapshotId: value.data.snapshot_id,
+          mutationRevision: value.data.mutation_revision
+        };
+      }
+      resolve(value);
+    };
+    const actionPayload = type === 'EXECUTE_ACTION' && attachObservationContext &&
+      !payload?.observationContext && lastObservationContext
+      ? { ...payload, observationContext: lastObservationContext }
+      : payload;
+    const returned = listener({ type, payload: actionPayload }, { id: 'test-extension-id' }, finish);
     // A synchronous handler answers inline; a `return true` one answers later.
     if (returned !== true) queueMicrotask(() => {});
   });
@@ -224,5 +239,5 @@ export function bootPage({ elements = [], devicePixelRatio = 1, innerWidth = 128
     if (returned !== true) setTimeout(() => finish(undefined), 0);
   });
 
-  return { send, sendRaw, elements, devicePixelRatio, FakeElement };
+  return { send, sendRaw, elements, devicePixelRatio, FakeElement, get lastObservationContext() { return lastObservationContext; } };
 }

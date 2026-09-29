@@ -65,6 +65,25 @@ test('DOMSanitizer - Scrubs sensitive inputs into [REDACTED] and sets symbolic s
   assert.strictEqual(cityEl.value, 'Pune');
 });
 
+test('DOMSanitizer - PII in canonical accessible and selected-state fields is redacted', () => {
+  const sanitizer = new DOMSanitizer();
+  const secret = 'jane@example.com';
+  const { sanitizedElements } = sanitizer.sanitizeElements([{
+    id: 'el_1', tag: 'select', type: 'select-one', label: `Contact ${secret}`,
+    accessible_name: `Contact ${secret}`, text: `Account ${secret}`, title: `Selected ${secret}`,
+    value: '',
+    options: [{ text: secret, value: secret, selected: true }],
+    selected_option: { index: 0, text: secret, value: secret }
+  }]);
+  const serialized = JSON.stringify(sanitizedElements[0]);
+
+  assert.doesNotMatch(serialized, /jane@example\.com/i);
+  assert.match(sanitizedElements[0].accessible_name, /REDACTED/);
+  assert.match(sanitizedElements[0].text, /REDACTED/);
+  assert.match(sanitizedElements[0].title, /REDACTED/);
+  assert.match(sanitizedElements[0].selected_option.value, /REDACTED/);
+});
+
 test('DOMSanitizer - Sanitizes sensitive query parameters in URLs', () => {
   const sanitizer = new DOMSanitizer();
   const rawUrl = 'https://gov-services.in/apply?step=2&token=secret_auth_token_999&session=abcxyz';
