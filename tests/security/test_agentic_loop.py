@@ -406,10 +406,24 @@ class CompactContextTests(unittest.TestCase):
             with patch("gpt_oss_service.requests.post", side_effect=fake_post):
                 service.plan_step(
                     "Read the page title",
-                    {"elements": [{"id": "el_1", "label": "Title"}]},
-                    [{"action": "CLICK", "target": "el_9", "success": False, "error": "gone"}],
+                    {
+                        "elements": [{"id": "el_1", "label": "Title"}],
+                        "provenance": "REAL_VLM",
+                        "visual_layout_summary": "A centered results list below the search field.",
+                        "visual_state_summary": "The result list has loaded.",
+                    },
+                    [{
+                        "action": {"action": "CLICK", "target": {"element_id": "el_9"}},
+                        "success": True,
+                        "diagnostic": {"post_action_verification": {
+                            "status": "OBSERVED_NO_VISIBLE_CHANGE",
+                            "visible_state_changed": False,
+                            "target_present": True,
+                            "target_state_changed": False,
+                        }},
+                    }],
                     {"intent": "EXTRACT"},
-                    None,
+                    {"url": "https://example.test", "provenance": "REAL_VLM"},
                 )
         finally:
             settings.API_KEY = previous_key
@@ -423,9 +437,14 @@ class CompactContextTests(unittest.TestCase):
         )
         for key in ("PAGE_STATE", "ALLOWED_ELEMENT_IDS", "AVAILABLE_ELEMENTS", "ACTION_HISTORY"):
             self.assertIn(key, evidence)
+        self.assertEqual(evidence["PAGE_STATE"]["visual_layout"], "A centered results list below the search field.")
+        self.assertEqual(evidence["PAGE_STATE"]["visual_state"], "The result list has loaded.")
+        self.assertEqual(evidence["PAGE_STATE"]["perception_provenance"], "REAL_VLM")
         # History is a summary string now, carrying the failure signal.
         self.assertIsInstance(evidence["ACTION_HISTORY"], str)
-        self.assertIn("consecutive_failures=1", evidence["ACTION_HISTORY"])
+        self.assertIn("consecutive_failures=0", evidence["ACTION_HISTORY"])
+        self.assertIn("post_action_verification", evidence["ACTION_HISTORY"])
+        self.assertIn("visible_state_changed=False", evidence["ACTION_HISTORY"])
 
 
 if __name__ == "__main__":

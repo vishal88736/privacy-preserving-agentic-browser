@@ -6,6 +6,7 @@ import { ScreenshotSanitizer } from '../../extension/privacy/screenshot-sanitize
 import { DOMSanitizer } from '../../extension/privacy/dom-sanitizer.js';
 import { LocalVault } from '../../extension/privacy/local-vault.js';
 import { VLMClient } from '../../extension/perception/vlm-client.js';
+import { PolicyEngine } from '../../extension/privacy/policy-engine.js';
 
 test('screenshot sanitizer masks known DOM region and never returns original bytes in non-canvas runtime', async () => {
   const raw = 'data:image/png;base64,U0VDUkVU';
@@ -45,6 +46,7 @@ test('VLM request receives the masked screenshot and redacted DOM value', async 
   const safeShot = await new ScreenshotSanitizer().redactScreenshot(raw, [{ sensitive: true, bbox: [4,5,40,15], semantic_type: 'PAN' }], { width: 100, height: 100 }, { coverageEstablished: true });
   const originalFetch = globalThis.fetch;
   let sent;
+  let preview;
   globalThis.fetch = async (_url, init) => {
     sent = JSON.parse(init.body);
     return { ok: true, json: async () => ({ visual_observation: {
@@ -59,13 +61,37 @@ test('VLM request receives the masked screenshot and redacted DOM value', async 
       { elements: [{ sensitive: true, value: '[REDACTED]', semantic_type: 'PAN' }], visible_text: '' },
       // The outbound policy engine refuses an image that carries no record of
       // the redaction performed on it, so a real request states the audit.
-      { redaction_audit: { screenshot_withheld: false, coverage_established: true, local_vision_completed: true } }
+      { redaction_audit: { screenshot_withheld: false, coverage_established: true, local_vision_completed: true } },
+      { onDispatch: (event) => { preview = event; } }
     );
     assert.notEqual(sent.sanitized_screenshot, raw);
     assert.equal(sent.sanitized_dom.elements[0].value, '[REDACTED]');
     assert.ok(sent.redaction_audit, 'the request must carry the screenshot redaction attestation');
+    assert.equal(preview.sanitizedScreenshot, sent.sanitized_screenshot, 'UI receives the exact image attached to the approved request');
     assert.equal(result._source, 'REAL_VLM');
   } finally { globalThis.fetch = originalFetch; }
+});
+
+test('the UI screenshot preview hook is not called when outbound privacy policy blocks a request', async () => {
+  const client = new VLMClient('http://localhost:8000');
+  client.policyEngine = {
+    enforceOutboundSafety() {
+      const error = new Error('blocked');
+      error.name = 'OutboundPolicyViolationError';
+      throw error;
+    }
+  };
+  let dispatched = false;
+  const result = await client.processVisuals(
+    'task',
+    'data:image/png;base64,AA==',
+    { elements: [], visible_text: '' },
+    { redaction_audit: { screenshot_withheld: false, coverage_established: true, local_vision_completed: true } },
+    { onDispatch: () => { dispatched = true; } }
+  );
+
+  assert.equal(dispatched, false);
+  assert.equal(result.remoteCallAttempted, false);
 });
 
 test('screenshot fails closed for unlocated text, canvas surfaces, and unknown coverage', async () => {
@@ -89,6 +115,33 @@ test('ordinary visible PII is detected and sanitized when observable as page tex
   const safe = sanitizer.sanitizePageExtras(raw);
   assert.doesNotMatch(safe.visible_text, /jane@example.com|9876543210|15\/08\/2002|ABCDE1234F/);
   assert.equal(sanitizer.hasUnlocatedSensitiveText(raw), true);
+});
+
+test('page sanitizer preserves travel dates and order references while masking public email addresses', () => {
+  const sanitizer = new DOMSanitizer();
+  const extras = sanitizer.sanitizePageExtras({
+    visible_text: [
+      'Book a flight from Delhi to Mumbai departing 12/03/2025.',
+      'Deliver on 12/03/2025 please.',
+      'Order reference 482173920184.',
+      'Questions? Email support@example.com.'
+    ].join(' ')
+  });
+  assert.match(extras.visible_text, /departing 12\/03\/2025/);
+  assert.match(extras.visible_text, /Deliver on 12\/03\/2025/);
+  assert.match(extras.visible_text, /Order reference 482173920184/);
+  assert.doesNotMatch(extras.visible_text, /support@example\.com/);
+  assert.match(extras.visible_text, /REDACTED_EMAIL|LOCAL_EMAIL/);
+  const policy = new PolicyEngine({ getAllSecretsForUI: () => ({}) });
+  assert.doesNotThrow(() => policy.enforceOutboundSafety({ visible_text: extras.visible_text }));
+});
+
+test('page sanitizer still redacts an Aadhaar number when nearby context identifies it', () => {
+  const sanitizer = new DOMSanitizer();
+  const safe = sanitizer.sanitizePageExtras({
+    visible_text: 'Aadhaar number 482173920184 is required for verification.'
+  }).visible_text;
+  assert.doesNotMatch(safe, /482173920184/);
 });
 
 test('sensitive values outside semantic controls are found where pattern recognizable', () => {

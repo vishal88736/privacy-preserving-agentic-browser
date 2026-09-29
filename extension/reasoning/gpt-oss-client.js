@@ -80,6 +80,20 @@ export class GPTOSSClient {
     };
   }
 
+  _backendPrivacyBlocked() {
+    return {
+      task_understanding: { intent: 'unknown', constraints: [] },
+      page_understanding: { page_type: 'unknown' },
+      thought: 'The backend rejected this request at its outbound privacy boundary. The model was not called.',
+      action: { action: ActionType.WAIT, risk: RiskLevel.LOW, requires_confirmation: false },
+      isTerminal: false,
+      privacyBlocked: 'backend_outbound_privacy_gate',
+      remoteCallMade: false,
+      remoteCallAttempted: true,
+      model_trace: { component: 'reasoning', source: 'blocked', provider: null, model: null, planner: 'privacy_blocked' }
+    };
+  }
+
   _plannerUnavailable(cause) {
     const detail = cause?.message || cause || 'unknown error';
     return {
@@ -185,7 +199,15 @@ export class GPTOSSClient {
       ...(index === recentHistory.length - 1 ? {
         plan: sanitizePlannerText(s.planner_plan, 8000),
         planner_feedback: sanitizePlannerText(s.planner_feedback, 3000),
-        terminate_assessment: s.terminate_assessment === true
+        terminate_assessment: s.terminate_assessment === true,
+        diagnostic: s.diagnostic?.post_action_verification ? {
+          post_action_verification: {
+            status: String(s.diagnostic.post_action_verification.status || 'unknown'),
+            visible_state_changed: s.diagnostic.post_action_verification.visible_state_changed === true,
+            target_present: s.diagnostic.post_action_verification.target_present === true,
+            target_state_changed: s.diagnostic.post_action_verification.target_state_changed === true
+          }
+        } : undefined
       } : {}),
       ...(s.action?.action === ActionType.EXTRACT && s.success !== false && typeof s.result?.extractedText === 'string'
         ? { extracted_text: s.result.extractedText.slice(0, 3500) }
@@ -219,6 +241,14 @@ export class GPTOSSClient {
         // server that is running perfectly well.
         if (response.status === 401 || response.status === 403) {
           return this._backendAuthRejected(response.status);
+        }
+        if (response.status === 400) {
+          let errorBody = null;
+          try { errorBody = await response.json(); } catch { /* non-JSON errors are handled below */ }
+          if (errorBody?.detail?.code === 'OUTBOUND_PRIVACY_BLOCK') {
+            return this._backendPrivacyBlocked();
+          }
+          throw new Error(`Reasoning server returned status: 400 ${response.statusText}`);
         }
         throw new Error(`Reasoning server returned status: ${response.status} ${response.statusText}`);
       }

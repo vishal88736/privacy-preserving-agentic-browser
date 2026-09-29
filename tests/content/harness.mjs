@@ -42,6 +42,9 @@ export class FakeElement {
     this.checked = Boolean(opts.checked);
     this.disabled = Boolean(opts.disabled);
     this.required = Boolean(opts.required);
+    this.paused = opts.paused ?? true;
+    this.ended = Boolean(opts.ended);
+    this.readyState = opts.readyState ?? 0;
     this.isConnected = opts.isConnected !== false;
     this.maxLength = opts.maxLength ?? -1;
     this.minLength = opts.minLength ?? 0;
@@ -128,6 +131,7 @@ export function bootPage({ elements = [], devicePixelRatio = 1, innerWidth = 128
       elements.filter((el) => ['INPUT', 'SELECT', 'TEXTAREA'].includes(el.tagName)),
     'button, [role="button"], [role="option"]':
       elements.filter((el) => el.tagName === 'BUTTON'),
+    'video, audio': elements.filter((el) => ['VIDEO', 'AUDIO'].includes(el.tagName)),
     'a, [role="link"], [tabindex]:not([tabindex="-1"])':
       elements.filter((el) => el.tagName === 'A')
   };

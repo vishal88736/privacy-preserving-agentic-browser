@@ -110,6 +110,7 @@ export class PromptBuilder {
       parent_element_id: el.dom?.parent_element_id || el.parent_element_id || undefined,
       child_element_ids: el.dom?.child_element_ids || el.child_element_ids || undefined,
       form_group_id: el.dom?.form_id || el.form_group_id || undefined,
+      required: Boolean(el.dom?.required),
       // Structured semantic evidence (derived from general browser semantics):
       // the model chooses among grounded candidates instead of inventing
       // meaning from element IDs.

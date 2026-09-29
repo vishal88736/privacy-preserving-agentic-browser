@@ -43,6 +43,7 @@ export function validateIban(value) {
 }
 
 const CONTEXT_RULES = {
+  aadhaar: /\b(?:aadhaar|aadhar|uidai|unique\s+identity)\b/i,
   // Phone context includes bare contact verbs so "call me at ..." and
   // "Contact Jane ... <number>" are caught without a "phone number" label.
   phone: /phone|mobile|telephone|\btel\b|contact|call|dial|whatsapp/i,

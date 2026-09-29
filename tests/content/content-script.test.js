@@ -177,6 +177,19 @@ test('a detached element is never written to', async () => {
   assert.equal(input.value, '');
 });
 
+test('DOM extraction reports only minimal local playback state for visible media', async () => {
+  const video = new FakeElement('video', { paused: false, ended: false, readyState: 4, id: 'private-page-id' });
+  const page = bootPage({ elements: [video] });
+
+  const extraction = await page.send('EXTRACT_DOM', {});
+
+  assert.deepEqual(extraction.data.local_media_state, {
+    visible_count: 1,
+    media: [{ ordinal: 0, tag: 'video', paused: false, ended: false, ready_state: 4 }]
+  });
+  assert.doesNotMatch(JSON.stringify(extraction.data.local_media_state), /private-page-id/);
+});
+
 // ── Write verification ────────────────────────────────────────────────────
 
 test('TYPE reports failure when the value exceeds maxlength', async () => {

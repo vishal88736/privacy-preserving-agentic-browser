@@ -127,6 +127,19 @@ test('PromptBuilder - compactObservation includes result_sets', () => {
   assert.equal(result.result_sets[0].element_id, 'el_3');
 });
 
+test('PromptBuilder - local media verification state is not serialized to the server', () => {
+  const b = makeBuilder();
+  const result = b.compactObservation(makeObs(makeElements(), {
+    local_media_state: {
+      visible_count: 1,
+      media: [{ ordinal: 0, tag: 'video', paused: false, ended: false, ready_state: 4 }]
+    }
+  }), makePageState());
+
+  assert.equal(Object.hasOwn(result, 'local_media_state'), false);
+  assert.doesNotMatch(JSON.stringify(result), /local_media_state|ready_state/);
+});
+
 test('PromptBuilder - compactObservation truncates visible_text to 1200 chars', () => {
   const b = makeBuilder();
   const longText = 'x'.repeat(5000);

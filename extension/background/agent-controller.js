@@ -46,6 +46,12 @@ const log = createLogger({ scope: 'AgentController', surface: 'background' });
 
 const MAX_CONSECUTIVE_FAILURES = 3;
 const MAX_IDENTICAL_ACTIONS = 3;
+const MAX_VERIFICATION_NO_PROGRESS = 3;
+const ACTIONS_EXPECTING_VISIBLE_CHANGE = new Set([
+  ActionType.CLICK, ActionType.TYPE, ActionType.SELECT, ActionType.CHECK,
+  ActionType.UNCHECK, ActionType.SUBMIT, ActionType.NAVIGATE,
+  ActionType.GO_BACK, ActionType.GO_FORWARD
+]);
 const NAV_VERIFY_TIMEOUT_MS = 12000;
 const NAV_VERIFY_POLL_MS = 500;
 const CHROME_API_TIMEOUT_MS = 10000;
@@ -393,7 +399,9 @@ export class AgentController {
       }
 
       // L2: Improved stuck-loop detection
-      if (this._isStuckInLoop(task)) {
+      // A successful browser dispatch always earns one fresh observation and
+      // verification before loop-level repetition checks can stop the task.
+      if (!task.pendingVerification && this._isStuckInLoop(task)) {
         log.warn('REPLAN: no progress detected; the agent is stuck in a loop.');
         taskManager.failTask('The agent repeated the same step without making progress.', task);
         this.clearOverlays(task.tabId);
@@ -600,6 +608,7 @@ export class AgentController {
       result_items: extras.result_items,
       visible_text: extras.visible_text,
       scroll: extras.scroll,
+      local_media_state: extras.local_media_state,
       // This contains labels, counts, confidence and geometry only. OCR text is
       // intentionally discarded by the local engine and never reaches IPC.
       local_vision_context: localVision ? {
@@ -753,6 +762,14 @@ export class AgentController {
               unlocated_sensitive_text: screenshotPrivacyAudit.unlocatedSensitiveText === true,
               masked_regions: screenshotPrivacyAudit.maskedCount || 0
             }
+          },
+          {
+            onDispatch: ({ sanitizedScreenshot }) => this.notify('VLM_SCREENSHOT_DISPATCHED', {
+              task_id: task.id,
+              step: task.currentStep + 1,
+              redaction_status: defaultScreenshotSanitizer.lastRedactionStatus,
+              sanitized_screenshot: sanitizedScreenshot
+            })
           }
       )))
       // No screenshot exists to send: continue from the sanitized DOM only
@@ -805,6 +822,7 @@ export class AgentController {
           headings: extras.headings,
           result_items: extras.result_items,
           visible_text: extras.visible_text,
+          local_media_state: extras.local_media_state,
           local_vision_context: sanitizedDOM.local_vision_context,
           snapshot_id: rawDOM.snapshot_id,
           mutation_revision: rawDOM.mutation_revision
@@ -849,6 +867,15 @@ export class AgentController {
         afterObservation: fusedObservation
       });
       task.lastVerification = verification;
+      const verifiedAction = pendingVerification.action?.action;
+      if (verification.verified && !verification.visible_state_changed &&
+          ACTIONS_EXPECTING_VISIBLE_CHANGE.has(verifiedAction)) {
+        task.verificationNoProgress = (task.verificationNoProgress || 0) + 1;
+        verification.replan_required = true;
+        verification.no_progress_count = task.verificationNoProgress;
+      } else if (verification.visible_state_changed) {
+        task.verificationNoProgress = 0;
+      }
       const previousStep = (task.steps || []).find((step) => step.stepNumber === pendingVerification.stepNumber);
       if (previousStep) {
         previousStep.diagnostic = {
@@ -864,6 +891,16 @@ export class AgentController {
       });
       this._transitionLoop(task, loop, AgentLoopState.VERIFY);
       this._transitionLoop(task, loop, AgentLoopState.REPLAN);
+      if ((task.verificationNoProgress || 0) >= MAX_VERIFICATION_NO_PROGRESS) {
+        taskManager.failTask(
+          `The page showed no visible change after ${MAX_VERIFICATION_NO_PROGRESS} verified actions. The agent stopped to avoid repeating ineffective actions.`,
+          task
+        );
+        this.clearOverlays(task.tabId);
+        this.notify('TASK_FAILED', { error: task.error, hint: task.hint });
+        this._transitionLoop(task, loop, AgentLoopState.BLOCKED);
+        return false;
+      }
       if (task.currentStep >= task.maxSteps) {
         taskManager.failTask('Maximum step limit reached without achieving goal', task);
         this.clearOverlays(task.tabId);

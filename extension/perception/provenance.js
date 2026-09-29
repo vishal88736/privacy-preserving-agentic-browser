@@ -22,13 +22,3 @@ export function normalizePerceptionProvenance(observation = {}) {
   }
   return PerceptionProvenance.DOM_ONLY;
 }
-
-/**
- * Layout summaries do not make their DOM-echo annotations visual detections.
- * Only an explicitly sourced, real VLM detection list may enter visual fusion.
- */
-export function hasRealVlmDetections(observation = {}) {
-  return normalizePerceptionProvenance(observation) === PerceptionProvenance.REAL_VLM &&
-    observation.detected_elements_provenance === PerceptionProvenance.REAL_VLM &&
-    Array.isArray(observation.detected_elements);
-}

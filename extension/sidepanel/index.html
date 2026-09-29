@@ -361,6 +361,11 @@
           <summary>View last sanitized payload</summary>
           <div id="llm-payload-preview" class="llm-payload">No backend requests yet. Start a task to see what leaves this device.</div>
         </details>
+        <details id="llm-screenshot-preview-card" class="llm-details llm-screenshot-preview" hidden>
+          <summary>Preview the latest 8 sanitized screenshots attached to VLM requests</summary>
+          <p class="llm-screenshot-note">Shows the redacted image attached to each recent visual request. Original captures and screenshots withheld by local privacy checks are not shown. Previews stay in this panel and are not saved to task history.</p>
+          <div id="llm-screenshot-preview-list" class="llm-screenshot-preview-list"></div>
+        </details>
       </section>
 
       <!-- Agent Activity Feed -->

@@ -102,6 +102,30 @@ test('DOMSanitizer - Redacts lowercase IFSC codes from outbound text and placeho
   assert.doesNotThrow(() => new PolicyEngine(new LocalVault()).enforceOutboundSafety(extras));
 });
 
+test('DOMSanitizer - keeps only minimal local media state for the verifier', () => {
+  const sanitizer = new DOMSanitizer();
+  const extras = sanitizer.sanitizePageExtras({
+    local_media_state: {
+      visible_count: 1,
+      media: [{
+        ordinal: 77,
+        tag: 'video',
+        paused: false,
+        ended: false,
+        ready_state: 99,
+        src: 'https://private.example/video?token=secret',
+        title: 'Jane jane@example.com'
+      }]
+    }
+  });
+
+  assert.deepEqual(extras.local_media_state, {
+    visible_count: 1,
+    media: [{ ordinal: 0, tag: 'video', paused: false, ended: false, ready_state: 4 }]
+  });
+  assert.doesNotMatch(JSON.stringify(extras.local_media_state), /private\.example|secret|jane@example\.com|src|title/i);
+});
+
 test('PolicyEngine - Blocks outbound payloads containing unredacted secrets', () => {
   const vault = new LocalVault();
   const policyEngine = new PolicyEngine(vault);

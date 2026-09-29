@@ -69,10 +69,10 @@ Each fused observation reports one canonical provenance value:
 
 - `DOM_ONLY`: no real remote VLM result was used.
 - `DOM_PLUS_HEURISTIC`: the backend derived a layout summary from sanitized DOM without screenshot-derived element detections.
-- `REAL_VLM`: a configured remote vision model returned visual analysis. Fusion admits element boxes only if the response also sets `detected_elements_provenance` to `REAL_VLM`.
+- `REAL_VLM`: a configured remote vision model returned visual analysis. The current server returns prose layout/state summaries; it does not produce screenshot-derived control boxes, so interactive targets stay DOM-grounded.
 - `LOCAL_MODEL`: identifies packaged local perception metadata; it does not claim remote VLM output.
 
-The current VLM service does not produce screenshot-derived control boxes. Its DOM annotations remain `DOM` provenance, and its heuristic cannot be promoted to visual evidence. A remote VLM failure retains `DOM_ONLY` provenance.
+The current VLM service does not produce screenshot-derived control boxes. Its DOM annotations remain `DOM` provenance, and element fusion does not create visual-only targets. The planner receives real VLM prose only when the source is `REAL_VLM`; otherwise it receives a labeled DOM heuristic or DOM-only fallback.
 
 The controller captures screenshots only when visual evidence is needed. A captured image must pass the local vision and redaction checks before it is eligible for the VLM endpoint; otherwise the controller reasons from sanitized DOM without sending an image. A DOM heuristic fallback may be used when no server vision model responds. This guarantee assumes the installed extension is trusted and unmodified. The backend cannot independently prove that an image has been visually redacted; arbitrary local callers and compromised extensions are outside this boundary.
 

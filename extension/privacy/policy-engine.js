@@ -85,14 +85,20 @@ export class PolicyEngine {
     }
 
     const textLeaves = [];
-    const collectText = (value) => {
+    const piiTextLeaves = [];
+    const collectText = (value, path = []) => {
       if (typeof value === 'string') {
         // Base64 image bytes are opaque to text patterns; the checks above
         // establish instead that each image was redacted and audited.
-        if (!/^data:image\/[^;]+;base64,/i.test(value)) textLeaves.push(value);
+        if (!/^data:image\/[^;]+;base64,/i.test(value)) {
+          textLeaves.push(value);
+          if (path[path.length - 1] !== 'timestamp') piiTextLeaves.push(value);
+        }
       }
-      else if (Array.isArray(value)) value.forEach(collectText);
-      else if (value && typeof value === 'object') Object.values(value).forEach(collectText);
+      else if (Array.isArray(value)) value.forEach((item, index) => collectText(item, [...path, String(index)]));
+      else if (value && typeof value === 'object') {
+        Object.entries(value).forEach(([key, item]) => collectText(item, [...path, key]));
+      }
     };
     collectText(payload);
     const normalizeSecretText = (value) => String(value).normalize('NFKC')
@@ -133,7 +139,16 @@ export class PolicyEngine {
     // rules (SSN_COMPACT, SIN, NHS, DOB, IFSC, PHONE_IN) only fire when
     // their trigger word appears near the actual match in the text, not when
     // it appears anywhere in the full serialized payload.
-    const piiMatch = findPIIMatches(scannable, '')[0];
+    const matches = piiTextLeaves.flatMap((text) =>
+      findPIIMatches(text, '').map((match) => ({ ...match, sourceText: text }))
+    );
+    const isBenignReference = (match) => {
+      if (match.category !== 'AADHAAR') return false;
+      const nearby = match.sourceText.slice(Math.max(0, match.index - 60), Math.min(match.sourceText.length, match.end + 60));
+      return /\b(?:order|tracking|shipment|reference|invoice|booking|confirmation|reservation|ticket|case|record|product|serial|transaction|delivery|application)\b/i.test(nearby) &&
+        !/\b(?:aadhaar|aadhar|uidai|unique\s+identity)\b/i.test(nearby);
+    };
+    const piiMatch = matches.find((match) => !isBenignReference(match));
     if (piiMatch) {
       // Title-case display label: the UI parses this message, and tests
       // assert /Aadhaar/ (not the uppercase category constant).

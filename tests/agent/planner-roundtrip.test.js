@@ -171,3 +171,9 @@ test('friendlyError keeps the auth instruction instead of the generic default', 
   assert.match(error, /BACKEND_SHARED_SECRET/);
   assert.match(hint, /Backend access token/);
 });
+
+test('friendlyError explains when a successful action could not be confirmed', () => {
+  const result = friendlyError('The page showed no visible change after 3 verified actions.');
+  assert.match(result.error, /could not confirm/i);
+  assert.match(result.hint, /may still have succeeded/i);
+});

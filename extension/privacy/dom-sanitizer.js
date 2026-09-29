@@ -14,6 +14,28 @@ import { defaultLocalVault } from './local-vault.js';
 import { SymbolicSecretSource } from '../shared/constants.js';
 import { findPIIMatches, redactPII } from './pii-rules.js';
 
+const BENIGN_REFERENCE_CONTEXT = /\b(?:order|tracking|shipment|reference|invoice|booking|confirmation|reservation|ticket|case|record|product|serial|transaction|delivery|application)\b/i;
+const AADHAAR_CONTEXT = /\b(?:aadhaar|aadhar|uidai|unique\s+identity)\b/i;
+
+function redactPagePII(text) {
+  const matches = findPIIMatches(text, '');
+  if (!matches.length) return text;
+  let result = '';
+  let cursor = 0;
+  for (const match of matches) {
+    if (match.index < cursor) continue;
+    const nearby = text.slice(Math.max(0, match.index - 60), Math.min(text.length, match.end + 60));
+    // Long order/tracking identifiers share the Aadhaar shape. Preserve that
+    // number only when the page explicitly labels it as a non-identity
+    // reference and contains no Aadhaar-specific cue in the same neighborhood.
+    const benignReference = match.category === 'AADHAAR' &&
+      BENIGN_REFERENCE_CONTEXT.test(nearby) && !AADHAAR_CONTEXT.test(nearby);
+    result += text.slice(cursor, match.index) + (benignReference ? match.value : `[REDACTED_${match.category}]`);
+    cursor = match.end;
+  }
+  return result + text.slice(cursor);
+}
+
 export class DOMSanitizer {
   constructor(piiDetector = defaultPIIDetector, secretDetector = defaultSecretDetector, vault = null) {
     this.piiDetector = piiDetector;
@@ -138,11 +160,9 @@ export class DOMSanitizer {
   }
 
   /**
-   * Lighter sanitizer for page-authored text (headings, result titles,
-   * visible text). Only scrubs exact vault secrets and credential-shaped
-   * patterns (API keys, Bearer tokens). Does NOT run the full PII regex
-   * registry because that over-redacts order IDs, dates, and phone-like
-   * numbers in product listings — destroying the context the reasoner needs.
+   * Sanitizer for page-authored text. It applies the shared PII registry but
+   * preserves long numbers explicitly identified as ordinary order/reference
+   * IDs. Ambiguous dates and phone-like numbers still use context gating.
    */
   sanitizePageText(text) {
     if (!text || typeof text !== 'string') return text;
@@ -157,7 +177,7 @@ export class DOMSanitizer {
     out = out.replace(/\bBearer\s+[A-Za-z0-9._~+/-]{12,}={0,2}/gi, 'Bearer [REDACTED_TOKEN]');
     out = out.replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, '[REDACTED_TOKEN]');
     out = out.replace(/\b(?:reset|invite|token|auth|session|verify|verification|credential|secret|key|code)[-_]?[A-Za-z0-9_-]{12,}\b/gi, '[REDACTED_TOKEN]');
-    return out;
+    return redactPagePII(out);
   }
 
   /**
@@ -298,14 +318,34 @@ export class DOMSanitizer {
         ...h,
         text: this.sanitizePageText(h.text || '')
       })),
-      // visible_text keeps the full PII registry scan (with proximity-gated
-      // context rules): page prose is a primary PII leak vector. Structural
-      // headings/result titles use the lighter sanitizePageText so the
-      // reasoner keeps its grounding context.
-      visible_text: this.sanitizeUserPrompt(String(rawDOM.visible_text || '')).slice(0, 4000),
+      // Free page prose and structural snippets share the same precise policy:
+      // known PII is masked, while recognizable order references and ordinary
+      // dates remain available as semantic context.
+      visible_text: this.sanitizePageText(String(rawDOM.visible_text || '')).slice(0, 4000),
       result_items: this.sanitizeResultItems(rawDOM.result_items || []),
-      scroll: rawDOM.scroll || null
+      scroll: rawDOM.scroll || null,
+      // Strict local-only schema for ActionVerifier. PromptBuilder's outbound
+      // allowlist intentionally does not serialize this field.
+      local_media_state: this.sanitizeLocalMediaState(rawDOM.local_media_state)
     };
+  }
+
+  sanitizeLocalMediaState(state) {
+    const media = Array.isArray(state?.media) ? state.media.slice(0, 20) : [];
+    const cleanMedia = media.flatMap((item, index) => {
+      const tag = item?.tag === 'audio' ? 'audio' : item?.tag === 'video' ? 'video' : null;
+      if (!tag) return [];
+      return [{
+        ordinal: index,
+        tag,
+        paused: item?.paused !== false,
+        ended: Boolean(item?.ended),
+        ready_state: Number.isInteger(item?.ready_state)
+          ? Math.max(0, Math.min(4, item.ready_state))
+          : 0
+      }];
+    });
+    return { visible_count: cleanMedia.length, media: cleanMedia };
   }
 
   /**

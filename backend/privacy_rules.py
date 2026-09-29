@@ -3,6 +3,10 @@ import re
 import unicodedata
 
 
+class OutboundPrivacyError(ValueError):
+    """A sanitized request still contained a high-confidence private value."""
+
+
 def _luhn(value):
     digits = re.sub(r"\D", "", value)
     if len(digits) < 2:
@@ -56,14 +60,11 @@ def find_sensitive_category(text):
         if unicodedata.category(char) != "Cf"
     )
     checks = [
-        ("AADHAAR", re.compile(r"\b[2-9]\d{3}[\s-]?\d{4}[\s-]?\d{4}\b")),
         ("PAN", re.compile(r"\b[A-Z]{5}\d{4}[A-Z]\b", re.I)),
         ("SSN", re.compile(r"\b(?!000|666|9\d\d)\d{3}[- ](?!00)\d{2}[- ](?!0000)\d{4}\b")),
         ("NIN", re.compile(r"\b(?!BG|GB|KN|NK|NT|TN|ZZ)[A-CEGHJ-PR-TW-Z]{2}\s?\d{6}\s?[A-D]\b", re.I)),
         ("EMAIL", re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)),
         ("PHONE", re.compile(r"(?<!\w)\+\d{1,3}[ .-]?(?:\(\d{1,4}\)[ .-]?)?\d(?:[ .-]?\d){6,12}(?!\w)")),
-        ("DOB", re.compile(r"\b(?:0[1-9]|[12]\d|3[01])[-/.](?:0[1-9]|1[0-2])[-/.](?:19|20)\d{2}\b")),
-        ("DOB", re.compile(r"\b(?:0[1-9]|1[0-2])[-/.](?:0[1-9]|[12]\d|3[01])[-/.](?:19|20)\d{2}\b")),
         ("OTP", re.compile(r"\b(?:otp|one[ -]?time(?:[ -]?(?:password|code))?|verification code|security code)\s*(?::|=|\bis\s+)?\d{4,10}\b", re.I)),
         ("PASSWORD", re.compile(r"\b(?:password|passcode|passphrase)\s*(?::|=|\bis\s+)(?!required\b|incorrect\b|invalid\b|blank\b|empty\b|not\b)[A-Za-z0-9!@#$%^&*._+~-]{3,64}\b", re.I)),
         ("CVV", re.compile(r"\b(?:cvv|cvc|card verification)\s*(?::|=|\bis\s+)?\d{3,4}\b", re.I)),
@@ -72,6 +73,36 @@ def find_sensitive_category(text):
     for category, pattern in checks:
         if pattern.search(text):
             return category
+
+    # Long numeric order/tracking references and ordinary travel dates are
+    # common page content. Keep unlabeled Aadhaar-shaped values fail-closed,
+    # but allow a number explicitly described as an ordinary reference unless
+    # the same text also identifies it as Aadhaar.
+    aadhaar_context = re.compile(r"\b(?:aadhaar|aadhar|uidai|unique\s+identity)\b", re.I)
+    benign_reference_context = re.compile(
+        r"\b(?:order|tracking|shipment|reference|invoice|booking|confirmation|reservation|ticket|case|record|product|serial|transaction|delivery|application)\b",
+        re.I,
+    )
+    aadhaar_pattern = re.compile(r"\b[2-9]\d{3}[\s-]?\d{4}[\s-]?\d{4}\b")
+    for match in aadhaar_pattern.finditer(text):
+        nearby = text[max(0, match.start() - 60):min(len(text), match.end() + 60)]
+        if aadhaar_context.search(nearby) or not benign_reference_context.search(nearby):
+            return "AADHAAR"
+
+    # Date-like strings are sensitive only when their nearby text marks them
+    # as a date of birth; ordinary travel and delivery dates remain usable.
+    for category, patterns, context in (
+        ("DOB", [
+            re.compile(r"\b(?:0[1-9]|[12]\d|3[01])[-/.](?:0[1-9]|1[0-2])[-/.](?:19|20)\d{2}\b"),
+            re.compile(r"\b(?:0[1-9]|1[0-2])[-/.](?:0[1-9]|[12]\d|3[01])[-/.](?:19|20)\d{2}\b"),
+        ], re.compile(r"\b(?:dob|date\s*of\s*birth|birth\s*date|born\s+on|birthday)\b", re.I)),
+    ):
+        for pattern in patterns:
+            for match in pattern.finditer(text):
+                start = max(0, match.start() - 60)
+                end = min(len(text), match.end() + 60)
+                if context.search(text[start:end]):
+                    return category
 
     # Bare Indian mobile numbers fire only near contact language (or with an
     # explicit +91 prefix). Payload-wide triggers were too broad: they blocked

@@ -108,22 +108,16 @@ export class ActionValidator {
     }
 
     if (action.action === ActionType.SUBMIT) {
-      if (formState?.completion?.empty > 0) {
+      const submitTarget = availableElements.find((element) => element.id === action.target?.element_id);
+      const targetFormId = submitTarget?.dom?.form_id || submitTarget?.form_group_id || null;
+      const targetForm = targetFormId
+        ? (formState.forms || []).find((form) => form.form_group_id === targetFormId)
+        : null;
+      const requiredEmpty = Number(targetForm?.completion?.required_empty || 0);
+      if (requiredEmpty > 0) {
         return {
           valid: false,
-          reason: `Form submission rejected: there are still ${formState.completion.empty} unfilled input fields. You must fill them first.`
-        };
-      }
-      // Basic check: don't submit if there are obviously empty text inputs
-      const empties = (fusedObservation.elements || []).filter(e => 
-        (e.dom?.tag === 'input' || e.dom?.tag === 'textarea') && 
-        (!e.dom?.type || e.dom?.type === 'text' || e.dom?.type === 'email' || e.dom?.type === 'password') &&
-        (!e.value || e.value.trim() === '') && (!e.dom?.value || e.dom?.value.trim() === '')
-      );
-      if (empties.length > 0) {
-        return {
-          valid: false,
-          reason: `Form submission rejected: there are still ${empties.length} unfilled input fields. You must fill them first.`
+          reason: `Form submission rejected: this form still has ${requiredEmpty} required field${requiredEmpty === 1 ? '' : 's'} to fill.`
         };
       }
     }

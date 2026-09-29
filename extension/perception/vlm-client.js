@@ -8,7 +8,7 @@ import { ServerDefaults } from '../shared/constants.js';
 import { validateVisionPayload } from '../shared/schemas.js';
 import { createLogger } from '../shared/logger.js';
 import { defaultPolicyEngine } from '../privacy/policy-engine.js';
-import { hasRealVlmDetections, normalizePerceptionProvenance, PerceptionProvenance } from './provenance.js';
+import { normalizePerceptionProvenance, PerceptionProvenance } from './provenance.js';
 
 const log = createLogger({ scope: 'VLMClient', surface: 'background' });
 
@@ -22,7 +22,7 @@ export class VLMClient {
   /**
    * Calls the server VLM endpoint with sanitized data for visual grounding.
    */
-  async processVisuals(taskId, sanitizedScreenshot, sanitizedDom, metadata = {}) {
+  async processVisuals(taskId, sanitizedScreenshot, sanitizedDom, metadata = {}, { onDispatch } = {}) {
     const payload = {
       task_id: taskId,
       sanitized_screenshot: sanitizedScreenshot,
@@ -60,6 +60,16 @@ export class VLMClient {
       throw err;
     }
     try {
+      // The hook runs only after schema validation and the outbound privacy
+      // gate approve this exact sanitized image, immediately before fetch.
+      // UI preview failures must never block or alter the model request.
+      if (typeof onDispatch === 'function') {
+        try {
+          onDispatch({ taskId, sanitizedScreenshot: payload.sanitized_screenshot });
+        } catch {
+          log.warn('Could not publish the sanitized VLM screenshot preview.');
+        }
+      }
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(), 20000);
       let response;
@@ -86,13 +96,12 @@ export class VLMClient {
       const data = await response.json();
       const rawObservation = data?.visual_observation || data;
       const obs = rawObservation && typeof rawObservation === 'object' ? rawObservation : {};
-      // Keep one canonical label. A DOM-derived layout summary is useful
-      // reasoning context, but it is not a visual detection. The backend must
-      // explicitly identify both the VLM source and any screenshot-derived
-      // detection list before fusion can treat boxes as visual evidence.
+      // The current backend VLM contract returns prose summaries only. Keep
+      // element grounding DOM-only even when the screenshot model ran; no
+      // screenshot-derived control boxes are currently produced.
       obs.provenance = normalizePerceptionProvenance(obs);
       obs._source = obs.provenance;
-      if (!hasRealVlmDetections(obs)) obs.detected_elements = [];
+      obs.detected_elements = [];
       obs.remoteCallAttempted = true;
       obs.model_trace ||= {
         component: 'vision',

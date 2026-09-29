@@ -170,13 +170,13 @@ test('ActionValidator - SUBMIT with unfilled fields is rejected', () => {
   const r = v.validatePreExecution(
     { action: ActionType.SUBMIT, target: { element_id: 'el_submit' } },
     makeObs(
-      [{ id: 'el_submit', dom: { tag: 'button', type: 'submit' }, interaction: { clickable: true } }],
+      [{ id: 'el_submit', form_group_id: 'form_target', dom: { tag: 'button', type: 'submit', form_id: 'form_target' }, interaction: { clickable: true } }],
       [],
-      { completion: { empty: 2 } }
+      { forms: [{ form_group_id: 'form_target', completion: { required_empty: 2 } }] }
     )
   );
   assert.equal(r.valid, false);
-  assert.ok(r.reason.includes('unfilled'));
+  assert.ok(r.reason.includes('required field'));
 });
 
 test('ActionValidator - SUBMIT with all fields filled is valid', () => {
@@ -184,10 +184,42 @@ test('ActionValidator - SUBMIT with all fields filled is valid', () => {
   const r = v.validatePreExecution(
     { action: ActionType.SUBMIT, target: { element_id: 'el_submit' } },
     makeObs(
-      [{ id: 'el_submit', dom: { tag: 'button', type: 'submit' }, interaction: { clickable: true } }],
+      [{ id: 'el_submit', form_group_id: 'form_target', dom: { tag: 'button', type: 'submit', form_id: 'form_target' }, interaction: { clickable: true } }],
       [],
-      { completion: { empty: 0 } }
+      { forms: [{ form_group_id: 'form_target', completion: { required_empty: 0, optional_empty: 3 } }] }
     )
+  );
+  assert.equal(r.valid, true);
+});
+
+test('ActionValidator - SUBMIT ignores empty fields in unrelated forms and page widgets', () => {
+  const v = makeValidator();
+  const r = v.validatePreExecution(
+    { action: ActionType.SUBMIT, target: { element_id: 'el_submit' } },
+    makeObs([
+      { id: 'el_header', dom: { tag: 'input', type: 'search', form_id: 'form_header', value: '' }, interaction: { typeable: true } },
+      { id: 'el_newsletter', dom: { tag: 'input', type: 'email', form_id: 'form_newsletter', value: '' }, interaction: { typeable: true } },
+      { id: 'el_submit', form_group_id: 'form_target', dom: { tag: 'button', type: 'submit', form_id: 'form_target' }, interaction: { clickable: true } }
+    ], [], {
+      completion: { empty: 2 },
+      forms: [
+        { form_group_id: 'form_header', completion: { required_empty: 0 } },
+        { form_group_id: 'form_newsletter', completion: { required_empty: 0 } },
+        { form_group_id: 'form_target', completion: { required_empty: 0 } }
+      ]
+    })
+  );
+  assert.equal(r.valid, true);
+});
+
+test('ActionValidator - SUBMIT without a known target form does not use page-wide empty counts', () => {
+  const v = makeValidator();
+  const r = v.validatePreExecution(
+    { action: ActionType.SUBMIT, target: { element_id: 'el_submit' } },
+    makeObs([
+      { id: 'el_header', dom: { tag: 'input', type: 'search', value: '' }, interaction: { typeable: true } },
+      { id: 'el_submit', dom: { tag: 'button', type: 'submit' }, interaction: { clickable: true } }
+    ], [], { completion: { empty: 1 } })
   );
   assert.equal(r.valid, true);
 });

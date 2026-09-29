@@ -18,6 +18,9 @@ import {
 import { setupLocalVisionMessageHandler } from '../perception/local-vision.js';
 
 const log = createLogger({ scope: 'SidePanel', surface: 'sidepanel' });
+const MAX_VLM_SCREENSHOT_PREVIEWS = 8;
+const MAX_VLM_SCREENSHOT_PREVIEW_CHARS = 12 * 1024 * 1024;
+const MAX_VLM_SCREENSHOT_PREVIEW_TOTAL_CHARS = 24 * 1024 * 1024;
 
 // The panel is a long-lived document, so an uncaught error or a rejected
 // promise here previously left the UI silently stale — the background kept
@@ -166,6 +169,7 @@ class SidePanelApp {
     this.lastPrompt = '';
     this.taskStartWall = null;
     this.elapsedTimer = null;
+    this.vlmScreenshotPreviews = [];
     this.init();
   }
 
@@ -247,6 +251,8 @@ class SidePanelApp {
     this.llmScreenshot = this.$('llm-screenshot-state');
     this.llmTokens = this.$('llm-tokens');
     this.llmPreview = this.$('llm-payload-preview');
+    this.llmScreenshotPreviewCard = this.$('llm-screenshot-preview-card');
+    this.llmScreenshotPreviewList = this.$('llm-screenshot-preview-list');
     this.debugPanel = this.$('debug-panel');
     this.debugBody = this.$('debug-body');
     // Modals
@@ -449,6 +455,7 @@ class SidePanelApp {
   onUpdate({ event, data, task }) {
     if (task) this.task = task;
     if (event === 'TASK_STARTED') {
+      this.clearVlmScreenshotPreviews();
       this.taskStartWall = Date.now();
       this.startElapsed();
       this.hideStatePanels();
@@ -467,6 +474,7 @@ class SidePanelApp {
       case 'TASK_COMPLETED': this.showDone(data); break;
       case 'TASK_FAILED': this.showError(data?.error, data?.hint); break;
       case 'TASK_CANCELLED': this.showStopped(); break;
+      case 'VLM_SCREENSHOT_DISPATCHED': this.addVlmScreenshotPreview(data); break;
       default: break;
     }
     this.renderDebug();
@@ -657,7 +665,11 @@ class SidePanelApp {
         const source = trace.source || 'unknown';
         const identity = [trace.provider, trace.model].filter(Boolean).join(' / ');
         const planner = trace.planner ? ` (${trace.planner})` : '';
-        return `${source}${identity ? `: ${identity}` : ''}${planner}`;
+        const label = source === 'remote' ? 'REAL_VLM screenshot summary'
+          : source === 'dom_heuristic' ? 'DOM heuristic fallback (no usable VLM result)'
+            : source === 'dom_only' ? 'DOM-only fallback (remote VLM not used or unavailable)'
+              : source;
+        return `${label}${identity ? `: ${identity}` : ''}${planner}`;
       };
       lines.push(`vision: ${describe(traces.vision)}`);
       lines.push(`reasoning: ${describe(traces.reasoning)}`);
@@ -1118,6 +1130,73 @@ class SidePanelApp {
     } else {
       sun.style.display = '';
       moon.style.display = 'none';
+    }
+  }
+
+  clearVlmScreenshotPreviews() {
+    this.vlmScreenshotPreviews = [];
+    if (this.llmScreenshotPreviewList) this.llmScreenshotPreviewList.replaceChildren();
+    if (this.llmScreenshotPreviewCard) {
+      this.llmScreenshotPreviewCard.hidden = true;
+      this.llmScreenshotPreviewCard.open = false;
+    }
+  }
+
+  addVlmScreenshotPreview(data = {}) {
+    const currentTaskId = this.task?.id;
+    if (currentTaskId && data.task_id && currentTaskId !== data.task_id) return;
+    const screenshot = data.sanitized_screenshot;
+    const safeDataUrl = typeof screenshot === 'string' && screenshot.length <= MAX_VLM_SCREENSHOT_PREVIEW_CHARS &&
+      /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(screenshot)
+      ? screenshot
+      : null;
+    if (!safeDataUrl) {
+      log.warn('Ignored an invalid or oversized VLM screenshot preview.');
+      return;
+    }
+
+    this.vlmScreenshotPreviews.unshift({
+      step: Number.isInteger(data.step) && data.step > 0 ? data.step : null,
+      redactionStatus: ['masked', 'checked'].includes(data.redaction_status)
+        ? data.redaction_status
+        : 'unknown',
+      screenshot: safeDataUrl
+    });
+    this.vlmScreenshotPreviews = this.vlmScreenshotPreviews.slice(0, MAX_VLM_SCREENSHOT_PREVIEWS);
+    const previewChars = () => this.vlmScreenshotPreviews.reduce(
+      (sum, preview) => sum + preview.screenshot.length, 0
+    );
+    while (this.vlmScreenshotPreviews.length > 1 &&
+      previewChars() > MAX_VLM_SCREENSHOT_PREVIEW_TOTAL_CHARS) {
+      this.vlmScreenshotPreviews.pop();
+    }
+    this.renderVlmScreenshotPreviews();
+    if (this.llmScreenshotPreviewCard) {
+      this.llmScreenshotPreviewCard.hidden = false;
+      this.llmScreenshotPreviewCard.open = true;
+    }
+  }
+
+  renderVlmScreenshotPreviews() {
+    if (!this.llmScreenshotPreviewList) return;
+    this.llmScreenshotPreviewList.replaceChildren();
+    for (const preview of this.vlmScreenshotPreviews) {
+      const item = el('article', 'llm-screenshot-preview-item');
+      const label = preview.redactionStatus === 'masked'
+        ? 'Known sensitive regions masked'
+        : preview.redactionStatus === 'checked'
+          ? 'Checked; no known regions to mask'
+          : 'Privacy status unavailable';
+      item.appendChild(el('div', 'llm-screenshot-preview-heading',
+        `${preview.step ? `Step ${preview.step} · ` : ''}${label}`));
+      const image = document.createElement('img');
+      image.className = 'llm-screenshot-preview-image';
+      image.alt = `Sanitized screenshot attached to the VLM request${preview.step ? ` at step ${preview.step}` : ''}`;
+      image.loading = 'lazy';
+      image.decoding = 'async';
+      image.src = preview.screenshot;
+      item.appendChild(image);
+      this.llmScreenshotPreviewList.appendChild(item);
     }
   }
 

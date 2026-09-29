@@ -37,6 +37,50 @@ test('post-action verifier records visible page changes after re-observation', (
   });
 });
 
+test('post-action verifier detects page text changes even when controls are unchanged', () => {
+  const verifier = new ActionVerifier();
+  const result = verifier.verify({
+    action: { action: 'CLICK', target: { element_id: 'el_1' } },
+    execution: { success: true },
+    beforeObservation: { ...before, visible_text: 'Choose a delivery method.' },
+    afterObservation: {
+      ...before,
+      observation_id: 'snapshot_2',
+      visible_text: 'Your order is confirmed.'
+    }
+  });
+  assert.equal(result.visible_state_changed, true);
+  assert.equal(result.status, 'OBSERVED_STATE_CHANGE');
+});
+
+test('post-action verifier recognizes native media starting when DOM and text are unchanged', () => {
+  const verifier = new ActionVerifier();
+  const beforeObservation = {
+    ...before,
+    local_media_state: {
+      visible_count: 1,
+      media: [{ ordinal: 0, tag: 'video', paused: true, ended: false, ready_state: 2 }]
+    }
+  };
+  const result = verifier.verify({
+    action: { action: 'CLICK', targetId: 'el_1' },
+    execution: { success: true },
+    beforeObservation,
+    afterObservation: {
+      ...beforeObservation,
+      observation_id: 'snapshot_2',
+      local_media_state: {
+        visible_count: 1,
+        media: [{ ordinal: 0, tag: 'video', paused: false, ended: false, ready_state: 4 }]
+      }
+    }
+  });
+
+  assert.equal(result.verified, true);
+  assert.equal(result.visible_state_changed, true);
+  assert.equal(result.status, 'OBSERVED_STATE_CHANGE');
+});
+
 test('verification metadata for a form plan contains field IDs but never values', () => {
   const summary = actionVerificationSummary({
     action: 'FILL_FORM_PLAN',

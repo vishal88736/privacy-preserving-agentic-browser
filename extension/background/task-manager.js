@@ -85,6 +85,12 @@ export function friendlyError(rawMessage) {
       hint: 'Try a smaller first step (e.g. fill one section), then continue.'
     };
   }
+  if (low.includes('no visible change after')) {
+    return {
+      error: 'The agent could not confirm that its last action changed the page.',
+      hint: 'The action may still have succeeded. Check the page, then dismiss this message or retry from the current state.'
+    };
+  }
   if (low.includes('repeated the same step')) {
     return {
       error: 'The agent repeated the same step without making progress.',

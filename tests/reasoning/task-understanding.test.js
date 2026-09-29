@@ -73,6 +73,21 @@ test('privacy block returns WAIT and privacyBlocked without sending a request', 
   assert.equal(result.remoteCallAttempted, false);
 });
 
+test('backend privacy rejection is distinct from a backend outage', async () => {
+  const client = new GPTOSSClient('http://backend.test');
+  client.policyEngine = { enforceOutboundSafety() {} };
+  client.post = async () => ({
+    ok: false,
+    status: 400,
+    statusText: 'Bad Request',
+    json: async () => ({ detail: { code: 'OUTBOUND_PRIVACY_BLOCK' } })
+  });
+  const result = await client.planNextStep('Read this page', observation);
+  assert.ok(result.privacyBlocked);
+  assert.equal(result.plannerUnavailable, undefined);
+  assert.equal(result.model_trace.planner, 'privacy_blocked');
+});
+
 test('valid mocked response passes through the action, plan, and planner feedback', async () => {
   let sentBody;
   await withMockFetch(async (_url, options) => {

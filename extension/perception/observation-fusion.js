@@ -1,55 +1,26 @@
 /**
  * Observation Fusion Module
- * Combines DOM perception + VLM visual perception into a single unified
- * observation representation with spatial IoU and semantic cross-referencing.
+ * Builds the canonical semantic page representation from sanitized DOM and
+ * carries separately sourced VLM summaries as observation-level evidence.
  */
 
 import { classifyElement } from './semantic-capability.js';
-import { hasRealVlmDetections, normalizePerceptionProvenance, PerceptionProvenance } from './provenance.js';
-
-export function calculateIoU(boxA, boxB) {
-  if (!boxA || !boxB || boxA.length !== 4 || boxB.length !== 4) return 0;
-  const [xA, yA, wA, hA] = boxA;
-  const [xB, yB, wB, hB] = boxB;
-
-  const x1 = Math.max(xA, xB);
-  const y1 = Math.max(yA, yB);
-  const x2 = Math.min(xA + wA, xB + wB);
-  const y2 = Math.min(yA + hA, yB + hB);
-
-  const intersectionW = Math.max(0, x2 - x1);
-  const intersectionH = Math.max(0, y2 - y1);
-  const intersectionArea = intersectionW * intersectionH;
-
-  const areaA = wA * hA;
-  const areaB = wB * hB;
-  const unionArea = areaA + areaB - intersectionArea;
-
-  if (unionArea <= 0) return 0;
-  return intersectionArea / unionArea;
-}
+import { normalizePerceptionProvenance, PerceptionProvenance } from './provenance.js';
 
 export class ObservationFusion {
   /**
-   * Fuses sanitized DOM elements with VLM visual detections
+   * Fuses sanitized DOM semantics with separately sourced VLM summaries.
+   * Current VLM providers return prose summaries, not screenshot-derived
+   * control boxes, so controls remain DOM-grounded and receive no visual
+   * confidence score.
    * @param {Array<Object>} sanitizedDomElements
-   * @param {Object} vlmVisualObservation - { detected_elements, spatial_layout, visual_state }
+   * @param {Object} vlmVisualObservation - prose summary fields from the VLM
    * @param {Object} pageMetadata - { url, title, viewport }
    * @returns {Object} Unified Observation Model
    */
   fuse(sanitizedDomElements, vlmVisualObservation, pageMetadata = {}) {
     const provenance = normalizePerceptionProvenance(vlmVisualObservation || {});
-    // The backend's current detected_elements list is a DOM echo used by its
-    // heuristic. It has no screenshot-derived boxes. Never promote it to a
-    // visual detection unless the response carries an explicit REAL_VLM
-    // detection provenance of its own.
-    const visualElements = hasRealVlmDetections(vlmVisualObservation || {})
-      ? vlmVisualObservation.detected_elements
-      : [];
-    const matchedVisualIndices = new Set();
-    const unifiedElements = [];
-
-    const buildElement = (domEl, visual, matchedBy, matchConfidence, matched) => {
+    const unifiedElements = sanitizedDomElements.map((domEl) => {
       const semantics = classifyElement(domEl);
       const visible = domEl.is_visible !== false;
       const selectedOption = domEl.selected_option ||
@@ -82,8 +53,8 @@ export class ObservationFusion {
       child_element_ids: Array.isArray(domEl.child_element_ids) ? domEl.child_element_ids : [],
       form_group_id: domEl.form_id || null,
       semantic_action_type: semantics.semantic_type,
-      provenance: matched ? PerceptionProvenance.REAL_VLM : PerceptionProvenance.DOM,
-      confidence: matched ? bestConfidence(visual) : null,
+      provenance: PerceptionProvenance.DOM,
+      confidence: null,
       actionable: true,
       // Normalized semantic representation derived from general browser
       // semantics (accessibility, role/type, control relationships, text,
@@ -121,89 +92,28 @@ export class ObservationFusion {
         disabled: Boolean(domEl.disabled),
         in_form: Boolean(domEl.in_form),
         form_id: domEl.form_id || null,
+        required: Boolean(domEl.required),
         context: domEl.context || '',
         parent_element_id: domEl.parent_element_id || null,
         child_element_ids: Array.isArray(domEl.child_element_ids) ? domEl.child_element_ids : [],
         price_value: domEl.price_value ?? null,
         options: domEl.options
       },
-      visual: visual || null,
+      visual: null,
       interaction: {
-        clickable: ['button', 'a'].includes(domEl.tag) || (matched && domEl.tag === 'select') || ['button', 'link'].includes(domEl.role) || Boolean(domEl.is_interactive && ((domEl.tag === 'input' && (domEl.type === 'checkbox' || domEl.type === 'radio' || domEl.type === 'submit' || domEl.type === 'button')) || (domEl.tag !== 'input' && domEl.tag !== 'textarea' && (matched || domEl.tag !== 'select')))),
+        clickable: ['button', 'a'].includes(domEl.tag) || ['button', 'link'].includes(domEl.role) || Boolean(
+          domEl.is_interactive && (
+            (domEl.tag === 'input' && ['checkbox', 'radio', 'submit', 'button'].includes(domEl.type)) ||
+            (domEl.tag !== 'input' && domEl.tag !== 'textarea' && domEl.tag !== 'select')
+          )
+        ),
         typeable: (domEl.tag === 'input' && domEl.type !== 'checkbox' && domEl.type !== 'radio' && domEl.type !== 'button' && domEl.type !== 'submit') || domEl.tag === 'textarea',
         uploadable: domEl.type === 'file'
       },
-      matched_by: matchedBy,
-      match_confidence: matchConfidence ?? null,
+      matched_by: 'DOM_ONLY',
+      match_confidence: null,
       };
-    };
-
-    const bestConfidence = (visual) => {
-      const confidence = Number(visual?.confidence);
-      return Number.isFinite(confidence) ? confidence : null;
-    };
-
-    // 1. Match DOM elements with Visual detections
-    for (const domEl of sanitizedDomElements) {
-      let bestMatch = null;
-      let highestIoU = 0;
-      let matchedIndex = -1;
-
-      for (let i = 0; i < visualElements.length; i++) {
-        if (matchedVisualIndices.has(i)) continue;
-        const visEl = visualElements[i];
-
-        // Spatial IoU check
-        const iou = calculateIoU(domEl.bbox, visEl.bbox);
-        if (iou > highestIoU && iou >= 0.35) {
-          highestIoU = iou;
-          bestMatch = visEl;
-          matchedIndex = i;
-        }
-      }
-
-      if (bestMatch && matchedIndex >= 0) {
-        matchedVisualIndices.add(matchedIndex);
-        unifiedElements.push(buildElement(domEl, {
-          visual_id: bestMatch.visual_id,
-          description: bestMatch.visual_description || bestMatch.label,
-          confidence: bestMatch.confidence,
-          visual_bbox: bestMatch.bbox
-        }, 'IOU', highestIoU, true));
-      } else {
-        // DOM elements remain grounded to the page, but we do not fabricate a
-        // visual description or confidence when no real visual detection exists.
-        unifiedElements.push(buildElement(domEl, null, 'DOM_ONLY', undefined, false));
-      }
-    }
-
-    // 2. Add remaining unmatched visual elements (e.g. canvas elements, image buttons)
-    for (let i = 0; i < visualElements.length; i++) {
-      if (!matchedVisualIndices.has(i)) {
-        const visEl = visualElements[i];
-        unifiedElements.push({
-          id: `vis_target_${i + 1}`,
-          role: visEl.role || 'visual_control',
-          dom: null,
-          visual: {
-            visual_id: visEl.visual_id,
-            description: visEl.visual_description || visEl.label,
-            confidence: visEl.confidence,
-            visual_bbox: visEl.bbox
-          },
-          semantics: classifyElement({ role: visEl.role, visual: { description: visEl.visual_description || visEl.label } }),
-          interaction: {
-            clickable: false,
-            typeable: false,
-            uploadable: false
-          },
-          matched_by: 'VISUAL_ONLY',
-          provenance: PerceptionProvenance.REAL_VLM,
-          confidence: bestConfidence(visEl),
-          actionable: false
-        });
-      }
-    }
+    });
 
     // Collect list of sensitive categories present on page
     const sensitiveCategories = Array.from(new Set(
@@ -213,7 +123,10 @@ export class ObservationFusion {
     ));
 
     // Generate Form State
-    const inputs = unifiedElements.filter(el => el.interaction.typeable || el.interaction.uploadable || el.dom?.tag === 'select');
+    const inputs = unifiedElements.filter(el =>
+      el.interaction.typeable || el.interaction.uploadable || el.dom?.tag === 'select' ||
+      ['checkbox', 'radio'].includes(String(el.dom?.type || '').toLowerCase())
+    );
     const isMeaningfulValue = (v) => {
       if (v == null) return false;
       const s = String(v).trim();
@@ -222,24 +135,60 @@ export class ObservationFusion {
       if (s === '[REDACTED]' || s === '[NON_SENSITIVE_TEXT]' || s === '[example]') return false;
       return true;
     };
-    const formFields = inputs.map(el => ({
+    const isFieldFilled = (el) => {
+      const type = String(el.dom?.type || '').toLowerCase();
+      if (type === 'checkbox') return Boolean(el.dom?.checked);
+      if (type === 'radio') {
+        const group = el.dom?.form_id || '';
+        const name = el.dom?.name || '';
+        if (!name) return Boolean(el.dom?.checked);
+        return inputs.some((candidate) =>
+          String(candidate.dom?.type || '').toLowerCase() === 'radio' &&
+          (candidate.dom?.form_id || '') === group &&
+          (candidate.dom?.name || '') === name && Boolean(candidate.dom?.checked)
+        );
+      }
+      if (el.dom?.tag === 'select') return Boolean(el.dom?.selected_option && isMeaningfulValue(el.dom.selected_option.value));
+      return isMeaningfulValue(el.dom?.value);
+    };
+    const formFields = inputs.map((el) => ({
       id: el.id,
       role: el.role,
       semantic_type: el.dom?.semantic_type || 'UNKNOWN',
-      state: isMeaningfulValue(el.dom?.value) ? 'FILLED' : 'EMPTY',
+      state: isFieldFilled(el) ? 'FILLED' : 'EMPTY',
+      required: Boolean(el.dom?.required),
+      form_group_id: el.dom?.form_id || el.form_group_id || null,
       sensitive: Boolean(el.dom?.sensitive)
     }));
-
-    const filledCount = formFields.filter(f => f.state === 'FILLED').length;
-    const emptyCount = formFields.filter(f => f.state === 'EMPTY').length;
+    const formGroups = new Map();
+    for (const field of formFields) {
+      if (!field.form_group_id) continue;
+      if (!formGroups.has(field.form_group_id)) formGroups.set(field.form_group_id, []);
+      formGroups.get(field.form_group_id).push(field);
+    }
+    const forms = [...formGroups.entries()].map(([form_group_id, fields]) => {
+      const filled = fields.filter((field) => field.state === 'FILLED').length;
+      const requiredEmpty = fields.filter((field) => field.required && field.state === 'EMPTY').length;
+      const optionalEmpty = fields.filter((field) => !field.required && field.state === 'EMPTY').length;
+      return {
+        form_group_id,
+        fields,
+        completion: { filled, required_empty: requiredEmpty, optional_empty: optionalEmpty, empty: requiredEmpty + optionalEmpty, total: fields.length }
+      };
+    });
+    const filledCount = formFields.filter((field) => field.state === 'FILLED').length;
+    const emptyCount = formFields.filter((field) => field.state === 'EMPTY').length;
+    const requiredEmptyCount = formFields.filter((field) => field.required && field.state === 'EMPTY').length;
 
     const formState = {
       detected: inputs.length > 0,
       purpose: vlmVisualObservation?.page_purpose || 'Unknown Form',
       fields: formFields,
+      forms,
       completion: {
         filled: filledCount,
         empty: emptyCount,
+        required_empty: requiredEmptyCount,
         total: inputs.length
       }
     };
@@ -267,6 +216,8 @@ export class ObservationFusion {
       headings: pageMetadata.headings || [],
       result_items: pageMetadata.result_items || [],
       visible_text: pageMetadata.visible_text || '',
+      // Local-only verifier evidence. PromptBuilder intentionally omits it.
+      local_media_state: pageMetadata.local_media_state || { visible_count: 0, media: [] },
       elements: unifiedElements,
       visual_layout_summary: vlmVisualObservation?.spatial_layout || 'No visual layout analysis available.',
       visual_state_summary: vlmVisualObservation?.visual_state || 'Unknown; no visual state was inferred.',

@@ -23,6 +23,7 @@ from vlm_service import vlm_service
 from gpt_oss_service import gpt_oss_service
 from config import settings
 import logging_config
+from privacy_rules import OutboundPrivacyError
 
 logger = logging.getLogger(__name__)
 
@@ -261,11 +262,14 @@ def process_reason(req: ReasonRequest):
             page_state=req.page_state
         )
         return plan
-    except ValueError as val_err:
-        # Outbound privacy / security rejections are controlled messages,
-        # mapped to 400 like the /vision endpoint.
+    except OutboundPrivacyError as val_err:
+        # The client can distinguish a boundary rejection from an unavailable
+        # backend and show an accurate privacy message.
         logger.info("Reasoning request rejected by the boundary gate: %s", val_err)
-        raise HTTPException(status_code=400, detail=str(val_err))
+        raise HTTPException(status_code=400, detail={
+            "code": "OUTBOUND_PRIVACY_BLOCK",
+            "message": "The request contained a sensitive value that was not sanitized locally."
+        })
     except Exception as e:
         # Log the type only: exception text can carry provider URLs, status
         # codes, or internal details that must not reach clients.

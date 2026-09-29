@@ -435,6 +435,10 @@
         headings: this.extractHeadings(),
         result_items: this.extractResultItems(extracted),
         visible_text,
+        // Minimal state for visible native media. It stays local and lets the
+        // post-action verifier recognize PLAY/PAUSE even when surrounding DOM
+        // and visible text do not change. No media URLs, text, or titles.
+        local_media_state: this.extractVisibleMediaState(),
         // Only a rendered, in-viewport canvas/video surface can contain
         // pixels that OCR cannot audit. Invisible analytics-pixel canvases
         // (common on modern pages) must not gut visual grounding for every
@@ -450,6 +454,30 @@
         if (rect.width > 0 && rect.height > 0 && this.isElementVisible(el, rect)) return true;
       }
       return false;
+    }
+
+    extractVisibleMediaState() {
+      const media = [];
+      for (const element of this.queryAllDeep('video, audio')) {
+        if (element.isConnected === false) continue;
+        const rect = element.getBoundingClientRect();
+        if (!this.isElementVisible(element, rect)) continue;
+        const tag = String(element.tagName || '').toLowerCase();
+        if (tag !== 'video' && tag !== 'audio') continue;
+        // Ordinals avoid forwarding page-authored ids that may encode
+        // account or session data.
+        media.push({
+          ordinal: media.length,
+          tag,
+          paused: element.paused !== false,
+          ended: Boolean(element.ended),
+          ready_state: Number.isInteger(element.readyState)
+            ? Math.max(0, Math.min(4, element.readyState))
+            : 0
+        });
+        if (media.length >= 20) break;
+      }
+      return { visible_count: media.length, media };
     }
   }
 

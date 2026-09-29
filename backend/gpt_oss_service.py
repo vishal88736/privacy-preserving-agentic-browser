@@ -5,7 +5,7 @@ from urllib.parse import urlsplit
 from typing import Dict, Any, List, Optional
 import requests
 from config import settings
-from privacy_rules import find_sensitive_category
+from privacy_rules import OutboundPrivacyError, find_sensitive_category
 from vlm_service import _looks_like_provider_error
 from agentic.orchestrator import compose_reasoning_messages
 from agentic.context import build_page_evidence
@@ -393,7 +393,9 @@ Output ONLY a valid JSON object. Do NOT include markdown blocks:
             }
             sensitive_category = find_sensitive_category(json.dumps(user_msg, separators=(',', ':')))
             if sensitive_category:
-                raise ValueError(f"Outbound privacy check blocked an unredacted {sensitive_category} pattern.")
+                raise OutboundPrivacyError(
+                    f"Outbound privacy check blocked an unredacted {sensitive_category} pattern."
+                )
 
             headers = {
                 "Authorization": f"Bearer {settings.API_KEY}",

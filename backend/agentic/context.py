@@ -81,6 +81,15 @@ def summarize_history(task_history: Optional[List[Dict[str, Any]]]) -> str:
     extracted = last.get("extracted_text")
     if isinstance(extracted, str) and extracted.strip():
         parts.append(f"last_extracted_text: {extracted.strip()[:300]}")
+    verification = (last.get("diagnostic") or {}).get("post_action_verification")
+    if isinstance(verification, dict):
+        parts.append(
+            "post_action_verification: "
+            f"status={str(verification.get('status') or 'unknown')[:48]}, "
+            f"visible_state_changed={bool(verification.get('visible_state_changed'))}, "
+            f"target_present={bool(verification.get('target_present'))}, "
+            f"target_state_changed={bool(verification.get('target_state_changed'))}"
+        )
     return "\n".join(parts)
 
 
@@ -170,11 +179,24 @@ def build_page_evidence(
     if isinstance(headings, list):
         headings = headings[:MAX_HEADINGS]
 
+    # VLM responses currently provide short prose summaries, not control
+    # detections. Carry that evidence to the planner with its provenance and a
+    # strict size cap; do not manufacture element boxes or confidence scores.
+    visual_layout = state.get("visual_layout") or fused.get("visual_layout_summary") or ""
+    visual_state = state.get("visual_state") or fused.get("visual_state_summary") or ""
+    if not isinstance(visual_layout, str):
+        visual_layout = ""
+    if not isinstance(visual_state, str):
+        visual_state = ""
+
     evidence = {
         "PAGE_STATE": {
             "url": state.get("url"),
             "title": state.get("title"),
             "page_type": state.get("page_type"),
+            "perception_provenance": state.get("provenance") or fused.get("provenance") or "DOM_ONLY",
+            "visual_layout": visual_layout[:500],
+            "visual_state": visual_state[:500],
             "summary": state.get("summary"),
             "headings": headings,
             "result_sets": state.get("result_sets") or fused.get("result_sets"),

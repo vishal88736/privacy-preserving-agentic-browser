@@ -1,8 +1,8 @@
 # PrivAgent architecture audit and RunAnywhere reference study
 
-Audit date: 2026-09-29. This describes the current checkout, including pre-existing uncommitted work visible during the audit. No existing worktree changes were reverted or overwritten.
+Audit date: 2026-09-29. The module map and gaps below record the checkout before the follow-up fixes in this file. The audit included pre-existing uncommitted README work; no existing worktree changes were reverted or overwritten.
 
-## Current PrivAgent architecture
+## Before follow-up fixes: PrivAgent architecture
 
 ```mermaid
 flowchart TD
@@ -32,7 +32,7 @@ flowchart TD
   Vault[(Encrypted local vault)] --> Resolve
 ```
 
-### Audited module map
+### Before-follow-up module map
 
 | Responsibility | Current implementation |
 | --- | --- |
@@ -63,12 +63,12 @@ flowchart TD
 - The backend browser-agent routes are retired; the backend only provides model APIs and health status.
 - Existing test suites already include many requested cases, including microphone/search ambiguity, select/radio/checkbox handling, sensitive DOM/screenshot payloads, vault resolution, symbolic values, outbound checks, action validation, and agent loop behavior. New coverage should target missing guarantees rather than duplicate these tests.
 
-### Baseline gaps verified in the current checkout
+### Gaps at the follow-up baseline
 
 - The controller uses phase states, but they are not a small explicit state machine with OBSERVE / UNDERSTAND / GROUND / PLAN / VALIDATE / EXECUTE / VERIFY / REPLAN / DONE / BLOCKED contracts. Several phases are reported as UI states while work remains inside `runSingleStep`.
 - Content element IDs are positional and replaced on extraction. The controller validates an action against its just-built fused observation, but the observation has no opaque registry generation or mutation revision carried into content execution. A page mutation during remote reasoning or while confirmation is open can therefore leave an otherwise-connected control semantically stale.
 - Fused elements omit several available fields (visible/enabled state, title, selected option, nearby text relationship and explicit provenance/confidence). The raw extractor has most of this information, but the canonical server-facing element shape does not consistently preserve it.
-- VLM provenance currently uses `DOM_ONLY`, `DOM_PLUS_HEURISTIC`, and `DOM_PLUS_REAL_VLM` in different layers/docs. The real VLM claim is derived from the backend's `grounding_source`, but normalization should use one canonical vocabulary.
+- VLM provenance arrives from backend labels such as `DOM_PLUS_HEURISTIC` and `DOM_PLUS_REAL_VLM`; the extension normalizes these to `DOM_ONLY`, `DOM_PLUS_HEURISTIC`, or `REAL_VLM`. A real model source describes its prose summary, not screenshot-derived control detections.
 - A planner provider seam exists in the current uncommitted worktree, but the controller still calls `defaultGPTOSSClient.planNextStep` directly, so the seam is not yet the loop's actual dependency.
 
 ## RunAnywhere study
@@ -137,7 +137,7 @@ The audit identified two functional gaps, so the implementation changes attach t
 - `extension/agent/state-machine.js` defines the explicit per-step states `OBSERVE`, `UNDERSTAND`, `GROUND`, `PLAN`, `VALIDATE`, `EXECUTE`, `VERIFY`, `REPLAN`, `DONE`, and `BLOCKED`. The controller now advances those states and persists the current phase.
 - `extension/agent/verifier/action-verifier.js` compares the pre-action sanitized observation with the next fresh, fused observation before another plan is requested. It records whether visible page/target state changed and avoids claiming that a dispatched click achieved a site-level goal.
 - DOM extraction now returns an opaque `snapshot_id` plus `mutation_revision`. Fusion preserves both, the controller carries them into execution, and the content executor rejects actions if either value is stale. Targeted actions recheck after scrolling, and form plans stop when an intervening page mutation invalidates the remaining element map.
-- `extension/perception/provenance.js` normalizes provenance to `DOM_ONLY`, `DOM_PLUS_HEURISTIC`, `REAL_VLM`, `LOCAL_MODEL`, and per-element `DOM`. The backend labels its heuristic annotations as DOM annotations and emits an empty screenshot-detection list. Fusion accepts screenshot element detections only with both real-VLM and detection provenance.
+- `extension/perception/provenance.js` normalizes observation provenance to `DOM_ONLY`, `DOM_PLUS_HEURISTIC`, or `REAL_VLM`; local-model and per-element DOM provenance remain separate. The backend labels its heuristic annotations as DOM annotations and emits an empty screenshot-detection list. Observation fusion carries VLM prose summaries but keeps all controls DOM-grounded and assigns no pixel-derived confidence.
 - `extension/runtime/capability-detection.js` and `model-runtime.js` move packaged ONNX capability checks and load/fallback policy behind `ModelRuntime` and `InferenceProvider`. WebGPU is attempted only after a real adapter is returned; failed initialization falls through to WASM. Packaged model loading keeps remote assets disabled and the browser cache off.
 - `extension/perception/perception-provider.js` is the local perception interface. `LocalVisionEngine` uses the ONNX provider while Tesseract/OCR, screenshot redaction, privacy policy, and vault remain where they are.
 - `extension/reasoning/providers/planner-provider.js` now sits on the controller's live path. The production chain is an explicitly disabled provider, an inert `FutureRunAnywherePlannerProvider`, and the existing server planner. The provider receives the same sanitized context, and the action still has to pass the local schema/grounding/risk/executor path.
@@ -146,7 +146,16 @@ The audit identified two functional gaps, so the implementation changes attach t
 
 Added regression tests cover state-machine transitions, stale snapshot/revision rejection, DOM heuristic versus real-VLM provenance, packaged WebGPU-to-WASM fallback, no remote model loading, and PII in canonical DOM fields. Existing semantic, vault, privacy, safety, and browser-flow coverage remains in the full suite.
 
-The packaged bundle grew by about 34 KB. A local-only headless Chromium smoke measured DOM extraction, local object detection, OCR, screenshot sanitization, JS heap use, and WASM execution; detailed values and the missing pre-change/runtime backend trace are recorded in [architecture.md](architecture.md#measurements). No local LLM model or download/cache subsystem was added.
+The earlier architecture refactor grew each package by 34,308 bytes versus its pre-refactor baseline. This patch adds 3,209 bytes versus the tracked baseline; the current packages are 37,517 bytes above the earlier pre-refactor sizes. A local-only headless Chromium smoke measured DOM extraction, local object detection, OCR, screenshot sanitization, JS heap use, and WASM execution; detailed values and the missing pre-change/runtime backend trace are recorded in [architecture.md](architecture.md#measurements). No local LLM model or download/cache subsystem was added.
+
+## Follow-up wiring fixes
+
+- `backend/agentic/context.py` now carries capped VLM `visual_layout` and `visual_state` prose plus explicit provenance into `PAGE_STATE`. The controller preserves DOM-only control IDs; it does not invent screenshot detections or IoU scores.
+- `backend/privacy_rules.py` now context-gates ambiguous dates and Aadhaar-shaped order references. Unlabeled Aadhaar-shaped values still fail closed, and explicit Aadhaar context overrides an order-reference hint. The extension masks page emails and applies the same narrow reference exception before the server boundary. A server rejection returns `OUTBOUND_PRIVACY_BLOCK`, which the client displays as a privacy issue rather than a backend outage.
+- `ActionVerifier` compares visible text and result items as well as element state. The controller passes its result into the next planner call, re-observes before replanning, and stops after three consecutive verified actions with no visible change.
+- `SUBMIT` validation now checks required-empty fields attached to the target form, so unrelated header/search/newsletter controls do not block the target form.
+- The side panel labels `REAL_VLM`, DOM-heuristic, and DOM-only outcomes distinctly. The configured Groq model ID was checked against the official model catalog; configuration was not changed based on the incorrect claim that it is unsupported.
+- Regression tests cover VLM prompt context, verification feedback, contextual PII, scoped submit validation, and fallback provenance. Human-labeled visual annotations and scores are still absent; no benchmark result was fabricated.
 
 ## Resulting architecture map
 

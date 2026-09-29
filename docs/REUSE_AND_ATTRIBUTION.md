@@ -78,7 +78,7 @@ The extension build includes these upstream assets so screenshot analysis does n
 | **Observe-Act-Verify Loop** | Magnitude | Clean-room rewrite for MV3 | Enhanced with Sanitization step |
 | **Task State Machine** | AI Browser Agent & Magnitude | Re-architected as 14-state FSM | Strict state-transition guards |
 | **DOM Element Grounding** | Magnitude (`renderMinimalAccessibilityTree`) | Re-implemented for Content Script | Enforces PII attribute scrubbing |
-| **Visual Grounding** | Magnitude (`webActions.ts`) | Re-implemented with Bounding Box IoU | Local coordinate safety gate |
+| **Visual Grounding** | Magnitude (`webActions.ts`) | DOM semantic grounding; screenshot-box IoU is not currently implemented | Local coordinate safety gate |
 | **Local PII Detector** | Project implementation | Regex + contextual rules | Runs locally; pattern coverage is incomplete |
 | **DOM Sanitizer** | **Novel SIH Contribution** | Written from scratch | Replaces secrets with `LOCAL_*` |
 | **Screenshot Redaction** | Project implementation using upstream OCR/object detection | OCR boxes + object boxes + DOM boxes | Canvas masking before remote VLM |

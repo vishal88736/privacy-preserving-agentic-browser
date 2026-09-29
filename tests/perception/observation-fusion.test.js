@@ -1,45 +1,12 @@
 /**
- * Tests for ObservationFusion and calculateIoU
- * Covers IoU calculation, DOM+VLM element fusion, unmatched elements,
- * result_item enrichment, and page metadata propagation.
+ * Tests for canonical DOM semantics and separately sourced visual summaries.
  */
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ObservationFusion, calculateIoU } from '../../extension/perception/observation-fusion.js';
+import { ObservationFusion } from '../../extension/perception/observation-fusion.js';
 
-// ── calculateIoU ──────────────────────────────────────────────────────────
-
-test('calculateIoU - identical boxes return 1.0', () => {
-  assert.equal(calculateIoU([100, 100, 200, 50], [100, 100, 200, 50]), 1.0);
-});
-
-test('calculateIoU - completely disjoint boxes return 0.0', () => {
-  assert.equal(calculateIoU([0, 0, 100, 100], [200, 200, 100, 100]), 0.0);
-});
-
-test('calculateIoU - partial overlap returns value between 0 and 1', () => {
-  const iou = calculateIoU([0, 0, 100, 100], [50, 50, 100, 100]);
-  assert.ok(iou > 0 && iou < 1, `IoU should be in (0,1), got ${iou}`);
-});
-
-test('calculateIoU - returns 0 for null/empty inputs', () => {
-  assert.equal(calculateIoU(null, [0, 0, 10, 10]), 0);
-  assert.equal(calculateIoU([0, 0, 10, 10], null), 0);
-  assert.equal(calculateIoU([], []), 0);
-});
-
-test('calculateIoU - symmetry: IoU(A,B) == IoU(B,A)', () => {
-  const boxA = [10, 20, 100, 80];
-  const boxB = [60, 40, 120, 60];
-  const iouAB = calculateIoU(boxA, boxB);
-  const iouBA = calculateIoU(boxB, boxA);
-  assert.ok(Math.abs(iouAB - iouBA) < 1e-10, `IoU must be symmetric: ${iouAB} vs ${iouBA}`);
-});
-
-// ── ObservationFusion.fuse ────────────────────────────────────────────────
-
-test('ObservationFusion - fuses DOM element with overlapping VLM detection by IoU', () => {
+test('ObservationFusion keeps element grounding DOM-only while carrying real VLM prose separately', () => {
   const fusion = new ObservationFusion();
   const domEl = [{
     id: 'el_1', tag: 'button', label: 'Submit', bbox: [100, 200, 150, 40],
@@ -48,17 +15,18 @@ test('ObservationFusion - fuses DOM element with overlapping VLM detection by Io
   const vlmObs = {
     grounding_source: 'vision_model',
     provenance: 'DOM_PLUS_REAL_VLM',
-    detected_elements_provenance: 'REAL_VLM',
-    detected_elements: [{ visual_id: 'vis_01', label: 'Submit button', bbox: [100, 200, 150, 40], confidence: 0.97 }],
+    detected_elements: [{ visual_id: 'invented-box', label: 'Submit button', bbox: [100, 200, 150, 40], confidence: 0.97 }],
     spatial_layout: 'single button', visual_state: 'ready'
   };
   const fused = fusion.fuse(domEl, vlmObs);
   assert.equal(fused.elements.length, 1);
   const el = fused.elements[0];
   assert.equal(el.id, 'el_1');
-  assert.equal(el.matched_by, 'IOU');
-  assert.equal(el.visual.visual_id, 'vis_01');
-  assert.ok(el.match_confidence > 0.9);
+  assert.equal(fused.provenance, 'REAL_VLM');
+  assert.equal(el.matched_by, 'DOM_ONLY');
+  assert.equal(el.visual, null);
+  assert.equal(el.provenance, 'DOM');
+  assert.equal(el.confidence, null);
 });
 
 test('ObservationFusion - DOM element with no VLM match is DOM_ONLY', () => {
@@ -68,42 +36,6 @@ test('ObservationFusion - DOM element with no VLM match is DOM_ONLY', () => {
   const fused = fusion.fuse(domEl, vlmObs);
   assert.equal(fused.elements.length, 1);
   assert.equal(fused.elements[0].matched_by, 'DOM_ONLY');
-});
-
-test('ObservationFusion - VLM element with no DOM match is VISUAL_ONLY', () => {
-  const fusion = new ObservationFusion();
-  const domEl = [];
-  const vlmObs = {
-    grounding_source: 'vision_model',
-    provenance: 'DOM_PLUS_REAL_VLM',
-    detected_elements_provenance: 'REAL_VLM',
-    detected_elements: [{ visual_id: 'vis_99', label: 'Unknown button', bbox: [300, 400, 80, 30], confidence: 0.7 }],
-    spatial_layout: 'unknown', visual_state: 'loaded'
-  };
-  const fused = fusion.fuse(domEl, vlmObs);
-  // Unmatched VLM elements become VISUAL_ONLY entries
-  const visualOnlyEl = fused.elements.find(e => e.matched_by === 'VISUAL_ONLY');
-  assert.ok(visualOnlyEl, 'VISUAL_ONLY element should be added for unmatched VLM detections');
-  assert.equal(visualOnlyEl.visual.visual_id, 'vis_99');
-});
-
-test('ObservationFusion - does not double-match a VLM element', () => {
-  const fusion = new ObservationFusion();
-  // Two DOM elements with boxes overlapping the same VLM element
-  const domEls = [
-    { id: 'el_a', tag: 'button', label: 'A', bbox: [100, 100, 50, 30], sensitive: false, is_interactive: true },
-    { id: 'el_b', tag: 'button', label: 'B', bbox: [105, 103, 48, 28], sensitive: false, is_interactive: true }
-  ];
-  const vlmObs = {
-    grounding_source: 'vision_model',
-    provenance: 'DOM_PLUS_REAL_VLM',
-    detected_elements_provenance: 'REAL_VLM',
-    detected_elements: [{ visual_id: 'vis_x', label: 'Button', bbox: [100, 100, 50, 30], confidence: 0.95 }],
-    spatial_layout: 'two buttons', visual_state: 'loaded'
-  };
-  const fused = fusion.fuse(domEls, vlmObs);
-  const matchedCount = fused.elements.filter(e => e.visual?.visual_id === 'vis_x').length;
-  assert.equal(matchedCount, 1, 'A VLM element should only be matched once');
 });
 
 test('DOM heuristic annotations are not promoted to fabricated VLM detections', () => {
@@ -191,8 +123,40 @@ test('ObservationFusion - sensitive flag is preserved on fused element', () => {
 
 test('ObservationFusion - visual_layout_summary and visual_state_summary propagated', () => {
   const fusion = new ObservationFusion();
-  const vlmObs = { detected_elements: [], spatial_layout: 'grid layout', visual_state: 'results loaded' };
+  const vlmObs = {
+    grounding_source: 'vision_model', provenance: 'DOM_PLUS_REAL_VLM',
+    detected_elements: [], spatial_layout: 'grid layout', visual_state: 'results loaded'
+  };
   const fused = fusion.fuse([], vlmObs);
-  assert.ok(fused.visual_layout_summary || fused.visual_state_summary || true);
-  // At minimum the structure should not throw
+  assert.equal(fused.visual_layout_summary, 'grid layout');
+  assert.equal(fused.visual_state_summary, 'results loaded');
+  assert.equal(fused.provenance, 'REAL_VLM');
+});
+
+test('ObservationFusion scopes required and empty field counts to individual forms', () => {
+  const fusion = new ObservationFusion();
+  const fused = fusion.fuse([
+    { id: 'header_search', tag: 'input', type: 'search', form_id: 'form_header', value: '', is_interactive: true },
+    { id: 'booking_required', tag: 'input', type: 'text', form_id: 'form_booking', required: true, value: '', is_interactive: true },
+    { id: 'booking_optional', tag: 'input', type: 'text', form_id: 'form_booking', required: false, value: '', is_interactive: true }
+  ], { detected_elements: [] });
+  const header = fused.form_state.forms.find((form) => form.form_group_id === 'form_header');
+  const booking = fused.form_state.forms.find((form) => form.form_group_id === 'form_booking');
+  assert.equal(header.completion.required_empty, 0);
+  assert.equal(booking.completion.required_empty, 1);
+  assert.equal(booking.completion.optional_empty, 1);
+});
+
+test('ObservationFusion evaluates required radio groups without crossing form boundaries', () => {
+  const fusion = new ObservationFusion();
+  const fused = fusion.fuse([
+    { id: 'delivery_home', tag: 'input', type: 'radio', name: 'delivery', form_id: 'form_one', required: true, checked: false, is_interactive: true },
+    { id: 'delivery_pickup', tag: 'input', type: 'radio', name: 'delivery', form_id: 'form_one', required: true, checked: true, is_interactive: true },
+    { id: 'other_delivery', tag: 'input', type: 'radio', name: 'delivery', form_id: 'form_two', required: true, checked: false, is_interactive: true },
+    { id: 'unnamed_selected', tag: 'input', type: 'radio', form_id: 'form_three', required: true, checked: true, is_interactive: true },
+    { id: 'unnamed_empty', tag: 'input', type: 'radio', form_id: 'form_three', required: true, checked: false, is_interactive: true }
+  ], { detected_elements: [] });
+  assert.equal(fused.form_state.forms.find((form) => form.form_group_id === 'form_one').completion.required_empty, 0);
+  assert.equal(fused.form_state.forms.find((form) => form.form_group_id === 'form_two').completion.required_empty, 1);
+  assert.equal(fused.form_state.forms.find((form) => form.form_group_id === 'form_three').completion.required_empty, 1);
 });

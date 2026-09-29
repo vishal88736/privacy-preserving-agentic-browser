@@ -16,6 +16,22 @@ function observationSignature(observation) {
   return JSON.stringify({
     url: observation?.page?.url || '',
     title: observation?.page?.title || '',
+    visible_text: String(observation?.visible_text || '').replace(/\s+/g, ' ').slice(0, 3000),
+    result_items: (observation?.result_items || []).map((item) => ({
+      title: item?.title || '', text: item?.text || '', primary_action_id: item?.primary_action_id || null
+    })),
+    // Native media can start or pause without changing DOM/text. Only compare
+    // the strict local schema; no URL, media text, or precise position exists.
+    local_media_state: {
+      visible_count: observation?.local_media_state?.visible_count || 0,
+      media: (observation?.local_media_state?.media || []).map((item) => ({
+        ordinal: item?.ordinal,
+        tag: item?.tag,
+        paused: item?.paused,
+        ended: item?.ended,
+        ready_state: item?.ready_state
+      }))
+    },
     elements: (observation?.elements || []).map(elementState)
   });
 }

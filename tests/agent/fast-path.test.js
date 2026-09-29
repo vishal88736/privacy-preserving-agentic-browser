@@ -186,11 +186,82 @@ test('controller re-observes and verifies a page change before planning the next
     assert.equal(await controller.runSingleStep(task), true);
     assert.equal(task.pendingVerification?.stepNumber, 1);
     assert.equal(await controller.runSingleStep(task), false);
-    assert.equal(extractionIndex, 2);
+    assert.ok(extractionIndex >= 2, 'a fresh DOM observation must follow the dispatched click');
     assert.equal(executionContexts[0].snapshotId, 'snapshot_1');
     assert.equal(task.steps[0].diagnostic.post_action_verification.status, 'OBSERVED_STATE_CHANGE');
     assert.equal(task.lastVerification.visible_state_changed, true);
     assert.equal(task.agentLoopState, 'DONE');
+  } finally {
+    for (const undo of restore.reverse()) undo();
+    taskManager.currentTask = previousTask;
+    taskManager.settings = previousSettings;
+    if (previousChrome === undefined) delete globalThis.chrome;
+    else globalThis.chrome = previousChrome;
+  }
+});
+
+test('controller sends no-change verification into the next planning call', async () => {
+  const previousChrome = globalThis.chrome;
+  const previousTask = taskManager.currentTask;
+  const previousSettings = taskManager.settings;
+  const restore = [];
+  let extractionIndex = 0;
+  let planningIndex = 0;
+  let verificationSeenByPlanner = null;
+
+  globalThis.chrome = {
+    tabs: { get: async () => ({ id: 9, url: 'https://example.test/form', windowId: 1 }) }
+  };
+  taskManager.settings = { ...DEFAULT_SETTINGS, fastMode: true, alwaysConfirm: false };
+  const task = taskManager.createTask('Click Apply', 9);
+  task.taskState = new TaskState(task.prompt);
+  task.taskState.updateFromModel(localInterpretTask(task.prompt));
+
+  restore.push(replaceMethod(defaultActionExecutor, 'execute', async () => ({ success: true })));
+  restore.push(replaceMethod(defaultGPTOSSClient, 'planNextStep', async (_task, _observation, history) => {
+    planningIndex++;
+    if (planningIndex === 1) {
+      return { thought: 'Click the observed Apply button.', action: { action: 'CLICK', target: { element_id: 'el_apply' } } };
+    }
+    verificationSeenByPlanner = history.at(-1)?.diagnostic?.post_action_verification || null;
+    return { thought: 'Stop after considering the unchanged page.', action: { action: 'DONE' }, final_response: 'Done.' };
+  }));
+
+  const controller = new AgentController();
+  controller.notify = () => {};
+  controller.clearOverlays = () => {};
+  controller._waitForPageStability = async () => {};
+  controller._maybeHandleNavigationBootstrap = async () => ({ handled: false });
+  controller._extractDOM = async () => {
+    extractionIndex++;
+    return {
+      success: true,
+      data: {
+        snapshot_id: `unchanged_${extractionIndex}`,
+        mutation_revision: extractionIndex,
+        url: 'https://example.test/form',
+        title: 'Application',
+        viewport: { width: 1280, height: 800 },
+        elements: [
+          { id: 'el_apply', tag: 'button', type: 'button', label: 'Apply', value: '', bbox: [10, 10, 90, 30], is_interactive: true },
+          { id: 'el_help', tag: 'a', type: 'link', label: 'Help', href: '/help', bbox: [10, 50, 60, 30], is_interactive: true }
+        ],
+        headings: [], result_items: [],
+        visible_text: 'Application form. Apply to continue. Help is available.',
+        scroll: { x: 0, y: 0 }
+      }
+    };
+  };
+
+  try {
+    assert.equal(await controller.runSingleStep(task), true);
+    assert.equal(await controller.runSingleStep(task), false);
+    assert.equal(task.lastVerification.status, 'OBSERVED_NO_VISIBLE_CHANGE');
+    assert.equal(task.lastVerification.replan_required, true);
+    assert.equal(task.lastVerification.no_progress_count, 1);
+    assert.equal(verificationSeenByPlanner.visible_state_changed, false);
+    assert.equal(verificationSeenByPlanner.target_present, true);
+    assert.ok(extractionIndex >= 2, 'the dispatched click must be followed by a fresh observation');
   } finally {
     for (const undo of restore.reverse()) undo();
     taskManager.currentTask = previousTask;

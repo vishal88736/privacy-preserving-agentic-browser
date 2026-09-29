@@ -57,10 +57,10 @@ Fused observations use one canonical provenance vocabulary:
 
 - `DOM_ONLY`: no real remote VLM result was used.
 - `DOM_PLUS_HEURISTIC`: a deterministic DOM-derived layout summary was used.
-- `REAL_VLM`: a remote vision model returned visual analysis. Screenshot-derived element detections are admitted only when the result separately marks `detected_elements_provenance: REAL_VLM`.
+- `REAL_VLM`: a remote vision model returned visual analysis. The current provider contract returns layout/state prose only; it does not produce screenshot-derived control boxes.
 - `LOCAL_MODEL` identifies packaged local perception metadata, not remote VLM output.
 
-The current VLM backend's heuristic emits DOM annotations, not screenshot-derived control boxes. Fusion keeps those annotations as DOM context and does not fabricate visual detections or confidence scores. If the VLM fails, the fallback keeps `DOM_ONLY` provenance.
+The current VLM backend's heuristic emits DOM annotations, not screenshot-derived control boxes. Fusion keeps all interactive targets DOM-grounded and assigns no visual confidence score. Real VLM layout/state summaries are forwarded to the planner with `REAL_VLM` provenance. If the VLM fails, the fallback keeps `DOM_PLUS_HEURISTIC` or `DOM_ONLY` provenance as reported by its source.
 
 ## Models and runtime
 
@@ -78,7 +78,7 @@ The extension is about 48.1 MB unpacked. RunAnywhere's browser-agent docs refere
 
 ## Measurements
 
-The audit recorded baseline packaged sizes of 48,059,440 bytes (Chrome) and 48,059,581 bytes (Firefox). After the changes and final packaging, the sizes are 48,093,748 bytes and 48,093,889 bytes respectively: **+34,308 bytes** per package (about 0.071%). No project bundle-size budget is declared.
+The earlier architecture audit measured a pre-refactor baseline of 48,059,440 bytes (Chrome) and 48,059,581 bytes (Firefox), then 48,093,748 bytes and 48,093,889 bytes after that refactor (**+34,308 bytes**). Clean builds of the currently tracked baseline reproduce those post-refactor sizes. This patch adds **3,209 bytes** per package; final sizes are 48,096,957 bytes and 48,097,098 bytes (about 0.0067% over the tracked baseline, 37,517 bytes over the earlier pre-refactor baseline). No project bundle-size budget is declared.
 
 A local-only smoke benchmark ran the packaged Chrome extension in headless Chromium 1243 with GPU disabled, using a synthetic 640×360 image and a synthetic page with 80 inputs. Results were one environment sample, not a cross-device guarantee:
 

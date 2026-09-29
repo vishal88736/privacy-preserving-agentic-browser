@@ -12,10 +12,41 @@ sys.path.insert(0, str(ROOT / 'backend'))
 from vlm_service import VLMService, VLMProviderRotator
 from gpt_oss_service import GPTOSSService
 from config import settings
+from privacy_rules import find_sensitive_category
 import server
 
 
 class BackendBoundaryTests(unittest.TestCase):
+    def test_page_dates_and_order_references_do_not_trigger_ambiguous_pii_rules(self):
+        examples = (
+            'Book a flight from Delhi to Mumbai departing 12/03/2025',
+            'Deliver on 12/03/2025 please',
+            'Order reference 482173920184',
+        )
+        for text in examples:
+            with self.subTest(text=text):
+                self.assertIsNone(find_sensitive_category(text))
+        self.assertEqual(find_sensitive_category('Date of birth: 12/03/1990'), 'DOB')
+        self.assertEqual(find_sensitive_category('Aadhaar number: 482173920184'), 'AADHAAR')
+        self.assertEqual(find_sensitive_category('482173920184'), 'AADHAAR')
+        self.assertEqual(find_sensitive_category('Aadhaar order reference: 482173920184'), 'AADHAAR')
+
+    def test_backend_privacy_rejection_has_a_distinct_error_code(self):
+        req = server.ReasonRequest(
+            task='Questions? Email support@example.com',
+            fused_observation={'elements': []},
+            task_history=[],
+        )
+        previous_key = settings.API_KEY
+        settings.API_KEY = 'unit-test-api-key'
+        try:
+            with self.assertRaises(Exception) as raised:
+                server.process_reason(req)
+        finally:
+            settings.API_KEY = previous_key
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertEqual(raised.exception.detail['code'], 'OUTBOUND_PRIVACY_BLOCK')
+
     def test_legacy_agent_routes_are_not_mounted(self):
         paths = {route.path for route in server.app.routes}
         self.assertNotIn('/agent/execute', paths)

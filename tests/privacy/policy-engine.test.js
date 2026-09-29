@@ -68,6 +68,14 @@ test('PolicyEngine - blocks unmasked 12-digit Aadhaar pattern (rule 2)', () => {
   assert.throws(() => engine.enforceOutboundSafety(leaked), OutboundPolicyViolationError);
 });
 
+test('PolicyEngine - order-reference context in another field cannot exempt an Aadhaar-shaped value', () => {
+  const engine = makeEngine();
+  assert.throws(() => engine.enforceOutboundSafety({
+    label: 'Order reference',
+    unrelated_value: '482173920184'
+  }), OutboundPolicyViolationError);
+});
+
 test('PolicyEngine - blocks unmasked PAN pattern (rule 3)', () => {
   const engine = makeEngine();
   const leaked = { text: 'PAN FGHIJ5678K is in this payload' };
