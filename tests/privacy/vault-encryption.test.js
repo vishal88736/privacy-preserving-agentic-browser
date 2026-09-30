@@ -162,8 +162,8 @@ test('pre-review values stay encrypted and quarantined across restart until expl
     await vault.updateSecret(S.LOCAL_PAN, 'SYNTHETIC-OLD-PAN-VALUE');
     await vault.updateSecret(S.LOCAL_PROFILE, 'SYNTHETIC-OLD-PROFILE-VALUE');
     // Simulate an encrypted record written by a release before the explicit
-    // review marker existed.
-    delete store[VAULT_STORAGE_KEYS.meta].reviewVersion;
+    // authenticated review marker existed.
+    delete store[VAULT_STORAGE_KEYS.encrypted][VAULT_STORAGE_KEYS.reviewMarker];
 
     const upgraded = new LocalVault();
     await upgraded.ready;
@@ -186,7 +186,7 @@ test('pre-review values stay encrypted and quarantined across restart until expl
     await assert.rejects(upgraded.updateSecret(S.LOCAL_PAN, 'OVERWRITE-BEFORE-REVIEW'), /review/i);
     assert.equal(JSON.stringify(store[VAULT_STORAGE_KEYS.encrypted]), oldCiphertext,
       'ordinary updates must not overwrite quarantined storage');
-    assert.equal(store[VAULT_STORAGE_KEYS.meta].reviewVersion, undefined,
+    assert.equal(store[VAULT_STORAGE_KEYS.encrypted][VAULT_STORAGE_KEYS.reviewMarker], undefined,
       'ordinary updates cannot mark the old record reviewed');
 
     const afterRestart = new LocalVault();
@@ -201,7 +201,8 @@ test('pre-review values stay encrypted and quarantined across restart until expl
     assert.equal(afterRestart.reviewRequired, false);
     assert.equal(afterRestart.resolveSecret(S.LOCAL_PAN), 'SYNTHETIC-REVIEWED-PAN');
     assert.equal(afterRestart.resolveSecret(S.LOCAL_PROFILE), 'SYNTHETIC-OLD-PROFILE-VALUE');
-    assert.equal(store[VAULT_STORAGE_KEYS.meta].reviewVersion, 1);
+    assert.ok(store[VAULT_STORAGE_KEYS.encrypted][VAULT_STORAGE_KEYS.reviewMarker],
+      'explicit review writes the authenticated marker into the encrypted envelope');
 
     const finalRestart = new LocalVault();
     await finalRestart.ready;

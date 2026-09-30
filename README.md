@@ -5,7 +5,7 @@
 [![Firefox MV3](https://img.shields.io/badge/Firefox-MV3%20Sidebar-orange.svg)](https://extensionworkshop.com/)
 [![Local Vision](https://img.shields.io/badge/Local%20Vision-YOLOS--Tiny%20ViT%20%2B%20ONNX%20WebGPU-indigo.svg)](#-1-local-vision-processing-client-side)
 [![Fail-Closed](https://img.shields.io/badge/Privacy-Fail--Closed%20Redaction-emerald.svg)](#-2-privacy-preserving-filter-before-any-network-call)
-[![Tests](https://img.shields.io/badge/Tests-497%20JS%20%7C%2070%20Python-brightgreen.svg)](#-testing--verification)
+[![Tests](https://img.shields.io/badge/Tests-JavaScript%20%2B%20Python-brightgreen.svg)](#-testing--verification)
 [![License](https://img.shields.io/badge/License-Apache%202.0%20%2F%20MIT-lightgrey.svg)](docs/REUSE_AND_ATTRIBUTION.md)
 
 > **Server sees structure. Never secrets.**
@@ -219,14 +219,14 @@ python3 launch_test_browser.py /government-aadhaar.html   # optional auto-launch
 ## 🧪 Testing & Verification
 
 ```bash
-npm test                    # 497 tests across 37 JS files
+npm test                    # 545 tests across 40 JS files
 npm run test:privacy        # sanitization, vault, PII, policy
 npm run test:executor       # validator, risk gate, resolver
 npm run test:reasoning      # understanding, forms, prompts
 npm run test:perception     # fusion, grounding, state model
 npm run test:agent          # FSM, circuit breakers
 npm run test:schemas        # IPC contracts
-python3 -m unittest discover -s tests/security -p 'test_*.py'  # 70 backend security tests
+python3 -m unittest discover -s tests/security -p 'test_*.py'  # 73 backend security tests
 python3 tests/e2e_master_hardening_suite.py                     # Playwright hardening suite
 npm run evaluate:vision -- annotations.jsonl --iou 0.5          # needs human-labeled JSONL
 npm run evaluate:agent && npm run evaluate:task-runs            # agent / task-run reports

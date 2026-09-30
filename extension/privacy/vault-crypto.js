@@ -39,9 +39,10 @@ const VAULT_STORAGE_KEY = 'agent_local_vault_encrypted';
 const LEGACY_STORAGE_KEY = 'agent_local_vault';
 /** Non-secret marker recording the crypto schema version. */
 const VAULT_META_KEY = 'agent_local_vault_meta';
-// This marker is independent of the AES envelope version. It records that a
-// user explicitly reviewed values recovered from older vault builds.
-const VAULT_REVIEW_VERSION = 1;
+// Authenticated review status is stored as an encrypted envelope entry. A
+// plaintext metadata flag could be edited independently of the ciphertext.
+const VAULT_REVIEW_MARKER = '__privagent_vault_review_marker_v1__';
+const VAULT_REVIEWED_VALUE = 'reviewed';
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -164,12 +165,9 @@ export async function readEncryptedVault() {
     return { ok: false, values: {}, reason: `The vault key is unavailable: ${error?.message || 'unknown error'}` };
   }
 
-  const [stored, metaStored] = await Promise.all([
-    chrome.storage.local.get(VAULT_STORAGE_KEY),
-    chrome.storage.local.get(VAULT_META_KEY)
-  ]);
+  const stored = await chrome.storage.local.get(VAULT_STORAGE_KEY);
   const envelope = stored?.[VAULT_STORAGE_KEY];
-  if (!envelope || typeof envelope !== 'object') return { ok: true, values: {} };
+  if (!envelope || typeof envelope !== 'object') return { ok: true, values: {}, reviewRequired: false };
 
   const values = {};
   for (const [name, entry] of Object.entries(envelope)) {
@@ -185,8 +183,10 @@ export async function readEncryptedVault() {
       return { ok: false, values: {}, reason: `The vault entry for "${name}" could not be authenticated; it may have been altered.` };
     }
   }
-  const meta = metaStored?.[VAULT_META_KEY];
-  const reviewRequired = Object.keys(envelope).length > 0 && meta?.reviewVersion !== VAULT_REVIEW_VERSION;
+  const reviewMarker = values[VAULT_REVIEW_MARKER];
+  delete values[VAULT_REVIEW_MARKER];
+  const hasVaultValues = Object.keys(envelope).some((name) => name !== VAULT_REVIEW_MARKER);
+  const reviewRequired = hasVaultValues && reviewMarker !== VAULT_REVIEWED_VALUE;
   return { ok: true, values, reviewRequired };
 }
 
@@ -204,14 +204,10 @@ export async function writeEncryptedVault(values, { reviewed = true } = {}) {
     if (typeof value !== 'string' || value === '') continue;
     envelope[name] = await encryptValue(value, key);
   }
+  envelope[VAULT_REVIEW_MARKER] = await encryptValue(reviewed ? VAULT_REVIEWED_VALUE : 'pending', key);
   await chrome.storage.local.set({
     [VAULT_STORAGE_KEY]: envelope,
-    [VAULT_META_KEY]: {
-      encrypted: true,
-      version: 1,
-      reviewVersion: reviewed ? VAULT_REVIEW_VERSION : 0,
-      updatedAt: Date.now()
-    }
+    [VAULT_META_KEY]: { encrypted: true, version: 1, updatedAt: Date.now() }
   });
   // Drop the legacy plaintext key if one is still present, so a migration never
   // leaves readable secrets behind.
@@ -303,5 +299,6 @@ export const VAULT_STORAGE_KEYS = Object.freeze({
   encrypted: VAULT_STORAGE_KEY,
   legacy: LEGACY_STORAGE_KEY,
   meta: VAULT_META_KEY,
-  documents: VAULT_DOCUMENTS_STORAGE_KEY
+  documents: VAULT_DOCUMENTS_STORAGE_KEY,
+  reviewMarker: VAULT_REVIEW_MARKER
 });
