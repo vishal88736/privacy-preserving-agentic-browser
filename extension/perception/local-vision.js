@@ -8,6 +8,7 @@ import { findPIIMatches } from '../privacy/pii-rules.js';
 import { createLogger } from '../shared/logger.js';
 import { PerceptionProvider } from './perception-provider.js';
 import { PackagedOnnxRuntime, TransformersOnnxInferenceProvider } from '../runtime/model-runtime.js';
+import { getPackagedOcrWorker } from './ocr/local-ocr.js';
 
 const log = createLogger({ scope: 'LocalVision', surface: 'sidepanel' });
 
@@ -189,20 +190,7 @@ export class LocalVisionEngine extends PerceptionProvider {
 
   async _loadOcr() {
     if (!this.ocrPromise) {
-      this.ocrPromise = (async () => {
-        const tesseractModule = await import('../vendor/tesseract/tesseract.esm.min.js');
-        const createWorker = tesseractModule.default?.createWorker || tesseractModule.createWorker;
-        const base = this.api.runtime.getURL('vendor/tesseract/');
-        const worker = await createWorker('eng', 1, {
-          workerPath: `${base}worker.min.js`,
-          corePath: `${base}tesseract-core-simd-lstm.wasm.js`,
-          langPath: this.api.runtime.getURL('models/lang').replace(/\/$/, ''),
-          gzip: true,
-          workerBlobURL: false,
-          logger: () => {}
-        });
-        return worker;
-      })().catch((err) => {
+      this.ocrPromise = getPackagedOcrWorker(this.api).catch((err) => {
         this.ocrPromise = null;
         throw err;
       });

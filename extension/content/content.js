@@ -102,6 +102,53 @@
 
   const registry = new ElementRegistry();
 
+  // Auto-generated control identifiers carry no meaning ("entry.2005620554",
+  // "question-12", "field_3"). Returning one as the accessible label makes
+  // every downstream classifier match the wrong thing — or nothing at all —
+  // so such names are skipped and labelling falls through to context. This is
+  // a generic opaque-id rule, not a per-site exception.
+  // Strings a control exposes in place of a real name: browser format hints
+  // ("mm/dd/yyyy", "dd/mm/yyyy", "yyyy-mm-dd"), generic prompts ("Your
+  // answer", "Type here"), and bare data-type words ("Date", "Email"). None of
+  // these identify WHICH value the field wants, so label resolution must look
+  // for the question instead of returning them as the field's name.
+  /**
+   * First informative line of a question block.
+   *
+   * Once a user has answered a field, its container text becomes the question
+   * AND the answer on separate lines ("Name" / "vishal"). A heading/legend
+   * already excludes the answer; container text does not, so the second line is
+   * dropped here rather than being carried into the field name and from there
+   * into an outbound payload.
+   */
+  function firstMeaningfulLine(text) {
+    const lines = String(text || '').split('\n').map((line) => line.replace(/\s+/g, ' ').trim());
+    for (const line of lines) {
+      if (!line || isUninformativeLabel(line)) continue;
+      // A lone format hint or "Your answer" means the first line was chrome.
+      if (/^(?:mm\/dd\/yyyy|dd\/mm\/yyyy|yyyy-mm-dd)$/i.test(line)) continue;
+      return line.slice(0, 160);
+    }
+    return null;
+  }
+
+  function isUninformativeLabel(text) {
+    const value = String(text || '').replace(/\s+/g, ' ').trim();
+    if (!value) return true;
+    if (/^(?:mm\/dd\/yyyy|dd\/mm\/yyyy|yyyy-mm-dd|yyyy\/mm\/dd|dd-mm-yyyy|mm-dd-yyyy|mm\/dd\/yy|dd\/mm\/yy)$/i.test(value)) return true;
+    if (/^(?:your\s+answer|type\s+here|enter\s+(?:your\s+)?(?:answer|value|text)|select\s+an?\s+option|choose\s+an?\s+option|option|search|filter|query|type)$/i.test(value)) return true;
+    // A bare HTML input/textarea type word.
+    if (/^(?:text|date|time|datetime-local|month|week|email|tel|number|password|url|search|file|color|range)$/i.test(value)) return true;
+    return false;
+  }
+
+  function isOpaqueControlName(name) {
+    const value = String(name || '').trim();
+    if (!value) return true;
+    if (/^\d+$/.test(value)) return true;
+    return /^(?:entry|question|field|input|control|answer|item|option|choice|text|response)(?:[._\-\s]*\d+)+$/i.test(value);
+  }
+
   // Escape ids for use inside attribute selectors: element ids may contain
   // colons, dots, or brackets that would otherwise break (or worse, inject
   // into) the selector. CSS.escape is not available in all runtimes (Node
@@ -111,37 +158,145 @@
     return String(id).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
   }
 
+  // ── Vault document payloads ───────────────────────────────────────────────
+  //
+  // The only accepted shape for a stored document. The marker must be present:
+  // it is set by the background resolver and required again here, so a page, a
+  // model, or any other value that happens to be an object with a `name` and
+  // `data` field cannot be mistaken for a document the user stored.
+  const VAULT_DOCUMENT_MARKER = '__vaultDocument';
+  const DOCUMENT_NAME_TOKEN = /^LOCAL_DOCUMENT_[A-Z0-9_]{1,48}$/;
+
+  function isVaultDocumentPayload(value) {
+    return Boolean(value) && typeof value === 'object' &&
+      value[VAULT_DOCUMENT_MARKER] === true &&
+      DOCUMENT_NAME_TOKEN.test(String(value.name || '')) &&
+      typeof value.data === 'string';
+  }
+
+  /** base64 (or a byte array) -> Uint8Array. Returns null on anything else. */
+  function decodeVaultDocumentBytes(doc) {
+    try {
+      if (typeof atob === 'function' && /^[A-Za-z0-9+/]*={0,2}$/.test(doc.data)) {
+        const binary = atob(doc.data);
+        const out = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+        return out;
+      }
+      if (Array.isArray(doc.bytes)) return new Uint8Array(doc.bytes);
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  /**
+   * Does this file satisfy a page-declared `accept` list?
+   * An absent or empty attribute means "no declared constraint".
+   */
+  function matchesAcceptAttribute(accept, fileName, mimeType) {
+    const extension = String(fileName).includes('.')
+      ? String(fileName).slice(String(fileName).lastIndexOf('.') + 1).toLowerCase()
+      : '';
+    return String(accept).split(',').some((raw) => {
+      const rule = raw.trim().toLowerCase();
+      if (!rule) return false;
+      if (rule === '*/*' || rule === '*') return true;
+      if (rule.startsWith('.')) return Boolean(extension) && extension === rule.slice(1);
+      if (rule.endsWith('/*')) return String(mimeType).toLowerCase().startsWith(rule.slice(0, -1));
+      return rule === String(mimeType).toLowerCase();
+    });
+  }
+
   // 2. DOM Extractor — interactive controls PLUS page evidence (cards, prices, headings, text)
   class DOMExtractor {
     getAccessibleLabel(element) {
       const labelledBy = element.getAttribute('aria-labelledby');
       if (labelledBy) {
-        const labelEl = document.getElementById(labelledBy);
-        if (labelEl) return labelEl.innerText.trim();
+        // W3C aria-labelledby is a SPACE-SEPARATED LIST of ids whose texts
+        // join in order (question title + hint, on Google Forms and similar
+        // ARIA forms). getElementById on the whole string returns null, which
+        // silently drops every label on such pages — so resolve each id.
+        const parts = [];
+        for (const id of String(labelledBy).split(/\s+/).filter(Boolean)) {
+          let labelEl = null;
+          try {
+            labelEl = document.getElementById(id);
+          } catch {
+            labelEl = null;
+          }
+          const text = labelEl ? this.getVisiblePageText(labelEl) : '';
+          if (text) parts.push(text);
+        }
+        if (parts.length) return parts.join(' ').slice(0, 160);
       }
 
       const ariaLabel = element.getAttribute('aria-label');
-      if (ariaLabel) return ariaLabel.trim();
+      if (ariaLabel && !isUninformativeLabel(ariaLabel)) return ariaLabel.trim();
 
       if (element.id) {
         const label = document.querySelector(`label[for="${escapeIdForSelector(element.id)}"]`);
-        if (label) return label.innerText.trim();
+        const labelText = label ? this.getVisiblePageText(label) : '';
+        if (labelText && !isUninformativeLabel(labelText)) return labelText.trim();
       }
 
       const parentLabel = element.closest('label');
-      if (parentLabel) {
-        return parentLabel.innerText.trim();
+      const parentLabelText = parentLabel ? this.getVisiblePageText(parentLabel) : '';
+      if (parentLabelText && !isUninformativeLabel(parentLabelText)) {
+        return parentLabelText.trim();
       }
+
+      // A widget that only exposes a format hint ("mm/dd/yyyy") or a generic
+      // prompt ("Your answer") carries no field identity. Before settling for
+      // those, look for the question the control is part of — the heading/legend
+      // or list-item text above it. This is generic ARIA/HTML semantics
+      // (heading, legend, listitem, labelled section), not a per-site rule.
+      const question = this.getQuestionLabel(element);
+      if (question) return question;
 
       if (element.placeholder) return element.placeholder.trim();
       if (element.title) return element.title.trim();
-      if (element.name) return element.name.trim();
+      if (element.name && !isOpaqueControlName(element.name)) return element.name.trim();
 
       if (element.innerText && element.innerText.trim()) {
         return element.innerText.trim().slice(0, 80);
       }
 
       return '';
+    }
+
+    /**
+     * Find the question a control answers, using only standard structure:
+     * an enclosing fieldset legend, an ARIA-labelled section, a list item, or
+     * the nearest preceding heading. Returns null when nothing identifies it,
+     * so callers keep their existing fallbacks.
+     */
+    getQuestionLabel(element) {
+      const section = element.closest('fieldset, [role="group"], [role="radiogroup"], [role="listitem"], section, article, li');
+      if (section) {
+        const legend = section.querySelector?.('legend, [role="heading"], h1, h2, h3, h4, h5, h6');
+        const text = legend?.innerText?.replace(/\s+/g, ' ').trim();
+        if (text && !isUninformativeLabel(text)) return text.slice(0, 160);
+        // A list item / section whose own text is short enough to be a caption
+        // rather than a paragraph. Only its FIRST line is taken: a question
+        // block's innerText is "Name\nvishal" once the user has answered it, and
+        // the typed value must never travel in the field's name. Raw innerText
+        // (not the whitespace-collapsed page text) is required here so the line
+        // break that separates question from answer is still visible.
+        const own = firstMeaningfulLine(section?.innerText);
+        if (own && !isUninformativeLabel(own)) return own;
+      }
+
+      // Nearest preceding heading in document order (covers forms that wrap
+      // each question in a plain <div> with no ARIA role at all).
+      const heading = this.queryAllDeep('h1, h2, h3, h4, h5, h6, legend, [role="heading"]')
+        .find((node) => {
+          const rect = node.getBoundingClientRect();
+          return rect.top <= element.getBoundingClientRect().top + 1;
+        });
+      const headingText = heading?.innerText?.replace(/\s+/g, ' ').trim();
+      if (headingText && !isUninformativeLabel(headingText)) return firstMeaningfulLine(headingText) || headingText.slice(0, 160);
+      return null;
     }
 
     isElementVisible(element, rect) {
@@ -154,10 +309,64 @@
              rect.left < window.innerWidth && rect.right > 0;
     }
 
+    /**
+     * Rendered (has a box, not hidden) but possibly outside the viewport.
+     *
+     * `isElementVisible` answers "is this on screen right now", which is the
+     * right question for screenshots, overlays and media state. It is the
+     * WRONG question for form fields: on a long form every field below the
+     * fold is off-screen, so viewport-only extraction meant the agent could
+     * only ever see the first screenful — it asked the user for values it
+     * already had, and could not fill the rest of the form. A control only
+     * needs to exist and be visible per CSS to be typed into, because the
+     * executor scrolls it into view before writing.
+     */
+    isElementRendered(element, rect) {
+      if (!rect || rect.width <= 0 || rect.height <= 0) return false;
+      try {
+        const style = window.getComputedStyle(element);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+          return false;
+        }
+      } catch { /* keep the box check as the floor */ }
+      if (element.checkVisibility) {
+        try {
+          if (typeof element.checkVisibility === 'function' && element.checkVisibility({
+            checkOpacity: true, checkVisibilityCSS: true
+          }) === false) return false;
+        } catch { /* older engines: fall through to the rect check */ }
+      }
+      return true;
+    }
+
     getContextText(node) {
+      // A form container often contains the user's previous answers along
+      // with its question text. Field labels are already resolved separately;
+      // exporting the whole form as nearby context can therefore duplicate
+      // entered values into a second, less carefully classified text field.
+      if (/^(?:input|select|textarea)$/i.test(String(node.tagName || '')) ||
+          ['textbox', 'checkbox', 'radio', 'combobox'].includes(String(node.getAttribute?.('role') || '').toLowerCase()) ||
+          node.isContentEditable) return '';
       const container = node.closest('article, li, tr, form, fieldset, [role="listitem"], [class*="card"], [class*="product"], [class*="result"], [class*="item"], [class*="flight"], [class*="listing"], [data-product], [data-asin]') || node.parentElement;
       if (!container) return '';
       return String(container.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 280);
+    }
+
+    getVisiblePageText(root) {
+      let text = String(root?.innerText || '').replace(/\s+/g, ' ').trim();
+      if (!text || !root) return text;
+      // contenteditable and ARIA textboxes render their current value as page
+      // text, unlike native inputs. Remove those live values from the generic
+      // page excerpt; their dedicated field values still pass through the
+      // field-aware sanitizer when needed for planning.
+      const editables = this.queryAllDeep('[contenteditable]:not([contenteditable="false"]), [role="textbox"]', root);
+      for (const element of editables) {
+        const value = element.isContentEditable
+          ? String(element.textContent || '').replace(/\s+/g, ' ').trim()
+          : String(element.innerText || '').replace(/\s+/g, ' ').trim();
+        if (value) text = text.split(value).join('[FORM_FIELD]');
+      }
+      return text.slice(0, 4000);
     }
 
     parsePrice(text) {
@@ -270,16 +479,41 @@
       registry.snapshotId = snapshotId;
       const formGroupIds = new WeakMap();
       let nextFormGroup = 1;
+      const radioGroupIds = new WeakMap();
+      const nativeRadioNamesByOwner = new WeakMap();
+      let nextRadioGroup = 1;
       const getFormGroupId = (form) => {
         if (!form) return null;
         if (!formGroupIds.has(form)) formGroupIds.set(form, `form_${nextFormGroup++}`);
         return formGroupIds.get(form);
       };
+      const getRadioGroupId = (node) => {
+        const role = String(node.getAttribute?.('role') || '').toLowerCase();
+        if (node.type === 'radio' && node.name) {
+          const owner = node.form || node.closest?.('form') || document.body;
+          if (owner) {
+            let byName = nativeRadioNamesByOwner.get(owner);
+            if (!byName) {
+              byName = new Map();
+              nativeRadioNamesByOwner.set(owner, byName);
+            }
+            if (!byName.has(node.name)) byName.set(node.name, `radio_${nextRadioGroup++}`);
+            return byName.get(node.name);
+          }
+        }
+        if (role === 'radio') {
+          const group = node.closest?.('[role="radiogroup"]');
+          if (!group) return null;
+          if (!radioGroupIds.has(group)) radioGroupIds.set(group, `radio_${nextRadioGroup++}`);
+          return radioGroupIds.get(group);
+        }
+        return null;
+      };
       // Prioritized passes: form controls first, then buttons, then links —
       // so form fields are never dropped on complex pages even at the cap.
       // DOM order within each pass is preserved.
       const passes = [
-        'input, select, textarea, [role="textbox"], [role="checkbox"]',
+        'input, select, textarea, [role="textbox"], [role="checkbox"], [role="radio"], [role="combobox"], [contenteditable]:not([contenteditable="false"])',
         'button, [role="button"], [role="option"]',
         'a, [role="link"], [tabindex]:not([tabindex="-1"])'
       ];
@@ -296,23 +530,44 @@
 
       const MAX_ELEMENTS = 120;
       const extracted = [];
+      let elementLimitReached = false;
 
       for (const node of rawNodes) {
         const rect = node.getBoundingClientRect();
         const isVisible = this.isElementVisible(node, rect);
+        // Off-screen but rendered controls are still real, typeable fields on
+        // a long form; the executor scrolls them into view before writing.
+        // Only a control that is genuinely not rendered (or has no box) is
+        // dropped, plus hidden file inputs which are styled away everywhere.
+        const isRendered = this.isElementRendered(node, rect);
 
-        if (!isVisible && node.type !== 'file') continue;
-        if (extracted.length >= MAX_ELEMENTS) break;
+        if (!isRendered && node.type !== 'file') continue;
+        if (extracted.length >= MAX_ELEMENTS) {
+          elementLimitReached = true;
+          break;
+        }
 
         const id = registry.register(node);
         const tag = node.tagName.toLowerCase();
+        const role = String(node.getAttribute('role') || '').toLowerCase();
+        const formElement = node.form || node.closest?.('form') || null;
+        const isContentEditable = Boolean(node.isContentEditable);
+        const isFormControl = /^(?:input|select|textarea)$/i.test(tag) ||
+          ['textbox', 'checkbox', 'radio', 'combobox'].includes(role) || isContentEditable;
+        const controlValue = node.type === 'file' ? '' : (typeof node.value === 'string'
+          ? node.value
+          : (isContentEditable ? String(node.textContent || '') : ''));
         const label = this.getAccessibleLabel(node);
         const context = this.getContextText(node);
         const price_value = this.parsePrice(`${label} ${context}`);
         const describedBy = String(node.getAttribute('aria-describedby') || '').split(/\s+/)
-          .map((id) => document.getElementById(id)?.innerText || '')
+          .map((id) => {
+            const described = document.getElementById(id);
+            return described ? this.getVisiblePageText(described) : '';
+          })
           .filter(Boolean).join(' ').slice(0, 500);
-        const fieldsetLegend = node.closest('fieldset')?.querySelector('legend')?.innerText?.trim()?.slice(0, 240) || '';
+        const legend = node.closest('fieldset')?.querySelector('legend');
+        const fieldsetLegend = legend ? this.getVisiblePageText(legend).slice(0, 240) : '';
 
         let options = undefined;
         if (tag === 'select') {
@@ -339,28 +594,52 @@
           name: node.name || '',
           label,
           accessible_name: label,
-          text: String(node.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 180),
+          // A custom textbox may expose its current answer as innerText. The
+          // value goes through the value sanitizer below; copying it into the
+          // generic page-text channel would bypass field sensitivity checks.
+          text: isFormControl ? '' : String(node.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 180),
           title: String(node.title || '').slice(0, 180),
           placeholder: node.placeholder || '',
-          value: node.value || '',
+          // File input values contain a browser-generated fake path and the
+          // user's local filename. Neither is needed for planning; the
+          // privacy-safe has_value bit below is enough to report attachment.
+          value: controlValue,
+          // Privacy-safe filled bit (boolean only — never a value or length).
+          // The sanitizer redacts values to '[REDACTED]', which downstream
+          // filled-checks treat as EMPTY, so filled sensitive fields otherwise
+          // look unfilled forever and the agent re-types them in a loop.
+          has_value: node.type === 'file'
+            ? Boolean(node.files?.length)
+            : role === 'checkbox' || role === 'radio'
+            ? node.getAttribute('aria-checked') === 'true'
+            : tag === 'select'
+            ? Boolean(node.selectedIndex >= 0 &&
+                String(node.options?.[node.selectedIndex]?.value || '').trim())
+            : (node.type === 'checkbox' || node.type === 'radio')
+              ? Boolean(node.checked)
+              : controlValue.trim().length > 0,
           autocomplete: node.autocomplete || '',
           ariaLabel: node.getAttribute('aria-label') || '',
           ariaDescribedBy: describedBy,
           fieldset_legend: fieldsetLegend,
           role: node.getAttribute('role') || '',
+          ariaReadonly: node.getAttribute('aria-readonly') || '',
           href: node.getAttribute('href') || '',
           disabled: Boolean(node.disabled),
-          in_form: Boolean(node.form),
+          in_form: Boolean(formElement),
           // Never forward page-authored form IDs. A form can encode account or
           // session data in its id; this local ordinal is enough to model
           // relationships between controls.
-          form_id: getFormGroupId(node.form),
+          form_id: getFormGroupId(formElement),
+          radio_group_id: getRadioGroupId(node),
           // Required-ness drives whether a field gets a vault value at all. A
           // page can mark any field required, so this is treated as a planning
           // hint and never as authorisation on its own — but without it the
           // agent cannot tell "the form cannot be submitted without this" from
           // "there is an optional marketing field here".
           required: Boolean(node.required || node.getAttribute('aria-required') === 'true'),
+          readonly: Boolean(node.readOnly || node.hasAttribute?.('readonly') || node.getAttribute('aria-readonly') === 'true'),
+          is_contenteditable: isContentEditable,
           checked: Boolean(node.checked),
           selected: tag === 'select'
             ? Boolean(node.options?.[node.selectedIndex]?.selected)
@@ -377,7 +656,11 @@
           options,
           bbox: this.bboxOf(rect),
           is_interactive: true,
-          is_visible: isVisible
+          is_visible: isRendered,
+          // Separate, informational: the field exists and can be typed into
+          // even when it sits below the fold. The executor scrolls it into
+          // view before writing, so this never gates an action.
+          in_viewport: isVisible
         });
       }
 
@@ -403,7 +686,10 @@
       }
 
       const main = document.querySelector('main, [role="main"], #content, .content') || document.body;
-      const visible_text = String(main?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 4000);
+      const normalizedMainText = String(main?.innerText || '').replace(/\s+/g, ' ').trim();
+      const visible_text = this.getVisiblePageText(main);
+      const visibleTextComplete = normalizedMainText.length <= 4000;
+      const interactiveElementsComplete = !elementLimitReached;
 
       return {
         snapshot_id: snapshotId,
@@ -439,6 +725,15 @@
         // post-action verifier recognize PLAY/PAUSE even when surrounding DOM
         // and visible text do not change. No media URLs, text, or titles.
         local_media_state: this.extractVisibleMediaState(),
+        // This local-only coverage bit is deliberately stricter than checking
+        // that `elements` is an array. If either the interactive-element cap
+        // truncated extraction or the page-text excerpt was cut, screenshots
+        // cannot claim complete redaction coverage.
+        privacy_coverage: {
+          established: interactiveElementsComplete && visibleTextComplete,
+          interactive_elements_complete: interactiveElementsComplete,
+          visible_text_complete: visibleTextComplete
+        },
         // Only a rendered, in-viewport canvas/video surface can contain
         // pixels that OCR cannot audit. Invisible analytics-pixel canvases
         // (common on modern pages) must not gut visual grounding for every
@@ -730,29 +1025,89 @@
 
         case 'CHECK':
           if (targetElement) {
+            if (String(targetElement.getAttribute?.('role') || '').toLowerCase() === 'checkbox') {
+              if (targetElement.getAttribute('aria-checked') === 'true') return { success: true, changed: false };
+              targetElement.click();
+              await this._waitForFieldSettle(targetElement);
+              const checked = targetElement.getAttribute('aria-checked') === 'true';
+              return { success: checked, ...(checked ? {} : { error: 'The checkbox did not accept the checked state.' }) };
+            }
+            if (String(targetElement.getAttribute?.('role') || '').toLowerCase() === 'radio') {
+              if (targetElement.getAttribute('aria-checked') === 'true') return { success: true, changed: false };
+              targetElement.click();
+              await this._waitForFieldSettle(targetElement);
+              const checked = targetElement.getAttribute('aria-checked') === 'true';
+              return { success: checked, ...(checked ? {} : { error: 'The radio option did not become selected.' }) };
+            }
             // Already in the desired state: do not re-notify framework
             // listeners with a synthetic change event.
             if (targetElement.checked) return { success: true, changed: false };
             if (typeof targetElement.click === 'function') targetElement.click();
             else { targetElement.checked = true; targetElement.dispatchEvent(new Event('change', { bubbles: true })); }
+            if (!targetElement.checked) return { success: false, error: 'The control did not accept the checked state.' };
           }
           return { success: true };
 
         case 'UNCHECK':
           if (targetElement) {
+            if (String(targetElement.getAttribute?.('role') || '').toLowerCase() === 'checkbox') {
+              if (targetElement.getAttribute('aria-checked') === 'false') return { success: true, changed: false };
+              targetElement.click();
+              await this.sleep(40);
+              const unchecked = targetElement.getAttribute('aria-checked') === 'false';
+              return { success: unchecked, ...(unchecked ? {} : { error: 'The checkbox did not accept the unchecked state.' }) };
+            }
+            if (String(targetElement.type || '').toLowerCase() === 'radio' ||
+                String(targetElement.getAttribute?.('role') || '').toLowerCase() === 'radio') {
+              return { success: false, error: 'A radio option cannot be unchecked without selecting another option.' };
+            }
             if (!targetElement.checked) return { success: true, changed: false };
             if (typeof targetElement.click === 'function') targetElement.click();
             else { targetElement.checked = false; targetElement.dispatchEvent(new Event('change', { bubbles: true })); }
+            if (targetElement.checked) return { success: false, error: 'The control did not accept the unchecked state.' };
           }
           return { success: true };
 
-        case 'SCROLL':
-          window.scrollBy({ left: actionPayload.deltaX || 0, top: actionPayload.deltaY || 300, behavior: 'smooth' });
-          await this.sleep(250);
-          return { success: true };
+        case 'SCROLL': {
+          // Instant, not smooth: a smooth animation is still in flight when
+          // the 250 ms wait ends, so the next observation could catch a
+          // half-scrolled page and report fields as missing.
+          const deltaY = Number.isFinite(Number(actionPayload.deltaY)) ? Number(actionPayload.deltaY) : 300;
+          const deltaX = Number.isFinite(Number(actionPayload.deltaX)) ? Number(actionPayload.deltaX) : 0;
+          const before = { x: window.scrollX || 0, y: window.scrollY || 0 };
+          window.scrollBy({ left: deltaX, top: deltaY, behavior: 'auto' });
+          // Some sites (and any scrollable inner panel) move without the
+          // window moving at all. If the document did not budge, retry on the
+          // nearest scrollable ancestor so SCROLL is not a silent no-op.
+          let moved = Math.abs((window.scrollY || 0) - before.y) > 1 ||
+                      Math.abs((window.scrollX || 0) - before.x) > 1;
+          if (!moved) {
+            const scroller = this._nearestScrollableParent(targetElement);
+            if (scroller) {
+              scroller.scrollTop += deltaY;
+              scroller.scrollLeft += deltaX;
+              moved = true;
+            }
+          }
+          await this.sleep(SCROLL_SETTLE_MS);
+          return {
+            success: true,
+            moved,
+            scroll: {
+              x: Math.round(window.scrollX || 0),
+              y: Math.round(window.scrollY || 0),
+              maxY: Math.max(0, Math.round(
+                (document.documentElement?.scrollHeight || 0) - window.innerHeight
+              ))
+            }
+          };
+        }
 
         case 'UPLOAD':
-          return this._executeUpload(targetElement, resolvedValue);
+          if (!isVaultDocumentPayload(resolvedValue)) {
+            throw new Error('Choose a named document from the local vault before attaching a file.');
+          }
+          return this._executeVaultDocumentUpload(targetElement, resolvedValue);
 
         case 'SUBMIT':
           return this._executeSubmit(targetElement);
@@ -857,9 +1212,24 @@
 
     async _executeType(element, text) {
       if (!element) throw new Error('Target type element not found');
-      
-      if (element.type === 'file' || (typeof text === 'object' && text !== null)) {
-        return this._executeUpload(element, text);
+
+      // A document token is a file, not text. It may only ever land in a file
+      // input; typing it anywhere else is refused rather than coerced.
+      if (isVaultDocumentPayload(text)) {
+        throw new Error('A stored document must use UPLOAD on a file input.');
+      }
+      if (typeof text === 'string' && DOCUMENT_NAME_TOKEN.test(text)) {
+        throw new Error('A stored document token cannot be typed as text; use UPLOAD on a file input.');
+      }
+
+      if (String(element.type || '').toLowerCase() === 'file') {
+        throw new Error('File inputs require UPLOAD with a named document from the local vault.');
+      }
+      if (typeof text === 'object' && text !== null) {
+        throw new Error('A structured value cannot be typed into a text field.');
+      }
+      if (element.disabled || this._isReadOnlyControl(element)) {
+        return { success: false, error: 'The field is disabled or read-only.' };
       }
 
       // Native date inputs reject non-ISO strings (value stays ''); normalize first.
@@ -901,52 +1271,120 @@
         }
       } catch { /* use original text */ }
       const valueToSet = String(rawText || '');
-
-      element.focus();
-      element.value = '';
-      element.dispatchEvent(new Event('input', { bubbles: true }));
-
       const tag = String(element.tagName || '').toUpperCase();
+      const isEditable = Boolean(element.isContentEditable) ||
+        String(element.getAttribute?.('role') || '').toLowerCase() === 'textbox';
+      const previousValue = isEditable && element.isContentEditable
+        ? String(element.textContent || '')
+        : String(element.value ?? '');
+
+      // Reject constraints the browser would never allow a user to satisfy
+      // before touching the field. In particular, do not clear a pre-existing
+      // value and then report a maxlength failure.
+      if (tag === 'INPUT' || tag === 'TEXTAREA') {
+        const maxlengthAttr = element.getAttribute?.('maxlength');
+        const hasMaxlength = element.hasAttribute ? element.hasAttribute('maxlength') : maxlengthAttr !== null && maxlengthAttr !== undefined;
+        const maxlength = Number(maxlengthAttr);
+        if (hasMaxlength && Number.isInteger(maxlength) && maxlength >= 0 && valueToSet.length > maxlength) {
+          return { success: false, error: `Value exceeds the field limit (at most ${maxlength} characters).` };
+        }
+        const minlengthAttr = element.getAttribute?.('minlength');
+        const hasMinlength = element.hasAttribute ? element.hasAttribute('minlength') : minlengthAttr !== null && minlengthAttr !== undefined;
+        const minlength = Number(minlengthAttr);
+        if (valueToSet && hasMinlength && Number.isInteger(minlength) && minlength > 0 && valueToSet.length < minlength) {
+          return { success: false, error: `Value is shorter than the field's ${minlength}-character minimum.` };
+        }
+        const pattern = element.getAttribute?.('pattern');
+        if (pattern) {
+          try {
+            if (!new RegExp(`^(?:${pattern})$`, 'u').test(valueToSet)) {
+              return { success: false, error: 'The value does not match the field format.' };
+            }
+          } catch { /* invalid page-authored patterns are ignored by browsers */ }
+        }
+      }
+
+      if (!isEditable && tag !== 'INPUT' && tag !== 'TEXTAREA' && !('value' in element)) {
+        return { success: false, error: 'This custom field does not expose a writable text value.' };
+      }
+      element.focus();
       try {
-        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
-          || Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
-        if (setter && (tag === 'INPUT' || tag === 'TEXTAREA')) {
-          setter.call(element, valueToSet);
+        if (element.isContentEditable) {
+          element.textContent = valueToSet;
+        } else if (tag === 'INPUT' || tag === 'TEXTAREA') {
+          const prototype = tag === 'INPUT'
+            ? window.HTMLInputElement?.prototype
+            : window.HTMLTextAreaElement?.prototype;
+          const setter = prototype && Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+          if (setter) setter.call(element, valueToSet);
+          else element.value = valueToSet;
         } else {
+          // A custom textbox may expose a real `value` property. A plain div
+          // with role=textbox is only writable when contenteditable is set.
           element.value = valueToSet;
         }
       } catch {
-        element.value = valueToSet;
+        if (element.isContentEditable) element.textContent = valueToSet;
+        else if ('value' in element) element.value = valueToSet;
       }
-      element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: valueToSet }));
-      element.dispatchEvent(new Event('change', { bubbles: true }));
+
+      const actualValue = element.isContentEditable
+        ? String(element.textContent || '')
+        : String(element.value ?? '');
+      if (actualValue !== valueToSet) {
+        // Native date/number controls can silently reject malformed values.
+        // Restore the previous user value without sending a misleading event.
+        try {
+          if (element.isContentEditable) element.textContent = previousValue;
+          else if (tag === 'INPUT' || tag === 'TEXTAREA') {
+            const prototype = tag === 'INPUT' ? window.HTMLInputElement?.prototype : window.HTMLTextAreaElement?.prototype;
+            const setter = prototype && Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+            if (setter) setter.call(element, previousValue);
+            else element.value = previousValue;
+          } else element.value = previousValue;
+        } catch { /* preserve the best state the browser allows */ }
+        return { success: false, error: 'The field rejected the value (wrong format for this input type).' };
+      }
+      this._dispatchValueEvents(element, valueToSet);
+      await this._waitForFieldSettle(element);
       // No synthetic Enter keyup here: pages with keyup-Enter submit handlers
       // (chats, search bars) would submit prematurely during a typing step.
 
-      // Verify rather than report unconditional success.
-      //
-      // The native value setter bypasses the browser's own constraints, so two
-      // distinct failures have to be checked explicitly:
-      //  - maxlength is not enforced by the IDL setter, so an OTP field can
-      //    "accept" 20 characters a human could never type; the server then
-      //    rejects it and the whole task fails at the worst moment.
-      //  - an unparseable value silently yields '' on a type=number/date field,
-      //    so the write appears to succeed while the field is empty.
-      const maxlength = element.getAttribute?.('maxlength');
-      if (maxlength && Number.isFinite(Number(maxlength)) && valueToSet.length > Number(maxlength)) {
-        return {
-          success: false,
-          error: `Value is ${valueToSet.length} characters but the field accepts at most ${maxlength}.`
-        };
-      }
-      if (String(element.value ?? '') !== valueToSet) {
-        return { success: false, error: 'The field rejected the value (wrong format for this input type).' };
+      const settledValue = element.isContentEditable
+        ? String(element.textContent || '')
+        : String(element.value ?? '');
+      if (settledValue !== valueToSet) {
+        return { success: false, error: 'The field did not retain the requested value.' };
       }
       return { success: true };
     }
 
+    _isReadOnlyControl(element) {
+      return Boolean(element?.readOnly || element?.hasAttribute?.('readonly') ||
+        String(element?.getAttribute?.('aria-readonly') || '').toLowerCase() === 'true');
+    }
+
+    _dispatchValueEvents(element, value) {
+      let inputEvent;
+      try {
+        inputEvent = typeof InputEvent === 'function'
+          ? new InputEvent('input', { bubbles: true, inputType: 'insertText', data: String(value) })
+          : new Event('input', { bubbles: true });
+      } catch {
+        inputEvent = new Event('input', { bubbles: true });
+      }
+      element.dispatchEvent(inputEvent);
+      element.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
     async _executeSelect(element, optionValue) {
       if (!element) throw new Error('Target select element not found');
+      if (String(element.tagName || '').toLowerCase() !== 'select') {
+        return { success: false, error: 'SELECT only supports a native select control.' };
+      }
+      if (element.disabled || this._isReadOnlyControl(element)) {
+        return { success: false, error: 'The dropdown is disabled or read-only.' };
+      }
       element.focus();
       const str = String(optionValue ?? '').toLowerCase().trim();
       const options = Array.from(element.options || []);
@@ -970,7 +1408,9 @@
         }
       }
       if (!opt) {
-        return { success: false, error: `No option on this dropdown matches "${optionValue}".` };
+        // Do not echo a proposed value in an error message; select values can
+        // contain personal data and the result may be included in task history.
+        return { success: false, error: 'No option on this dropdown matches the requested value.' };
       }
 
       const valueToSet = opt.value;
@@ -986,35 +1426,74 @@
         element.value = valueToSet;
       }
       
-      element.dispatchEvent(new Event('change', { bubbles: true }));
       element.dispatchEvent(new Event('input', { bubbles: true }));
-      if (element.selectedIndex < 0) {
+      element.dispatchEvent(new Event('change', { bubbles: true }));
+      await this._waitForFieldSettle(element);
+      if (element.selectedIndex < 0 || element.value !== valueToSet) {
         return { success: false, error: 'The dropdown did not accept the option.' };
       }
       return { success: true };
     }
 
-    async _executeUpload(element, docData) {
+    /**
+     * Attach a document the USER stored in the local vault, by name.
+     *
+     * What can reach this method is one descriptor: a name matching
+     * LOCAL_DOCUMENT_<NAME>, a base64 body, a file name and a MIME type. There
+     * is no file path, no directory, no picker, and no way to name a file the
+     * user did not store. The model chooses WHICH of the user's own documents
+     * to attach; it can never choose a file to read.
+     *
+     * The bytes are used to construct a File and are never logged, returned,
+     * or attached to the response.
+     */
+    async _executeVaultDocumentUpload(element, doc) {
       if (!element) throw new Error('Target upload element not found');
-
-      if (docData?.demo !== true || docData?.content !== 'SYNTHETIC DEMO FILE — NO PERSONAL DATA') {
-        throw new Error('Real document upload is not supported. Choose the file directly on the webpage.');
+      if (!isVaultDocumentPayload(doc)) {
+        throw new Error('A stored document must be supplied as a vault document descriptor.');
       }
-      const fileName = 'synthetic-demo.txt';
-      const mimeType = 'text/plain';
-      const fileContent = docData.content;
 
-      const blob = new Blob([fileContent], { type: mimeType });
-      const file = new File([blob], fileName, { type: mimeType });
+      // The target must be a real file input. Anything else — a text box, a
+      // contenteditable, a drop zone, a non-element — is refused.
+      const tag = String(element.tagName || '').toUpperCase();
+      const type = String(element.type || '').toLowerCase();
+      if (tag !== 'INPUT' || type !== 'file') {
+        throw new Error('A stored document can only be attached to a file input.');
+      }
+      if (element.disabled) {
+        throw new Error('The file input on this page is disabled.');
+      }
 
+      const bytes = decodeVaultDocumentBytes(doc);
+      if (!bytes || !bytes.length) {
+        throw new Error('The stored document could not be read. Save it again from the vault.');
+      }
+
+      const fileName = String(doc.fileName || 'document').replace(/[\\/\u0000-\u001f\u007f]/g, '_').slice(0, 128);
+      const mimeType = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,63}$/i
+        .test(String(doc.mimeType || '')) ? String(doc.mimeType) : 'application/octet-stream';
+
+      // Respect an explicit accept list when the site declares one: a document
+      // is not silently attached to a field that only accepts a different type.
+      const accept = String(element.getAttribute?.('accept') || '').trim();
+      if (accept && !matchesAcceptAttribute(accept, fileName, mimeType)) {
+        throw new Error(`This field only accepts ${accept}, which the stored document does not match.`);
+      }
+
+      const file = new File([bytes], fileName, { type: mimeType });
       const dataTransfer = new DataTransfer();
       dataTransfer.items.add(file);
       element.files = dataTransfer.files;
 
-      element.dispatchEvent(new Event('change', { bubbles: true }));
+      // React, Angular and Vue all track file inputs through their own change
+      // listeners; without both events the page keeps believing the field is
+      // empty and never submits what was attached.
       element.dispatchEvent(new Event('input', { bubbles: true }));
+      element.dispatchEvent(new Event('change', { bubbles: true }));
 
-      return { success: true, uploadedFile: fileName };
+      // The result carries the file NAME only. The document name is the token
+      // the model already knows; the bytes are never echoed back anywhere.
+      return { success: true, uploadedFile: fileName, document: doc.name };
     }
 
     async _executeSubmit(element) {
@@ -1055,12 +1534,20 @@
 
       // Phase 1: resolve every target up front, while ids still mean something.
       const resolved = fields.map((field) => {
+        if (isVaultDocumentPayload(field?.value) ||
+            (typeof field?.value === 'string' && DOCUMENT_NAME_TOKEN.test(field.value)) ||
+            (typeof field?.value_source === 'string' && DOCUMENT_NAME_TOKEN.test(field.value_source))) {
+          return { field, el: null, reason: 'A stored document must use UPLOAD on a file input.' };
+        }
         if (field.value === undefined || field.value === null || field.value === '') {
           return { field, el: null, reason: `Missing value for "${field.field_id}" (${field.value_source || 'no source'})` };
         }
         const el = field.field_id ? registry.getElement(field.field_id) : null;
         if (!el) return { field, el: null, reason: 'Element not found (page changed since observation)' };
         if (!el.isConnected) return { field, el: null, reason: 'Element was removed from the page' };
+        if (el.disabled || this._isReadOnlyControl(el)) {
+          return { field, el: null, reason: 'Field is disabled or read-only' };
+        }
         // The plan was built against an observation. If the control has become
         // something else, the value does not belong in it — a card number must
         // never follow a field that turned into a search box.
@@ -1068,25 +1555,36 @@
         if (expected && this._controlTypeOf(el) !== expected) {
           return { field, el: null, reason: `Field type changed (expected ${expected}, found ${this._controlTypeOf(el)})` };
         }
-        return { field, el, reason: null };
+        return { field, el, signature: this._formControlSignature(el), formElement: el.form || el.closest?.('form') || null, reason: null };
       });
 
       // Phase 2: fill, reusing the references captured above.
+      try {
+        // Check the page snapshot once before the first mutation. Rechecking
+        // the global mutation revision between fields would reject our own
+        // input events and contenteditable writes, preventing the rest of an
+        // otherwise grounded form plan from running.
+        this._assertFreshObservation(observationContext);
+      } catch (error) {
+        return {
+          success: false,
+          details: resolved.map((item) => ({ field: item.field?.field_id, success: false, reason: error.message }))
+        };
+      }
       for (const item of resolved) {
-        try {
-          this._assertFreshObservation(observationContext);
-        } catch (error) {
-          details.push({ field: item.field.field_id, success: false, reason: error.message });
-          for (const pending of resolved.slice(details.length)) {
-            if (pending.field?.field_id) details.push({ field: pending.field.field_id, success: false, reason: error.message });
-          }
-          break;
-        }
         if (!item.el) {
           details.push({ field: item.field.field_id, success: false, reason: item.reason });
           continue;
         }
         const { field, el } = item;
+        if (!el.isConnected) {
+          details.push({ field: field.field_id, success: false, reason: 'Element was removed while filling' });
+          continue;
+        }
+        if (this._formControlSignature(el) !== item.signature || (el.form || el.closest?.('form') || null) !== item.formElement) {
+          details.push({ field: field.field_id, success: false, reason: 'Field identity changed after the plan was grounded' });
+          continue;
+        }
         try {
           await this._fillPlanElement(el, field.value, field);
           if (!el.isConnected) {
@@ -1102,27 +1600,52 @@
       return { success: details.length > 0 && details.every(r => r.success), details };
     }
 
-    /** DOM-level control kind, matching FormAnalyzer.controlType() values. */
+    /** DOM-level control kind used by form plans. */
     _controlTypeOf(el) {
       const tag = String(el?.tagName || '').toLowerCase();
       const type = String(el?.type || '').toLowerCase();
+      const role = String(el?.getAttribute?.('role') || '').toLowerCase();
       if (tag === 'select') return 'SELECT';
-      if (tag === 'textarea') return 'TEXTAREA';
+      if (tag === 'textarea' || el?.isContentEditable || role === 'textbox') return 'TEXTAREA';
       if (type === 'radio') return 'RADIO';
-      if (type === 'checkbox') return 'CHECKBOX';
+      if (type === 'checkbox' || role === 'checkbox') return 'CHECKBOX';
+      if (role === 'radio') return 'RADIO';
       if (type === 'email') return 'EMAIL';
       if (type === 'tel') return 'PHONE';
       if (type === 'number') return 'NUMBER';
-      if (type === 'date') return 'DATE';
+      if (['date', 'datetime-local', 'month', 'week'].includes(type)) return 'DATE';
       return 'TEXT';
+    }
+
+    _formControlSignature(el) {
+      const attributes = ['id', 'name', 'type', 'role', 'aria-label', 'aria-labelledby', 'placeholder', 'autocomplete'];
+      return JSON.stringify([
+        String(el?.tagName || '').toLowerCase(),
+        Boolean(el?.isContentEditable),
+        ...attributes.map((name) => String(el?.getAttribute?.(name) || ''))
+      ]);
     }
 
     _normalizeDateForInput(el, value) {
       try {
         const type = String(el?.type || '').toLowerCase();
-        if (type !== 'date' || typeof value !== 'string') return value;
+        if (!['date', 'datetime-local', 'month', 'week'].includes(type) || typeof value !== 'string') return value;
         const trimmed = value.trim();
         if (!trimmed) return '';
+        if (type === 'datetime-local') {
+          const localDateTime = trimmed.replace(' ', 'T');
+          return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?$/.test(localDateTime)
+            ? localDateTime
+            : value;
+        }
+        if (type === 'month') {
+          const month = trimmed.match(/^(\d{4})[-/](\d{1,2})$/);
+          return month ? `${month[1]}-${month[2].padStart(2, '0')}` : value;
+        }
+        if (type === 'week') {
+          const week = trimmed.match(/^(\d{4})[- ]?[Ww](\d{1,2})$/);
+          return week ? `${week[1]}-W${week[2].padStart(2, '0')}` : value;
+        }
         if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
 
         const ymd = trimmed.match(/^(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})$/);
@@ -1156,6 +1679,20 @@
       return value;
     }
 
+    /** Nearest ancestor that actually scrolls; null when the window is the scroller. */
+    _nearestScrollableParent(element) {
+      let node = element?.parentElement || null;
+      while (node && node !== document.body && node !== document.documentElement) {
+        const style = window.getComputedStyle(node);
+        const overflowY = String(style?.overflowY || '');
+        const scrollable = node.scrollHeight > node.clientHeight + 1 &&
+          /(auto|scroll|overlay)/.test(overflowY);
+        if (scrollable) return node;
+        node = node.parentElement;
+      }
+      return null;
+    }
+
     _normalizeFormOption(value, semanticType = '') {
       let normalized = String(value ?? '').trim().toLowerCase().replace(/[._-]+/g, ' ').replace(/\s+/g, ' ');
       if (semanticType === 'country') {
@@ -1172,11 +1709,13 @@
 
     async _fillPlanElement(el, value, field = {}) {
       const str = String(this._normalizeDateForInput(el, value) ?? '');
+      if (el.disabled || this._isReadOnlyControl(el)) throw new Error('Field is disabled or read-only.');
       el.scrollIntoView({ behavior: 'auto', block: 'center' });
       await this.sleep(80);
       el.focus();
       const tag = String(el.tagName || '').toUpperCase();
       const type = String(el.type || '').toLowerCase();
+      const role = String(el.getAttribute?.('role') || '').toLowerCase();
       if (tag === 'SELECT') {
         const semanticType = field.semantic_type || '';
         const normalize = candidate => this._normalizeFormOption(candidate, semanticType);
@@ -1192,13 +1731,17 @@
           el.dispatchEvent(new Event('change', { bubbles: true }));
           await this._waitForFieldSettle(el);
         }
-      } else if (type === 'checkbox') {
-        const normalized = String(value ?? '').trim().toLowerCase();
-        let should;
-        if (value === true || value === 1 || ['true', 'yes', '1', 'checked', 'agree', 'agreed', 'accepted', 'accept'].includes(normalized)) should = true;
-        else if (value === false || value === 0 || ['false', 'no', '0', 'unchecked', 'decline', 'declined', 'not agree', ''].includes(normalized)) should = false;
-        else throw new Error('The configured checkbox value is ambiguous.');
-        if (el.checked !== should) el.click();
+      } else if (type === 'checkbox' || role === 'checkbox') {
+        const should = this._checkboxValue(value);
+        if (should === null) throw new Error('The configured checkbox value is ambiguous.');
+        const current = role === 'checkbox' ? el.getAttribute('aria-checked') === 'true' : Boolean(el.checked);
+        if (current !== should) {
+          el.click();
+          await this._waitForFieldSettle(el);
+        }
+        if (role === 'checkbox' && (el.getAttribute('aria-checked') === 'true') !== should) {
+          throw new Error('The custom checkbox did not accept the requested state.');
+        }
       } else if (type === 'radio') {
         const want = this._normalizeFormOption(value, field.semantic_type || '');
         const group = el.name
@@ -1217,24 +1760,62 @@
         }
         if (!matched) throw new Error('No radio option matches the configured profile value.');
         await this._waitForFieldSettle(el);
+      } else if (role === 'radio') {
+        const groupRoot = el.closest?.('[role="radiogroup"]');
+        if (!groupRoot) throw new Error('Custom radio controls need an accessible radiogroup to select safely.');
+        const radios = Array.from(groupRoot.querySelectorAll?.('[role="radio"]') || []);
+        const want = this._normalizeFormOption(value, field.semantic_type || '');
+        const selected = radios.find((radio) => {
+          const label = this._radioAccessibleText(radio);
+          const optionValue = radio.getAttribute?.('value') || radio.getAttribute?.('aria-valuetext') || '';
+          return this._normalizeFormOption(optionValue, field.semantic_type || '') === want ||
+            this._normalizeFormOption(label, field.semantic_type || '') === want;
+        });
+        if (!selected) throw new Error('No custom radio option matches the configured profile value.');
+        if (selected.getAttribute('aria-checked') !== 'true') selected.click();
+        await this._waitForFieldSettle(selected);
+        if (selected.getAttribute('aria-checked') !== 'true') throw new Error('The custom radio option did not become selected.');
       } else {
-        try {
-          const proto = tag === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
-          const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-          if (setter && (tag === 'INPUT' || tag === 'TEXTAREA')) setter.call(el, str);
+        if (type === 'file' || role === 'combobox') {
+          throw new Error('This custom control cannot be safely filled as text.');
+        }
+        if (el.isContentEditable) {
+          el.textContent = str;
+        } else if (tag === 'INPUT' || tag === 'TEXTAREA') {
+          const prototype = tag === 'TEXTAREA' ? window.HTMLTextAreaElement?.prototype : window.HTMLInputElement?.prototype;
+          const setter = prototype && Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+          if (setter) setter.call(el, str);
           else el.value = str;
-        } catch { el.value = str; }
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
+        } else if (role === 'textbox' && 'value' in el) {
+          el.value = str;
+        } else {
+          throw new Error('This control does not expose a writable text value.');
+        }
+        this._dispatchValueEvents(el, str);
+        await this._waitForFieldSettle(el);
       }
       el.dispatchEvent(new Event('blur', { bubbles: true }));
       await this.sleep(40);
+    }
+
+    _checkboxValue(value) {
+      const normalized = String(value ?? '').trim().toLowerCase();
+      if (value === true || value === 1 || ['true', 'yes', '1', 'checked', 'agree', 'agreed', 'accepted', 'accept'].includes(normalized)) return true;
+      if (value === false || value === 0 || ['false', 'no', '0', 'unchecked', 'decline', 'declined', 'not agree', ''].includes(normalized)) return false;
+      return null;
+    }
+
+    _radioAccessibleText(radio) {
+      const labelledBy = String(radio.getAttribute?.('aria-labelledby') || '').split(/\s+/).filter(Boolean)
+        .map((id) => document.getElementById(id)?.innerText || '').join(' ');
+      return radio.getAttribute?.('aria-label') || labelledBy || radio.innerText || radio.textContent || '';
     }
 
     _verifyPlanElement(el, value, field = {}) {
       const want = String(this._normalizeDateForInput(el, value) ?? '').toLowerCase();
       const tag = String(el.tagName || '').toUpperCase();
       const type = String(el.type || '').toLowerCase();
+      const role = String(el.getAttribute?.('role') || '').toLowerCase();
       if (tag === 'SELECT') {
         const expected = this._normalizeFormOption(value, field.semantic_type || '');
         const selected = el.options[el.selectedIndex];
@@ -1243,10 +1824,12 @@
           this._normalizeFormOption(selected.text, field.semantic_type || '') === expected
         );
       }
-      if (type === 'checkbox') {
-        const normalized = String(value ?? '').trim().toLowerCase();
-        const should = value === true || value === 1 || ['true', 'yes', '1', 'checked', 'agree', 'agreed', 'accepted', 'accept'].includes(normalized);
-        return el.checked === should;
+      if (type === 'checkbox' || role === 'checkbox') {
+        const should = this._checkboxValue(value);
+        if (should === null) return false;
+        return role === 'checkbox'
+          ? (el.getAttribute('aria-checked') === 'true') === should
+          : el.checked === should;
       }
       if (type === 'radio') {
         const group = el.name
@@ -1262,6 +1845,19 @@
         }
         return false;
       }
+      if (role === 'radio') {
+        const groupRoot = el.closest?.('[role="radiogroup"]');
+        if (!groupRoot) return false;
+        const expected = this._normalizeFormOption(value, field.semantic_type || '');
+        return Array.from(groupRoot.querySelectorAll?.('[role="radio"]') || []).some((radio) => {
+          const optionValue = radio.getAttribute?.('value') || radio.getAttribute?.('aria-valuetext') || '';
+          const matches = this._normalizeFormOption(optionValue, field.semantic_type || '') === expected ||
+            this._normalizeFormOption(this._radioAccessibleText(radio), field.semantic_type || '') === expected;
+          return matches && radio.getAttribute('aria-checked') === 'true';
+        });
+      }
+      if (el.isContentEditable) return String(el.textContent || '').toLowerCase() === want;
+      if (role === 'textbox' && !('value' in el)) return false;
       return String(el.value ?? '').toLowerCase() === want;
     }
 

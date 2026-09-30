@@ -84,6 +84,28 @@ test('DOMSanitizer - PII in canonical accessible and selected-state fields is re
   assert.match(sanitizedElements[0].selected_option.value, /REDACTED/);
 });
 
+test('DOMSanitizer - strips page-authored identifier data and keeps safe form semantics', () => {
+  const sanitizer = new DOMSanitizer();
+  const { sanitizedElements } = sanitizer.sanitizeElements([
+    { id: 'el_1', tag: 'input', type: 'text', name: 'firstName', value: 'Jane Doe' },
+    { id: 'el_2', tag: 'input', type: 'text', name: 'shippingAddress', value: '42 Oak Road' },
+    { id: 'el_3', tag: 'select', type: 'select-one', name: 'country', value: 'India' },
+    { id: 'el_4', tag: 'input', type: 'radio', name: 'gender', value: 'female' },
+    {
+      id: 'Jane Doe 482173920184', tag: 'input', type: 'text',
+      name: 'applicantName_JaneDoe_482173920184_jane@example.com', value: ''
+    }
+  ]);
+  const serialized = JSON.stringify(sanitizedElements);
+
+  assert.equal(sanitizedElements[0].id, 'el_1', 'synthetic target IDs must still resolve');
+  assert.equal(sanitizedElements[4].id, '', 'opaque page IDs must be dropped');
+  assert.equal(sanitizedElements[4].name, 'applicant name', 'safe field meaning should survive');
+  assert.deepEqual(sanitizedElements.slice(0, 4).map((element) => element.sensitive), [true, true, true, true]);
+  assert.doesNotMatch(serialized, /Jane Doe|JaneDoe|482173920184|jane@example\.com|42 Oak Road|India|female/);
+  assert.match(serialized, /first name|shipping address|country|gender/);
+});
+
 test('DOMSanitizer - Sanitizes sensitive query parameters in URLs', () => {
   const sanitizer = new DOMSanitizer();
   const rawUrl = 'https://gov-services.in/apply?step=2&token=secret_auth_token_999&session=abcxyz';
@@ -93,13 +115,13 @@ test('DOMSanitizer - Sanitizes sensitive query parameters in URLs', () => {
   assert.ok(cleanUrl.includes('token=%5BREDACTED%5D') || cleanUrl.includes('token=[REDACTED]'));
 });
 
-test('DOMSanitizer - Redacts lowercase IFSC codes from outbound text and placeholders', () => {
+test('DOMSanitizer - Redacts lowercase IFSC codes from outbound text and placeholders', async () => {
   const sanitizer = new DOMSanitizer();
   const extras = sanitizer.sanitizePageExtras({ visible_text: 'Branch IFSC: sbin0001234' });
   const placeholder = sanitizer.scrubPlaceholderText('sbin0001234');
   assert.doesNotMatch(extras.visible_text, /sbin0001234/i);
   assert.doesNotMatch(placeholder, /sbin0001234/i);
-  assert.doesNotThrow(() => new PolicyEngine(new LocalVault()).enforceOutboundSafety(extras));
+  await assert.doesNotReject(() => new PolicyEngine(new LocalVault()).enforceOutboundSafety(extras));
 });
 
 test('DOMSanitizer - keeps only minimal local media state for the verifier', () => {
@@ -126,7 +148,7 @@ test('DOMSanitizer - keeps only minimal local media state for the verifier', () 
   assert.doesNotMatch(JSON.stringify(extras.local_media_state), /private\.example|secret|jane@example\.com|src|title/i);
 });
 
-test('PolicyEngine - Blocks outbound payloads containing unredacted secrets', () => {
+test('PolicyEngine - Blocks outbound payloads containing unredacted secrets', async () => {
   const vault = new LocalVault();
   const policyEngine = new PolicyEngine(vault);
 
@@ -137,7 +159,7 @@ test('PolicyEngine - Blocks outbound payloads containing unredacted secrets', ()
       { id: 'el_1', label: 'Aadhaar', value: '[REDACTED]', value_source: 'LOCAL_AADHAAR' }
     ]
   };
-  assert.doesNotThrow(() => policyEngine.enforceOutboundSafety(safePayload));
+  await assert.doesNotReject(() => policyEngine.enforceOutboundSafety(safePayload));
 
   // Dangerous payload containing raw secret from vault
   const leakedPayload = {
@@ -146,14 +168,14 @@ test('PolicyEngine - Blocks outbound payloads containing unredacted secrets', ()
       { id: 'el_1', label: 'Aadhaar', value: '4821 7392 0184' } // Leaking raw vault secret
     ]
   };
-  assert.throws(
+  await assert.rejects(
     () => policyEngine.enforceOutboundSafety(leakedPayload),
     OutboundPolicyViolationError,
     'Must throw OutboundPolicyViolationError when raw secret is leaked'
   );
 });
 
-test('DOMSanitizer - Scrubs PII-shaped example text from placeholders', () => {
+test('DOMSanitizer - Scrubs PII-shaped example text from placeholders', async () => {
   const vault = new LocalVault();
   const sanitizer = new DOMSanitizer(undefined, undefined, vault);
 
@@ -191,7 +213,7 @@ test('DOMSanitizer - Scrubs PII-shaped example text from placeholders', () => {
 
   // The scrubbed payload must pass the outbound policy gate (vault holds same defaults)
   const policyEngine = new PolicyEngine(vault);
-  assert.doesNotThrow(
+  await assert.doesNotReject(
     () => policyEngine.enforceOutboundSafety(safePayload),
     'Scrubbed demo-page payload must pass the outbound policy gate'
   );

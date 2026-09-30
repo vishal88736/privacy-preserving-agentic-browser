@@ -36,43 +36,43 @@ function visionPayload(shot, extra = {}) {
   };
 }
 
-test('PolicyEngine - base64 screenshot bytes never trip PII patterns', () => {
+test('PolicyEngine - base64 screenshot bytes never trip PII patterns', async () => {
   const engine = new PolicyEngine();
   const shot = fakeScreenshotDataUrl();
-  assert.doesNotThrow(() => engine.enforceOutboundSafety(visionPayload(shot)));
+  await assert.doesNotReject(() => engine.enforceOutboundSafety(visionPayload(shot)));
 });
 
-test('PolicyEngine - real PAN in text is still blocked beside a screenshot', () => {
+test('PolicyEngine - real PAN in text is still blocked beside a screenshot', async () => {
   const engine = new PolicyEngine();
   const shot = fakeScreenshotDataUrl();
-  assert.throws(
+  await assert.rejects(
     () => engine.enforceOutboundSafety(visionPayload(shot, { note: 'my pan is ABCDE1234F ok' })),
     /PAN/
   );
 });
 
-test('PolicyEngine - real Aadhaar in text is still blocked beside a screenshot', () => {
+test('PolicyEngine - real Aadhaar in text is still blocked beside a screenshot', async () => {
   const engine = new PolicyEngine();
   const shot = fakeScreenshotDataUrl();
-  assert.throws(
+  await assert.rejects(
     () => engine.enforceOutboundSafety(visionPayload(shot, { note: 'aadhaar 4821 7392 0184' })),
     /Aadhaar|raw value/
   );
 });
 
-test('PolicyEngine - raw vault secret in text is still blocked beside a screenshot', () => {
+test('PolicyEngine - raw vault secret in text is still blocked beside a screenshot', async () => {
   const engine = new PolicyEngine();
   const shot = fakeScreenshotDataUrl();
   engine.vault.memoryStore.LOCAL_PROFILE = 'synthetic-vault-secret-fixture';
   const secrets = engine.vault.getAllSecretsForUI();
   const firstKey = 'LOCAL_PROFILE';
-  assert.throws(
+  await assert.rejects(
     () => engine.enforceOutboundSafety(visionPayload(shot, { text: `leak ${secrets[firstKey]} end` })),
     /raw value/
   );
 });
 
-test('PolicyEngine - an unredacted screenshot cannot ride along in a vision payload', () => {
+test('PolicyEngine - an unredacted screenshot cannot ride along in a vision payload', async () => {
   // The screenshot is the largest artifact in the request and the one most
   // likely to carry PII. It used to be deleted from the scanned string before
   // any check ran, so a silent upstream redaction failure still reached the
@@ -80,15 +80,15 @@ test('PolicyEngine - an unredacted screenshot cannot ride along in a vision payl
   const engine = new PolicyEngine();
   const shot = fakeScreenshotDataUrl();
   const { redaction_audit, ...withoutAttestation } = visionPayload(shot);
-  assert.throws(
+  await assert.rejects(
     () => engine.enforceOutboundSafety(withoutAttestation),
     /without a local redaction attestation/
   );
 });
 
-test('PolicyEngine - a withheld screenshot is never transmitted', () => {
+test('PolicyEngine - a withheld screenshot is never transmitted', async () => {
   const engine = new PolicyEngine();
-  assert.throws(
+  await assert.rejects(
     () => engine.enforceOutboundSafety(visionPayload(fakeScreenshotDataUrl(), {
       redaction_audit: { screenshot_withheld: true, coverage_established: true, local_vision_completed: true }
     })),

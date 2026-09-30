@@ -79,6 +79,30 @@ export const SymbolicSecretSource = Object.freeze({
   LOCAL_IBAN: 'LOCAL_IBAN'
 });
 
+// ── Named vault documents ─────────────────────────────────────────────────
+//
+// A user can pre-store an identity document in the local vault under a name of
+// their choosing ("aadhar", "pan", "passport"). The model never sees or names a
+// file: it selects one of these tokens, and only a token the user created can
+// ever resolve.
+//
+// The name is a SECURITY BOUNDARY, not a label. It travels to the remote model
+// inside prompts and action JSON, and it is the only handle on the stored
+// bytes, so the charset is restricted to uppercase letters, digits and
+// underscores with a hard length bound. Nothing in this format can express a
+// path, a directory, a glob, or a file id — there is no API anywhere that
+// takes a local path, so "read an arbitrary local file" is unrepresentable
+// rather than merely disallowed.
+export const DOCUMENT_NAME_PREFIX = 'LOCAL_DOCUMENT_';
+export const DOCUMENT_NAME_PATTERN = /^LOCAL_DOCUMENT_[A-Z0-9_]{1,48}$/;
+/** Documents are capped so one file cannot exhaust the encrypted store. */
+export const MAX_VAULT_DOCUMENT_BYTES = 8 * 1024 * 1024;
+
+/** True only for a well-formed `LOCAL_DOCUMENT_<NAME>` token. */
+export function isDocumentToken(value) {
+  return typeof value === 'string' && DOCUMENT_NAME_PATTERN.test(value);
+}
+
 export const PIICategory = Object.freeze({
   AADHAAR: 'AADHAAR',
   PAN: 'PAN',
@@ -93,6 +117,8 @@ export const PIICategory = Object.freeze({
   DOB: 'DOB',
   FULL_NAME: 'FULL_NAME',
   ADDRESS: 'ADDRESS',
+  GENDER: 'GENDER',
+  COUNTRY: 'COUNTRY',
   DOCUMENT: 'DOCUMENT',
   SSN: 'SSN',
   SIN: 'SIN',

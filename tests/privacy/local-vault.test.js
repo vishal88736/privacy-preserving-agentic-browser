@@ -21,8 +21,8 @@ test('LocalVault accepts explicitly configured values for supported symbolic key
 test('LocalVault rejects unsupported keys, document blobs, and oversized values', async () => {
   const vault = new LocalVault();
   await assert.rejects(vault.updateSecret(S.LOCAL_DOCUMENT, 'demo'), /Unsupported/);
-  // LOCAL_CUSTOM_* keys are valid custom vault keys (used by the vault UI and
-  // form analyzer). Arbitrary non-custom keys are still rejected.
+  // LOCAL_CUSTOM_* keys are valid custom vault keys. Arbitrary non-custom
+  // keys are still rejected.
   await assert.rejects(vault.updateSecret('LOCAL_UNKNOWN_KEY', 'value'), /Unsupported/);
   await assert.rejects(vault.updateSecret('MY_SECRET_KEY', 'value'), /Unsupported/);
   await assert.rejects(vault.updateSecret(S.LOCAL_PAN, { value: 'x' }), /text/);

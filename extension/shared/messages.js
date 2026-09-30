@@ -16,6 +16,16 @@ export const MessageType = Object.freeze({
   PRIVACY_EVENT: 'PRIVACY_EVENT',
   UPDATE_VAULT: 'UPDATE_VAULT',
   GET_VAULT: 'GET_VAULT',
+  CONFIRM_VAULT_REVIEW: 'CONFIRM_VAULT_REVIEW',
+  // Named vault documents (Aadhaar, PAN, passport …). `data` is base64 because
+  // runtime messages are JSON-serialized. Bytes stay within extension
+  // components during storage and planning. After a HIGH-risk confirmation,
+  // the background sends them to its content script to attach to the current
+  // site's file input; the page can then read the file. Bytes and file labels
+  // are not included in reasoning/model network payloads.
+  GET_VAULT_DOCUMENTS: 'GET_VAULT_DOCUMENTS',
+  STORE_VAULT_DOCUMENT: 'STORE_VAULT_DOCUMENT',
+  DELETE_VAULT_DOCUMENT: 'DELETE_VAULT_DOCUMENT',
   UPDATE_SETTINGS: 'UPDATE_SETTINGS',
   LOCAL_VISION_ANALYZE: 'LOCAL_VISION_ANALYZE',
 

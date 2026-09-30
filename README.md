@@ -180,18 +180,26 @@ Full privacy matrix:
 1. `python3 test-server/app.py` → `http://localhost:5000/government-aadhaar.html`
 2. Load `dist/chrome/` (Chrome) or `dist/firefox/` (Firefox) — see Quickstart.
 3. Save a dummy profile in the vault; type *"Fill this Aadhaar form with my profile and submit"*.
-4. Watch: faces/PII blacked out on the screenshot preview, DOM values become `LOCAL_*`, planner emits one action at a time, submit waits on its approval card before the local vault fills values.
-5. Bonus: `/flight-search.html` (cheapest-pick), `/prompt-injection.html` (injection quarantined), `/document-upload.html` (real upload fails closed — user picks file).
+4. Watch: faces/PII blacked out on the screenshot preview, DOM values become `LOCAL_*`, the planner emits one grounded action at a time, local values resolve in the browser, and form submission waits for its own approval card.
+5. Bonus: `/flight-search.html` (cheapest-pick), `/prompt-injection.html` (injection quarantined), `/document-upload.html` (attach a named vault document after the HIGH-risk confirmation, or choose a file in the page picker).
 
 All 11 portals live in `test-server/pages/`. Full hardening scenarios in `tests/e2e_master_hardening_suite.py`.
+
+Values from older vault versions remain encrypted and are still checked by local privacy protection, but stay unavailable to the agent until you review and save them in the Local Vault.
 
 ---
 
 ## ⚖️ Latency vs. Accuracy — Our Balance
 
-- **Keep private perception local:** detection + OCR support masking; OCR text is discarded locally, only boxes + counts travel.
+- **Keep private perception local:** page detection + OCR support masking; OCR text is discarded locally, only boxes + counts travel. The separate PDF tool keeps rows in the panel only for preview and user-requested export.
 - **Preserve source information:** VLM summary, DOM heuristic, and DOM-only fallback are labeled separately — planner never confuses them.
 - **Keep planning bounded:** compact `page_evidence`, one action per call, `ALLOWED_ELEMENT_IDS` as grounding authority; grounding-repair downgrades hallucinations to `WAIT`.
+
+## PDF to Google Sheets (on-device)
+
+Open the side panel's **PDF to Google Sheets** card, choose a PDF, and select **Extract table**. Searchable text is parsed with the packaged PDF.js runtime; pages without selectable text use the already packaged English Tesseract OCR. Review the preview, then copy rows and paste them into the first cell in Google Sheets, or download a CSV and use Sheets' **File → Import**.
+
+The PDF and extracted rows stay in side-panel memory; they are not sent to the agent, model providers, or backend. PrivAgent has no Google Sheets API/OAuth integration, so the final paste/import is user initiated. Column boundaries are inferred from PDF text positions (or local OCR word positions), so review the preview before using the data. PDF processing is limited to 20 MB and the first 40 pages.
 
 ## 🚀 5-Minute Quickstart
 
@@ -232,7 +240,7 @@ Logs are JSONL and redacted: `backend/logs/backend.jsonl` + Side Panel *Settings
 |---|---|---|
 | Aadhaar Citizen | `/government-aadhaar.html` | Aadhaar/PAN blackout + symbolic resolve + submit gate |
 | Flight Comparison | `/flight-search.html` | multi-step search + DOM-grounded result-card + cheapest pick |
-| Doc Upload | `/document-upload.html`, `/page-d-document-upload.html` | real files never auto-upload (fail-closed) |
+| Doc Upload | `/document-upload.html`, `/page-d-document-upload.html` | named vault files attach only after HIGH-risk approval; other files use the page picker |
 | Adversarial | `/prompt-injection.html`, `/page-e-prompt-injection.html` | injection variants quarantined |
 | Normal / Sensitive forms | `/page-a-normal-form.html`, `/page-b-sensitive-form.html` | baseline speed vs strict PII handling |
 | Visual UI | `/page-c-visual-ui.html` | VLM prose supplements DOM-grounded controls |
@@ -242,7 +250,7 @@ Logs are JSONL and redacted: `backend/logs/backend.jsonl` + Side Panel *Settings
 
 - **Untrusted:** page DOM/text, page IPC (can't approve, touch vault, or change settings).
 - **Guarantees:** no unredacted payloads (`OutboundPolicyViolationError`), fail-closed images, high-risk approval cards, symbolic-only secrets to the cloud.
-- **Prototype limits:** vault in `chrome.storage.local` (no OS keychain yet); regex heuristics cover standard IDs, not arbitrary secrets; real file picking stays user-directed; screenshot-box IoU eval needs human-labeled annotations.
+- **Prototype limits:** vault in `chrome.storage.local` (encrypted at rest, no OS keychain or user passphrase); regex heuristics cover standard IDs, not arbitrary secrets; arbitrary file picking stays user-directed while named vault documents require HIGH-risk approval; screenshot-box IoU eval needs human-labeled annotations.
 
 Details: `docs/threat-model.md`, `docs/privacy-model.md`, `docs/architecture.md`.
 
@@ -260,4 +268,4 @@ docs/                architecture, privacy-model, threat-model, model-providers,
 
 ## 📜 Attribution
 
-Clean-room build with audited patterns from **Magnitude Browser Agent** (Apache-2.0: Observe→Act→Verify, minimal a11y tree, stability detection) and **AI Browser Agent** (MIT: intent + progress), plus `transformers` (Apache-2.0), `onnxruntime-web` (MIT), `yolos-tiny` (Apache-2.0), `tesseract.js` (Apache-2.0). Full notices in `docs/REUSE_AND_ATTRIBUTION.md`.
+Clean-room build with audited patterns from **Magnitude Browser Agent** (Apache-2.0: Observe→Act→Verify, minimal a11y tree, stability detection) and **AI Browser Agent** (MIT: intent + progress), plus `transformers` (Apache-2.0), `onnxruntime-web` (MIT), `yolos-tiny` (Apache-2.0), `tesseract.js` (Apache-2.0), and PDF.js 4.10.38 (Apache-2.0). Full notices in `docs/REUSE_AND_ATTRIBUTION.md`.

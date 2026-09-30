@@ -1,7 +1,6 @@
 /**
  * Tests for PromptBuilder
- * Covers compactElements, compactObservation, _scrollContext,
- * and compactObservation security/content checks.
+ * Covers compactElements, compactObservation, and its security/content checks.
  */
 
 import test from 'node:test';
@@ -146,30 +145,4 @@ test('PromptBuilder - compactObservation truncates visible_text to 1200 chars', 
   const obs = makeObs(makeElements(), { visible_text: longText });
   const result = b.compactObservation(obs, {});
   assert.ok(result.visible_text.length <= 1200, 'visible_text must be truncated to 1200 chars');
-});
-
-// ── _scrollContext ────────────────────────────────────────────────────────
-
-test('PromptBuilder - _scrollContext: returns unknown when null', () => {
-  const b = makeBuilder();
-  const r = b._scrollContext(null);
-  assert.ok(r.toLowerCase().includes('unknown'));
-});
-
-test('PromptBuilder - _scrollContext: says "at the top" when y=0', () => {
-  const b = makeBuilder();
-  const r = b._scrollContext({ y: 0, maxY: 3000 });
-  assert.ok(r.includes('top'));
-});
-
-test('PromptBuilder - _scrollContext: says "bottom" when scrolled to end', () => {
-  const b = makeBuilder();
-  const r = b._scrollContext({ y: 3000, maxY: 3000 });
-  assert.ok(r.includes('bottom') || r.includes('%'));
-});
-
-test('PromptBuilder - _scrollContext: no scrollable content case', () => {
-  const b = makeBuilder();
-  const r = b._scrollContext({ y: 0, maxY: 0 });
-  assert.ok(r.includes('fully visible') || r.includes('no scrollable'));
 });

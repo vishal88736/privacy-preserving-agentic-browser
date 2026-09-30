@@ -70,7 +70,7 @@ export function friendlyError(rawMessage) {
   if (low.includes('chrome does not permit') || low.includes('chrome://') || low.includes('browser internal page')) {
     return {
       error: 'This page cannot be automated (browser internal page).',
-      hint: 'Open a website or a test portal such as http://localhost:5000, then start the task again.'
+      hint: 'Open a website first, then start the task again.'
     };
   }
   if (low.includes('could not establish connection') || low.includes('target page not responding') || low.includes('failed to observe')) {

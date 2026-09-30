@@ -61,7 +61,11 @@ The backend shared secret is stored the same way, in its own encrypted record, a
 
 The vault starts empty, accepts `LOCAL_CUSTOM_*` text keys, and rejects other key formats and non-text values. Custom rule registration is code-configured through `registerPIIRule` in `extension/privacy/pii-rules.js`.
 
-Real local-document selection is not implemented. A `LOCAL_DOCUMENT` action fails closed. A user can select a file directly on the website; that file is handled by the website and is outside this extension's document-privacy guarantee. The old backend `/agent` file/screenshot route is removed.
+### Named documents
+
+The user can store a document under a validated `LOCAL_DOCUMENT_<NAME>` token. Its bytes are encrypted at rest with the vault key and are not sent to the reasoning backend or model provider. The token names are included in planner requests so the model can choose only a saved document; those names can reveal what kinds of documents the user holds. File names and MIME types stay local to the extension until attachment.
+
+Attaching a stored document requires a grounded file input and a HIGH-risk confirmation. After confirmation, the extension passes the bytes to its own content script, which attaches the file to the current site's input. The site can then read the file, and submitting the form can transmit it to that site. A page's own picker remains available when the user wants to choose a file directly. The backend `/agent` file/screenshot route is removed.
 
 ## Visual provenance
 
@@ -86,5 +90,5 @@ The controller captures screenshots only when visual evidence is needed. A captu
 | Vault values are encrypted at rest | **SUPPORTED** for data at rest. AES-256-GCM under a non-extractable key held in IndexedDB, so the bytes are unreadable in the profile directory, in backups, and to another process reading those files. **NOT** resistant to code executing as this extension. No user passphrase. |
 | A screenshot is sent on every observation | **NOT SUPPORTED**; visual inference is conditional, and uncertain images are withheld. |
 | Zero plaintext transmission | **NOT SUPPORTED** as an absolute guarantee. |
-| Real local document handling | **NOT SUPPORTED** by the extension. |
+| Stored local document attachment | **SUPPORTED WITH A SITE-DISCLOSURE BOUNDARY**: named bytes remain encrypted at rest and out of model/backend requests; after HIGH-risk confirmation the current website can read the attached file, and form submission can send it to the site. Token names are sent to the reasoning service. |
 | PII remains local | **PARTIALLY SUPPORTED** for recognized patterns/fields; arbitrary PII cannot be guaranteed local. |

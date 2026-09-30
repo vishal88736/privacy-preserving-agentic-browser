@@ -4,6 +4,8 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { LocalVault } from '../../extension/privacy/local-vault.js';
 import { SymbolicSecretSource as S } from '../../extension/shared/constants.js';
+import { VAULT_STORAGE_KEYS } from '../../extension/privacy/vault-crypto.js';
+import { PolicyEngine } from '../../extension/privacy/policy-engine.js';
 import { installFakeIndexedDB } from './fake-indexeddb.mjs';
 
 /**
@@ -154,6 +156,63 @@ test('a stored value round-trips back to the original', { skip: !hasWebCrypto },
   }
 });
 
+test('pre-review values stay encrypted and quarantined across restart until explicit review', { skip: !hasWebCrypto }, async () => {
+  const { vault, store, sharedIdb, cleanup } = await bootEncryptedVault();
+  try {
+    await vault.updateSecret(S.LOCAL_PAN, 'SYNTHETIC-OLD-PAN-VALUE');
+    await vault.updateSecret(S.LOCAL_PROFILE, 'SYNTHETIC-OLD-PROFILE-VALUE');
+    // Simulate an encrypted record written by a release before the explicit
+    // review marker existed.
+    delete store[VAULT_STORAGE_KEYS.meta].reviewVersion;
+
+    const upgraded = new LocalVault();
+    await upgraded.ready;
+    assert.equal(upgraded.reviewRequired, true);
+    assert.equal(upgraded.resolveSecret(S.LOCAL_PAN), null, 'quarantined values cannot be resolved');
+    assert.deepEqual(upgraded.getAvailableKeysSummary().map((entry) => entry.key), [],
+      'quarantined keys are not offered to planning');
+    assert.deepEqual(upgraded.getPendingReviewForUI(), {
+      [S.LOCAL_PAN]: 'SYNTHETIC-OLD-PAN-VALUE',
+      [S.LOCAL_PROFILE]: 'SYNTHETIC-OLD-PROFILE-VALUE'
+    }, 'the trusted vault UI can display the preserved values');
+    assert.equal(upgraded.getAllSecretsForUI()[S.LOCAL_PAN], 'SYNTHETIC-OLD-PAN-VALUE',
+      'privacy policy scanning still recognizes quarantined values');
+    await assert.rejects(
+      new PolicyEngine(upgraded).enforceOutboundSafety({ note: 'SYNTHETIC-OLD-PAN-VALUE' }),
+      /Contains raw value of LOCAL_PAN/
+    );
+
+    const oldCiphertext = JSON.stringify(store[VAULT_STORAGE_KEYS.encrypted]);
+    await assert.rejects(upgraded.updateSecret(S.LOCAL_PAN, 'OVERWRITE-BEFORE-REVIEW'), /review/i);
+    assert.equal(JSON.stringify(store[VAULT_STORAGE_KEYS.encrypted]), oldCiphertext,
+      'ordinary updates must not overwrite quarantined storage');
+    assert.equal(store[VAULT_STORAGE_KEYS.meta].reviewVersion, undefined,
+      'ordinary updates cannot mark the old record reviewed');
+
+    const afterRestart = new LocalVault();
+    await afterRestart.ready;
+    assert.equal(afterRestart.reviewRequired, true);
+    assert.equal(afterRestart.resolveSecret(S.LOCAL_PAN), null);
+    assert.equal(afterRestart.getPendingReviewForUI()[S.LOCAL_PROFILE], 'SYNTHETIC-OLD-PROFILE-VALUE');
+
+    // A UI version that submits only fields it rendered may update the PAN;
+    // omitted valid keys must survive confirmation unchanged.
+    await afterRestart.confirmReview({ [S.LOCAL_PAN]: 'SYNTHETIC-REVIEWED-PAN' });
+    assert.equal(afterRestart.reviewRequired, false);
+    assert.equal(afterRestart.resolveSecret(S.LOCAL_PAN), 'SYNTHETIC-REVIEWED-PAN');
+    assert.equal(afterRestart.resolveSecret(S.LOCAL_PROFILE), 'SYNTHETIC-OLD-PROFILE-VALUE');
+    assert.equal(store[VAULT_STORAGE_KEYS.meta].reviewVersion, 1);
+
+    const finalRestart = new LocalVault();
+    await finalRestart.ready;
+    assert.equal(finalRestart.reviewRequired, false);
+    assert.equal(finalRestart.resolveSecret(S.LOCAL_PAN), 'SYNTHETIC-REVIEWED-PAN');
+    assert.equal(finalRestart.resolveSecret(S.LOCAL_PROFILE), 'SYNTHETIC-OLD-PROFILE-VALUE');
+  } finally {
+    cleanup();
+  }
+});
+
 test('each write uses a different IV for the same value', { skip: !hasWebCrypto }, async () => {
   const secret = 'SYNTHETIC-IV-ROTATION-FIXTURE';
   const { vault, store, cleanup } = await bootEncryptedVault();
@@ -203,8 +262,14 @@ test('a legacy plaintext vault is migrated and the plaintext removed', { skip: !
     agent_local_vault: { [S.LOCAL_PAN]: secret }
   });
   try {
-    assert.equal(vault.resolveSecret(S.LOCAL_PAN), secret,
-      'the migrated value must be usable');
+    assert.equal(vault.reviewRequired, true,
+      'values migrated from plaintext must require explicit review');
+    assert.equal(vault.resolveSecret(S.LOCAL_PAN), null,
+      'a migrated value must remain quarantined until reviewed');
+    assert.equal(vault.getPendingReviewForUI()[S.LOCAL_PAN], secret,
+      'the encrypted value must remain available in the trusted vault UI');
+    assert.equal(vault.getAllSecretsForUI()[S.LOCAL_PAN], secret,
+      'the privacy scanner must still recognize the quarantined value');
     assert.ok(!JSON.stringify(store).includes(secret),
       'the plaintext secret must not remain in storage after migration');
     assert.equal(store.agent_local_vault, undefined,

@@ -9,7 +9,9 @@
     "tabs",
     "scripting",
     "storage",
-    "alarms"
+    "unlimitedStorage",
+    "alarms",
+    "clipboardWrite"
   ],
   "icons": {
     "16": "icons/icon16.png",

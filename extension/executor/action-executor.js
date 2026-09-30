@@ -4,11 +4,12 @@
  * browser DOM manipulations and simulated inputs.
  */
 
-import { ActionType } from '../shared/constants.js';
+import { ActionType, isDocumentToken } from '../shared/constants.js';
 import { MessageType } from '../shared/messages.js';
 import { createLogger } from '../shared/logger.js';
 import { validateNavigationUrl } from '../navigation/navigation.js';
-import { defaultLocalValueResolver } from './local-value-resolver.js';
+import { defaultLocalValueResolver, VAULT_DOCUMENT_MARKER } from './local-value-resolver.js';
+import { toBase64 } from '../privacy/vault-crypto.js';
 
 const log = createLogger({ scope: 'ActionExecutor', surface: 'background' });
 const CHROME_API_TIMEOUT_MS = 10000;
@@ -17,6 +18,35 @@ const OBSERVATION_BOUND_ACTIONS = new Set([
   ActionType.HOVER, ActionType.UPLOAD, ActionType.SUBMIT, ActionType.FILL_FORM_PLAN,
   ActionType.SCROLL, ActionType.PRESS_KEY, ActionType.EXTRACT
 ]);
+
+/** True only for a descriptor this extension produced from the local vault. */
+export function isVaultDocumentValue(value) {
+  return Boolean(value) && typeof value === 'object' &&
+    value[VAULT_DOCUMENT_MARKER] === true && typeof value.name === 'string';
+}
+
+/**
+ * Make a resolved document survive the trip to the content script.
+ *
+ * `chrome.tabs.sendMessage` serializes its payload as JSON, so a Uint8Array
+ * would arrive as `{"0":12,...}` and the content script could not build a File
+ * from it. The bytes are therefore base64-encoded for transport and decoded
+ * back inside the page. This object is posted to THIS extension's own content
+ * script and is never included in a reasoning/backend request. The marker is
+ * required on the receiving side, so nothing else can arrive claiming to be a
+ * stored document. Once attached, the current page can read the file.
+ */
+function toTransportValue(value) {
+  if (!isVaultDocumentValue(value)) return value;
+  return {
+    [VAULT_DOCUMENT_MARKER]: true,
+    name: value.name,
+    fileName: value.fileName,
+    mimeType: value.mimeType,
+    byteLength: value.byteLength,
+    data: toBase64(value.bytes)
+  };
+}
 
 function withTimeout(promise, ms = CHROME_API_TIMEOUT_MS, message = 'The browser did not respond in time.') {
   let timer;
@@ -40,6 +70,18 @@ export class ActionExecutor {
   async execute(tabId, action, observationContext = null) {
     if (!tabId) {
       throw new Error('ActionExecutor requires a valid target tabId');
+    }
+
+    // Keep direct executor calls aligned with the planner/schema contract:
+    // document bytes can only cross to the content script through UPLOAD.
+    const carriesDocumentHandle = isDocumentToken(action?.value_source) ||
+      isDocumentToken(action?.value) || isVaultDocumentValue(action?.value);
+    if (carriesDocumentHandle && action?.action !== ActionType.UPLOAD) {
+      return { success: false, error: 'Stored document tokens may only be used by UPLOAD actions.' };
+    }
+    if (action?.action === ActionType.UPLOAD &&
+        (!isDocumentToken(action?.value_source) || action?.value !== undefined)) {
+      return { success: false, error: 'UPLOAD requires a named stored document in value_source.' };
     }
 
     if (OBSERVATION_BOUND_ACTIONS.has(action?.action) &&
@@ -134,6 +176,9 @@ export class ActionExecutor {
     let resolvedValue = null;
     try {
       if (action.value_source || action.value) {
+        // Keep direct executor entry points safe too: controller startup warms
+        // the vault, but resolution must never race decryption after a restart.
+        await this.valueResolver.vault?.ready;
         resolvedValue = this.valueResolver.resolve(action);
       }
     } catch (e) {
@@ -144,7 +189,9 @@ export class ActionExecutor {
     const payload = {
       action: action.action,
       target: action.target,
-      resolvedValue,
+      // Only the transport form crosses into the page; a resolved string or
+      // plan object is passed through untouched.
+      resolvedValue: toTransportValue(resolvedValue),
       coordinates: action.target?.coordinates,
       deltaX: action.deltaX || action.target?.deltaX || 0,
       deltaY: action.deltaY || action.target?.deltaY || 300,

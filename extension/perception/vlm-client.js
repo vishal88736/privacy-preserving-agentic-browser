@@ -8,6 +8,7 @@ import { ServerDefaults } from '../shared/constants.js';
 import { validateVisionPayload } from '../shared/schemas.js';
 import { createLogger } from '../shared/logger.js';
 import { defaultPolicyEngine } from '../privacy/policy-engine.js';
+import { defaultLocalVault } from '../privacy/local-vault.js';
 import { normalizePerceptionProvenance, PerceptionProvenance } from './provenance.js';
 
 const log = createLogger({ scope: 'VLMClient', surface: 'background' });
@@ -23,6 +24,8 @@ export class VLMClient {
    * Calls the server VLM endpoint with sanitized data for visual grounding.
    */
   async processVisuals(taskId, sanitizedScreenshot, sanitizedDom, metadata = {}, { onDispatch } = {}) {
+    // The final outbound scan must compare against the fully loaded vault.
+    await defaultLocalVault.ready;
     const payload = {
       task_id: taskId,
       sanitized_screenshot: sanitizedScreenshot,
@@ -46,7 +49,7 @@ export class VLMClient {
       // Vision is optional: on a local policy rejection, continue with the
       // sanitized DOM-only observation instead of aborting the browser task.
       // The block is flagged so callers/metrics can surface it.
-      this.policyEngine.enforceOutboundSafety(payload);
+      await this.policyEngine.enforceOutboundSafety(payload);
     } catch (err) {
       if (err?.name === 'OutboundPolicyViolationError') {
         log.warn('Outbound privacy block; using DOM-only observation.', { violation: err?.message });

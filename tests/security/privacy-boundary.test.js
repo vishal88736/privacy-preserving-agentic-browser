@@ -117,7 +117,7 @@ test('ordinary visible PII is detected and sanitized when observable as page tex
   assert.equal(sanitizer.hasUnlocatedSensitiveText(raw), true);
 });
 
-test('page sanitizer preserves travel dates and order references while masking public email addresses', () => {
+test('page sanitizer preserves travel dates while masking PII and Aadhaar-shaped references', async () => {
   const sanitizer = new DOMSanitizer();
   const extras = sanitizer.sanitizePageExtras({
     visible_text: [
@@ -129,11 +129,12 @@ test('page sanitizer preserves travel dates and order references while masking p
   });
   assert.match(extras.visible_text, /departing 12\/03\/2025/);
   assert.match(extras.visible_text, /Deliver on 12\/03\/2025/);
-  assert.match(extras.visible_text, /Order reference 482173920184/);
+  assert.doesNotMatch(extras.visible_text, /482173920184/);
+  assert.match(extras.visible_text, /Order reference \[REDACTED_AADHAAR\]/);
   assert.doesNotMatch(extras.visible_text, /support@example\.com/);
   assert.match(extras.visible_text, /REDACTED_EMAIL|LOCAL_EMAIL/);
   const policy = new PolicyEngine({ getAllSecretsForUI: () => ({}) });
-  assert.doesNotThrow(() => policy.enforceOutboundSafety({ visible_text: extras.visible_text }));
+  await assert.doesNotReject(() => policy.enforceOutboundSafety({ visible_text: extras.visible_text }));
 });
 
 test('page sanitizer still redacts an Aadhaar number when nearby context identifies it', () => {
@@ -205,25 +206,11 @@ test('local vault starts empty and cannot store unsupported document blobs', asy
   assert.equal(vault.resolveSecret('LOCAL_DOCUMENT'), null);
 });
 
-test('the shipped content script rejects real document uploads; only the synthetic demo is allowed', async () => {
-  // The upload guard must hold in the file the manifest actually injects.
-  // This test used to import a parallel BrowserExecutor module that no
-  // manifest ever registered, so it passed while proving nothing about
-  // production — and the two copies had already drifted.
-  const guard = extractMethod(readFileSync(CONTENT_SCRIPT_PATH, 'utf8'), '_executeUpload');
-  assert.ok(guard, '_executeUpload must exist in the shipped content script');
-
-  // Arbitrary bytes are never uploaded, whatever the file is named.
-  assert.match(guard, /[Rr]eal document upload is not supported/);
-  // The synthetic path needs an explicit flag AND an exact literal body, so
-  // neither a truthy-looking object nor caller-supplied bytes get through.
-  assert.match(guard, /demo\s*!==\s*true/, 'upload must require demo === true');
-  assert.match(guard, /content\s*!==\s*['"][^'"]{1,200}['"]/, 'the body must be compared against a fixed literal');
-  // The name and MIME type are constants, never derived from the request.
-  const names = [...guard.matchAll(/fileName\s*=\s*['"]([^'"]+)['"]/g)].map((m) => m[1]);
-  assert.deepEqual(names, ['synthetic-demo.txt'], 'the uploaded filename must be a fixed constant');
-  const mimes = [...guard.matchAll(/mimeType\s*=\s*['"]([^'"]+)['"]/g)].map((m) => m[1]);
-  assert.ok(mimes.every((m) => m === 'text/plain'), 'only text/plain may be constructed');
+test('the shipped content script has no legacy synthetic upload route', () => {
+  const source = readFileSync(CONTENT_SCRIPT_PATH, 'utf8');
+  assert.match(source, /Choose a named document from the local vault before attaching a file/);
+  assert.match(source, /async _executeVaultDocumentUpload\(/);
+  assert.doesNotMatch(source, /_executeUpload|SYNTHETIC DEMO FILE|synthetic-demo\.txt/);
 });
 
 test('the shipped content script never resolves an action target from a page-controlled id', () => {

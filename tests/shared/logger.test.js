@@ -314,8 +314,8 @@ test('each level is mirrored to the matching console method', () => {
 });
 
 test('the console receives one pre-formatted string, not format arguments', () => {
-  // tests/reasoning/form-plan-builder.test.js overrides console.debug and joins
-  // the parts; passing a format plus arguments would change what it captures.
+  // Keep the logging contract explicit: formatted arguments would change what
+  // callers capture from the console.
   const store = memoryStore();
   const log = createLogger({ scope: 'T', surface: 'unit', store, level: 'debug' });
   let argCount = null;

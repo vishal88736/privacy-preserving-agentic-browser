@@ -5,7 +5,7 @@
  */
 
 import { MessageType } from '../shared/messages.js';
-import { AgentState } from '../shared/constants.js';
+import { AgentState, isDocumentToken } from '../shared/constants.js';
 import {
   buildLogExport,
   collectLogEntries,
@@ -16,6 +16,7 @@ import {
   normalizeLevel
 } from '../shared/logger.js';
 import { setupLocalVisionMessageHandler } from '../perception/local-vision.js';
+import { extractPdfTableRows } from '../perception/pdf-table-extractor.js';
 
 const log = createLogger({ scope: 'SidePanel', surface: 'sidepanel' });
 const MAX_VLM_SCREENSHOT_PREVIEWS = 8;
@@ -105,8 +106,8 @@ const VAULT_KEY_ALIASES = {
 function vaultKeyForSemantic(sem) {
   const key = `LOCAL_${String(sem || '').toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_|_$/g, '')}`;
   if (VAULT_KEY_ALIASES[key]) return VAULT_KEY_ALIASES[key];
-  // Unknown semantics are stored as custom vault entries (resolvable by the
-  // form analyzer for future forms), so "save to vault" never silently
+  // Unknown semantics are stored as custom vault entries (available to the
+  // planner for future forms), so "save to vault" never silently
   // discards the value.
   const slug = String(sem || '').toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 48);
   return slug ? `LOCAL_CUSTOM_${slug}` : '';
@@ -163,6 +164,28 @@ function fmtTime(ts) {
   } catch { return ''; }
 }
 
+function formatBytes(bytes) {
+  const n = Number(bytes);
+  if (!Number.isFinite(n) || n <= 0) return '';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** Base64 for the runtime message channel; the reader is always revoked. */
+function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || '');
+      const comma = result.indexOf(',');
+      resolve(comma === -1 ? result : result.slice(comma + 1));
+    };
+    reader.onerror = () => reject(new Error('The selected file could not be read.'));
+    reader.readAsDataURL(file);
+  });
+}
+
 class SidePanelApp {
   constructor() {
     this.task = null;
@@ -170,6 +193,13 @@ class SidePanelApp {
     this.taskStartWall = null;
     this.elapsedTimer = null;
     this.vlmScreenshotPreviews = [];
+    this.pdfFile = null;
+    this.pdfRows = [];
+    this.vaultLoadGeneration = 0;
+    this.vaultDocumentRowId = 0;
+    this.vaultLoaded = false;
+    this.vaultSaving = false;
+    this.vaultReviewRequired = false;
     this.init();
   }
 
@@ -264,9 +294,27 @@ class SidePanelApp {
     this.userInputSingleText = this.$('user-input-single-text');
     this.userInputSkipBtn = this.$('user-input-skip-btn');
     this.userInputSubmitBtn = this.$('user-input-submit-btn');
+    this.userInputStatus = this.$('user-input-status');
+    this.userInputCount = this.$('user-input-count');
     this.privacyModal = this.$('privacy-modal');
     this.vaultModal = this.$('vault-modal');
+    this.vaultSaveBtn = this.$('save-vault-btn');
+    this.vaultSaveStatus = this.$('vault-save-status');
+    this.vaultReviewNotice = this.$('vault-review-notice');
+    this.vaultReviewConfirm = this.$('vault-review-confirm');
+    this.vaultReviewReveal = this.$('vault-review-reveal');
+    this.confirmNoteText = this.$('confirm-note-text');
+    this.confirmReviewTitle = this.$('confirm-review-title');
     this.settingsModal = this.$('settings-modal');
+    this.pdfFileInput = this.$('pdf-sheet-file');
+    this.pdfFilename = this.$('pdf-sheet-filename');
+    this.pdfExtractBtn = this.$('pdf-extract-btn');
+    this.pdfCopyBtn = this.$('pdf-copy-btn');
+    this.pdfDownloadBtn = this.$('pdf-download-btn');
+    this.pdfStatus = this.$('pdf-sheet-status');
+    this.pdfPreviewWrap = this.$('pdf-preview-wrap');
+    this.pdfPreviewNote = this.$('pdf-preview-note');
+    this.pdfPreviewTable = this.$('pdf-preview-table');
   }
 
   bind() {
@@ -306,7 +354,13 @@ class SidePanelApp {
     this.$('vault-btn').addEventListener('click', () => this.openVault());
     this.$('close-vault-btn').addEventListener('click', () => this.closeModal(this.vaultModal));
     this.$('save-vault-btn').addEventListener('click', () => this.saveVault());
+    this.vaultReviewConfirm.addEventListener('change', () => {
+      this.vaultSaveBtn.disabled = !this.vaultLoaded || this.vaultSaving ||
+        (this.vaultReviewRequired && !this.vaultReviewConfirm.checked);
+    });
+    this.vaultReviewReveal.addEventListener('change', () => this.setVaultReviewReveal(this.vaultReviewReveal.checked));
     this.$('vault-add-custom-btn').addEventListener('click', () => this.addCustomVaultField());
+    this.$('vault-doc-add-btn')?.addEventListener('click', () => this.addVaultDocumentRow());
 
     this.$('settings-btn').addEventListener('click', () => this.openSettings());
     this.$('close-settings-btn').addEventListener('click', () => this.closeModal(this.settingsModal));
@@ -314,9 +368,120 @@ class SidePanelApp {
     this.$('export-error-log-btn').addEventListener('click', (event) => this.downloadErrorLog(event.currentTarget));
 
     this.$('theme-btn').addEventListener('click', () => this.toggleTheme());
+
+    this.pdfFileInput.addEventListener('change', () => this.selectPdfFile());
+    this.pdfExtractBtn.addEventListener('click', () => this.extractSelectedPdf());
+    this.pdfCopyBtn.addEventListener('click', () => this.copyPdfRows());
+    this.pdfDownloadBtn.addEventListener('click', () => this.downloadPdfCsv());
   }
 
   queryChips() { return Array.from(document.querySelectorAll('.chip')); }
+
+  selectPdfFile() {
+    const file = this.pdfFileInput.files?.[0] || null;
+    this.pdfFile = file;
+    this.pdfRows = [];
+    this.pdfFilename.textContent = file?.name || 'No file selected';
+    this.pdfExtractBtn.disabled = !file;
+    this.pdfCopyBtn.disabled = true;
+    this.pdfDownloadBtn.disabled = true;
+    this.pdfPreviewWrap.hidden = true;
+    this.pdfPreviewTable.replaceChildren();
+    this.setPdfStatus(file ? 'Ready to process locally. The PDF will not be sent to the agent.' : 'Select a PDF to begin.');
+  }
+
+  async extractSelectedPdf() {
+    if (!this.pdfFile) return;
+    const file = this.pdfFile;
+    this.pdfExtractBtn.disabled = true;
+    this.pdfFileInput.disabled = true;
+    this.pdfCopyBtn.disabled = true;
+    this.pdfDownloadBtn.disabled = true;
+    this.pdfRows = [];
+    this.pdfPreviewWrap.hidden = true;
+    this.setPdfStatus('Opening PDF locally…', 'working');
+    try {
+      const result = await extractPdfTableRows(file, {
+        onProgress: ({ page, total, phase }) => {
+          this.setPdfStatus(`${phase} · page ${page} of ${total}`, 'working');
+        }
+      });
+      this.pdfRows = result.rows;
+      this.renderPdfPreview();
+      this.pdfCopyBtn.disabled = false;
+      this.pdfDownloadBtn.disabled = false;
+      const method = result.usedOcr ? ' Local OCR was used for scanned pages.' : '';
+      const pageNote = result.truncated ? ` Processed the first ${result.processedPages} of ${result.pageCount} pages.` : '';
+      this.setPdfStatus(`Extracted ${result.rows.length} rows. Review them, then copy or download.${method}${pageNote}`, 'success');
+    } catch (error) {
+      const known = new Set([
+        'Choose a PDF file first.',
+        'Choose a PDF file.',
+        'This PDF is larger than the 20 MB local processing limit.',
+        'Extension PDF assets are unavailable.',
+        'This PDF has no pages.',
+        'Local PDF rendering is unavailable.',
+        'No readable text or tables were found in this PDF.'
+      ]);
+      const safeMessage = known.has(error?.message)
+        ? error.message
+        : 'Could not read this PDF. It may be encrypted, damaged, or unsupported.';
+      this.setPdfStatus(safeMessage, 'error');
+    } finally {
+      this.pdfExtractBtn.disabled = !this.pdfFile;
+      this.pdfFileInput.disabled = false;
+    }
+  }
+
+  renderPdfPreview() {
+    const previewRows = this.pdfRows.slice(0, 15);
+    const columns = Math.min(10, Math.max(1, ...previewRows.map((row) => row.length)));
+    const fragment = document.createDocumentFragment();
+    for (const row of previewRows) {
+      const tr = document.createElement('tr');
+      for (let index = 0; index < columns; index += 1) {
+        const cell = document.createElement('td');
+        cell.textContent = row[index] || '';
+        tr.appendChild(cell);
+      }
+      fragment.appendChild(tr);
+    }
+    this.pdfPreviewTable.replaceChildren(fragment);
+    this.pdfPreviewNote.textContent = `Previewing ${previewRows.length} of ${this.pdfRows.length} extracted rows. Check the columns before copying.`;
+    this.pdfPreviewWrap.hidden = false;
+  }
+
+  setPdfStatus(message, state = 'idle') {
+    this.pdfStatus.textContent = message;
+    this.pdfStatus.dataset.state = state;
+  }
+
+  async copyPdfRows() {
+    if (!this.pdfRows.length) return;
+    const text = this.pdfRows.map((row) => row.map(spreadsheetSafeCell).join('\t')).join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      this.setPdfStatus('Rows copied. Switch to Google Sheets, choose the first cell, and paste.', 'success');
+    } catch {
+      this.setPdfStatus('Could not access the clipboard. Download CSV and import it into Google Sheets.', 'error');
+    }
+  }
+
+  downloadPdfCsv() {
+    if (!this.pdfRows.length) return;
+    const csv = this.pdfRows.map((row) => row.map((value) => {
+      const safe = spreadsheetSafeCell(value).replace(/"/g, '""');
+      return `"${safe}"`;
+    }).join(',')).join('\r\n');
+    const blob = new Blob(['\uFEFF', csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `${safeFileStem(this.pdfFile?.name)}-tables.csv`;
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    this.setPdfStatus('CSV downloaded locally. Import it into Google Sheets when ready.', 'success');
+  }
 
   send(type, payload, cb) {
     try {
@@ -332,6 +497,11 @@ class SidePanelApp {
       log.exception('Message to the background threw', err, { type });
       cb?.(null);
     }
+  }
+
+  /** Promise form of send(), for the document-save sequence. */
+  sendAsync(type, payload) {
+    return new Promise((resolve) => this.send(type, payload, resolve));
   }
 
   listen() {
@@ -549,7 +719,7 @@ class SidePanelApp {
 
   renderPrivacyStatic() {
     this.localList.replaceChildren();
-    ['Aadhaar & PAN numbers', 'Passwords & OTPs', 'Identity documents', 'Form keystrokes'].forEach((s) => {
+    ['Vault values until entered', 'Documents until approved attachment', 'Original screenshots', 'Form answers before site submission'].forEach((s) => {
       const li = el('li');
       li.appendChild(el('span', 'tick', '✓'));
       li.appendChild(el('span', null, s));
@@ -680,7 +850,7 @@ class SidePanelApp {
       lines.push(`local_masks: ${local.peopleMasked} people, ${local.ocrRegionsMasked} OCR PII regions (${(local.ocrCategoriesMasked || []).join(', ') || 'none'})`);
       lines.push(`client_assets: ${local.modelAssetBytes ? `${(local.modelAssetBytes / 1048576).toFixed(1)} MiB` : 'size unavailable'}; heap ${local.heapUsedBytes ? `${(local.heapUsedBytes / 1048576).toFixed(1)} MiB` : 'not exposed by browser'}`);
     }
-    lines.push(`tokens: ${(payload?.tokens || [...tokenSet]).join(', ') || 'none'} (resolved locally)`);
+    lines.push(`tokens: ${(payload?.tokens || [...tokenSet]).join(', ') || 'none'} (values resolve in browser; document names may be sent to planner)`);
     lines.push('policy: outbound payload checked for known sensitive patterns; unknown PII may be missed');
     if (payload?.sampleElements?.length) {
       lines.push('sample:');
@@ -769,13 +939,45 @@ class SidePanelApp {
     this.$('confirm-reason').textContent = data.reason || 'This action needs your approval.';
     const reviewBox = this.$('confirm-review-box');
     const reviewText = this.$('confirm-review-text');
-    const reviewSummary = typeof data.reviewSummary === 'string' ? data.reviewSummary.trim() : '';
+    const action = data.action;
+    const fields = action.action === 'FILL_FORM_PLAN' && Array.isArray(action.value?.fields)
+      ? action.value.fields
+      : [];
+    const upload = action.action === 'UPLOAD' || isDocumentToken(action.value_source);
+    this.$('confirm-title').textContent = upload
+      ? 'Approve document attachment'
+      : fields.length ? 'Review form fill' : 'Confirm Action';
+    const fieldNames = [...new Set(fields.map((field) => String(field?.label || field?.semantic_type || '').replace(/\s+/g, ' ').trim().slice(0, 80)).filter(Boolean))];
+    const formReview = fields.length
+      ? `${fieldNames.length ? `Fields: ${fieldNames.slice(0, 8).join(', ')}${fieldNames.length > 8 ? ', …' : ''}. ` : ''}${fields.length} form field${fields.length === 1 ? '' : 's'} will be filled. Values are hidden in this review.`
+      : '';
+    const reviewSummary = (typeof data.reviewSummary === 'string' ? data.reviewSummary.trim() : '') || formReview;
     if (reviewText) reviewText.textContent = reviewSummary;
     if (reviewBox) reviewBox.hidden = !reviewSummary;
-    this.$('confirm-action-verb').textContent = data.action.action || 'ACTION';
-    this.$('confirm-action-target').textContent = data.action.target?.label || data.action.target?.element_id || data.action.target?.url || 'Page element';
-    this.$('confirm-data-local').textContent = data.action.value_source ? `${data.action.value_source} (stays local)` : (data.privacySummary?.dataKeptLocal || 'Personal identifiers (stays local)');
+    if (this.confirmReviewTitle) this.confirmReviewTitle.textContent = fields.length
+      ? 'Fields included (values hidden)'
+      : 'Latest extracted review evidence';
+    this.$('confirm-action-verb').textContent = action.action || 'ACTION';
+    this.$('confirm-action-target').textContent = fields.length
+      ? `Current form · ${fields.length} field${fields.length === 1 ? '' : 's'}`
+      : action.target?.label || action.target?.element_id || action.target?.url || 'Page element';
+    const source = typeof action.value_source === 'string' ? action.value_source : '';
+    this.$('confirm-data-local').textContent = upload
+      ? `${source || 'Stored document'} · the page can read the file after attachment`
+      : fields.length
+        ? `Values are written to this page; the site can receive them if submitted.`
+        : source
+          ? `${source} is resolved in this browser and written to the page.`
+          : (data.privacySummary?.dataKeptLocal || 'No saved value is disclosed by this action.');
+    if (this.confirmNoteText) {
+      this.confirmNoteText.textContent = upload
+        ? 'The planner receives the document name only. The page may read or upload the file after it is attached.'
+        : fields.length
+          ? 'This approves filling the listed form fields only. Form submission requires its own approval.'
+          : 'Values entered into a webpage are visible to that site. Review the page before approving any submission.';
+    }
     this.openModal(this.confirmModal);
+    this.$('modal-approve-btn').textContent = upload ? 'Attach document' : fields.length ? 'Fill these fields' : 'Confirm & Proceed';
     this.$('modal-approve-btn').focus();
   }
 
@@ -787,17 +989,26 @@ class SidePanelApp {
     if (this.userInputPrompt) this.userInputPrompt.textContent = prompt;
 
     const fields = Array.isArray(data.ambiguousFields) ? data.ambiguousFields : [];
+    if (this.userInputCount) this.userInputCount.textContent = fields.length
+      ? `${fields.length} field${fields.length === 1 ? '' : 's'}`
+      : 'Reply';
+    if (this.userInputStatus) {
+      this.userInputStatus.textContent = '';
+      this.userInputStatus.dataset.error = 'false';
+    }
     if (this.userInputFieldsContainer) this.userInputFieldsContainer.replaceChildren();
 
     if (fields.length > 0) {
       if (this.userInputSingleContainer) this.userInputSingleContainer.hidden = true;
       if (this.userInputFieldsContainer) this.userInputFieldsContainer.hidden = false;
 
-      fields.forEach(field => {
+      fields.forEach((field, index) => {
         const item = el('div', 'user-input-field-item');
         const header = el('div', 'user-input-field-header');
         const labelText = field.label || field.field_id || 'Field';
-        const label = el('span', 'user-input-field-label', labelText);
+        const inputId = `user-answer-${index + 1}`;
+        const label = el('label', 'user-input-field-label', labelText);
+        label.htmlFor = inputId;
         header.appendChild(label);
 
         if (field.semantic_type) {
@@ -807,17 +1018,21 @@ class SidePanelApp {
         item.appendChild(header);
 
         // Input element
-        if (field.input_type === 'checkbox') {
-          const checkWrap = el('label', 'user-input-save-vault');
+        const inputType = String(field.input_type || 'text').toLowerCase();
+        let answerInput;
+        if (inputType === 'checkbox') {
+          const checkWrap = el('label', 'user-input-answer-check');
           const input = document.createElement('input');
           input.type = 'checkbox';
+          input.id = inputId;
           input.dataset.fieldId = field.field_id;
           input.className = 'user-input-field-input-box';
           checkWrap.appendChild(input);
-          checkWrap.appendChild(el('span', null, 'Enable / Yes'));
+          checkWrap.appendChild(el('span', null, 'Yes'));
           item.appendChild(checkWrap);
         } else if (field.element_type === 'select' && Array.isArray(field.options) && field.options.length > 0) {
           const select = document.createElement('select');
+          select.id = inputId;
           select.className = 'user-input-field-input user-input-field-input-box';
           select.dataset.fieldId = field.field_id;
           const defaultOpt = document.createElement('option');
@@ -826,31 +1041,44 @@ class SidePanelApp {
           select.appendChild(defaultOpt);
           field.options.forEach(opt => {
             const o = document.createElement('option');
-            o.value = opt.value || opt.text;
-            o.textContent = opt.text || opt.value;
+            const value = typeof opt === 'string' ? opt : (opt?.value ?? opt?.text ?? opt?.label ?? '');
+            const text = typeof opt === 'string' ? opt : (opt?.text ?? opt?.label ?? opt?.value ?? '');
+            o.value = String(value);
+            o.textContent = String(text);
             select.appendChild(o);
           });
           item.appendChild(select);
         } else {
-          const input = document.createElement('input');
-          input.type = field.input_type || 'text';
-          input.className = 'user-input-field-input user-input-field-input-box';
-          input.placeholder = field.placeholder || `Enter ${labelText}...`;
-          input.dataset.fieldId = field.field_id;
-          item.appendChild(input);
+          const multiLine = field.element_type === 'textarea' || inputType === 'textarea';
+          answerInput = document.createElement(multiLine ? 'textarea' : 'input');
+          answerInput.id = inputId;
+          if (!multiLine) {
+            const supportedInputTypes = new Set(['text', 'email', 'tel', 'number', 'date', 'datetime-local', 'time', 'url', 'search', 'password']);
+            answerInput.type = supportedInputTypes.has(inputType) ? inputType : 'text';
+          } else {
+            answerInput.rows = 3;
+          }
+          answerInput.className = 'user-input-field-input user-input-field-input-box';
+          answerInput.placeholder = String(field.placeholder || `Enter ${labelText}...`).slice(0, 160);
+          answerInput.dataset.fieldId = field.field_id;
+          if (answerInput.type === 'password') answerInput.autocomplete = 'new-password';
+          item.appendChild(answerInput);
         }
 
         // Vault save toggle
-        const saveWrap = el('label', 'user-input-save-vault');
-        const saveCheck = document.createElement('input');
-        saveCheck.type = 'checkbox';
-        saveCheck.className = 'user-input-save-vault-check';
-        saveCheck.dataset.fieldId = field.field_id;
-        saveCheck.dataset.semanticType = field.semantic_type || '';
-        saveCheck.checked = Boolean(field.semantic_type && !['comments', 'message', 'other'].includes(String(field.semantic_type).toLowerCase()));
-        saveWrap.appendChild(saveCheck);
-        saveWrap.appendChild(el('span', null, 'Save to Local Vault for future forms'));
-        item.appendChild(saveWrap);
+        const semantic = String(field.semantic_type || '').toLowerCase();
+        if (field.semantic_type && !['comments', 'message', 'other'].includes(semantic)) {
+          const saveWrap = el('label', 'user-input-save-vault');
+          const saveCheck = document.createElement('input');
+          saveCheck.type = 'checkbox';
+          saveCheck.className = 'user-input-save-vault-check';
+          saveCheck.dataset.fieldId = field.field_id;
+          saveCheck.dataset.semanticType = field.semantic_type;
+          saveCheck.checked = false;
+          saveWrap.appendChild(saveCheck);
+          saveWrap.appendChild(el('span', null, 'Also save this answer in the Local Vault (optional)'));
+          item.appendChild(saveWrap);
+        }
 
         this.userInputFieldsContainer.appendChild(item);
       });
@@ -886,6 +1114,16 @@ class SidePanelApp {
         if (val) answers[fid] = val;
       });
 
+      if (!Object.keys(answers).length) {
+        if (this.userInputStatus) {
+          this.userInputStatus.textContent = 'Enter at least one answer, or choose Skip.';
+          this.userInputStatus.dataset.error = 'true';
+        }
+        const firstAnswer = this.userInputFieldsContainer?.querySelector('.user-input-field-input-box');
+        firstAnswer?.focus();
+        return;
+      }
+
       const vaultChecks = this.userInputModal.querySelectorAll('.user-input-save-vault-check:checked');
       vaultChecks.forEach(chk => {
         const fid = chk.dataset.fieldId;
@@ -900,6 +1138,14 @@ class SidePanelApp {
       const freeText = this.userInputSingleText?.value?.trim() || '';
       if (freeText) {
         answers['response'] = freeText;
+      }
+      if (!Object.keys(answers).length) {
+        if (this.userInputStatus) {
+          this.userInputStatus.textContent = 'Enter a response, or choose Skip.';
+          this.userInputStatus.dataset.error = 'true';
+        }
+        this.userInputSingleText?.focus();
+        return;
       }
     }
 
@@ -934,7 +1180,7 @@ class SidePanelApp {
     this.doneSummary.textContent = data?.result || 'Application submitted successfully.';
     const m = this.task?.privacyMetrics;
     const keptLocal = m ? (m.sensitiveFieldsCurrent ?? m.sensitiveFieldsDetected ?? 0) : 0;
-    this.donePrivacy.textContent = `${keptLocal} sensitive value${keptLocal === 1 ? '' : 's'} resolved locally · 0 sent to AI`;
+    this.donePrivacy.textContent = `${keptLocal} known sensitive value${keptLocal === 1 ? '' : 's'} resolved in browser · document names may be sent to planner`;
     this.stopElapsed();
   }
 
@@ -972,15 +1218,54 @@ class SidePanelApp {
   closeModal(m) { m.hidden = true; }
   closeAllModals() { [this.confirmModal, this.userInputModal, this.privacyModal, this.vaultModal, this.settingsModal].forEach((m) => { if (m) m.hidden = true; }); }
 
-  openVault() {
-    this.send(MessageType.GET_VAULT, undefined, (res) => {
-      const v = res?.vault || {};
+  async openVault() {
+    const generation = ++this.vaultLoadGeneration;
+    this.vaultLoaded = false;
+    this.vaultReviewRequired = false;
+    this.vaultReviewNotice.hidden = true;
+    this.vaultReviewConfirm.checked = false;
+    this.vaultReviewReveal.checked = false;
+    this.setVaultReviewReveal(false);
+    this.vaultSaveBtn.textContent = 'Save changes';
+    this.setVaultControlsDisabled(true);
+    this.setVaultSaveStatus('Loading encrypted vault…');
+    this.renderVaultDocuments([]);
+    this.openModal(this.vaultModal);
+    const [vaultResponse, documentsResponse] = await Promise.all([
+      this.sendAsync(MessageType.GET_VAULT),
+      this.sendAsync(MessageType.GET_VAULT_DOCUMENTS)
+    ]);
+    if (generation !== this.vaultLoadGeneration) return;
+    if (!vaultResponse?.vault || !Array.isArray(documentsResponse?.documents)) {
+      this.setVaultSaveStatus('Vault could not be loaded. Close and reopen the panel to retry; saving is disabled.', true);
+      return;
+    }
+    const storageError = vaultResponse.storageError || documentsResponse.storageError;
+    if (storageError) {
+      this.setVaultSaveStatus(`Vault unavailable: ${storageError} Saving is disabled.`, true);
+      return;
+    }
+    {
+      this.vaultReviewRequired = vaultResponse.reviewRequired === true;
+      const v = this.vaultReviewRequired
+        ? (vaultResponse.pendingReview || {})
+        : vaultResponse.vault;
       this.$('vault-aadhaar').value = typeof v.LOCAL_AADHAAR === 'string' ? v.LOCAL_AADHAAR : '';
       this.$('vault-pan').value = typeof v.LOCAL_PAN === 'string' ? v.LOCAL_PAN : '';
       this.$('vault-name').value = typeof v.LOCAL_FULL_NAME === 'string' ? v.LOCAL_FULL_NAME : '';
       this.$('vault-dob').value = typeof v.LOCAL_DOB === 'string' ? v.LOCAL_DOB : '';
       this.$('vault-phone').value = typeof v.LOCAL_PHONE === 'string' ? v.LOCAL_PHONE : '';
       this.$('vault-email').value = typeof v.LOCAL_EMAIL === 'string' ? v.LOCAL_EMAIL : '';
+      this.$('vault-address').value = typeof v.LOCAL_ADDRESS === 'string' ? v.LOCAL_ADDRESS : '';
+      this.$('vault-city').value = typeof v.LOCAL_CITY === 'string' ? v.LOCAL_CITY : '';
+      this.$('vault-state').value = typeof v.LOCAL_STATE === 'string' ? v.LOCAL_STATE : '';
+      this.$('vault-zip').value = typeof v.LOCAL_ZIP === 'string' ? v.LOCAL_ZIP : '';
+      this.$('vault-country').value = typeof v.LOCAL_COUNTRY === 'string' ? v.LOCAL_COUNTRY : '';
+      this.$('vault-gender').value = typeof v.LOCAL_GENDER === 'string' ? v.LOCAL_GENDER : '';
+      this.$('vault-credit-card').value = typeof v.LOCAL_CREDIT_CARD === 'string' ? v.LOCAL_CREDIT_CARD : '';
+      this.$('vault-cvv').value = typeof v.LOCAL_CVV === 'string' ? v.LOCAL_CVV : '';
+      this.$('vault-terms').value = typeof v.LOCAL_TERMS === 'string' ? v.LOCAL_TERMS : '';
+      this.$('vault-profile').value = typeof v.LOCAL_PROFILE === 'string' ? v.LOCAL_PROFILE : '';
       this.$('vault-password').value = typeof v.LOCAL_PASSWORD === 'string' ? v.LOCAL_PASSWORD : '';
       this.$('vault-ssn').value = typeof v.LOCAL_SSN === 'string' ? v.LOCAL_SSN : '';
       this.$('vault-sin').value = typeof v.LOCAL_SIN === 'string' ? v.LOCAL_SIN : '';
@@ -992,8 +1277,194 @@ class SidePanelApp {
       for (const [key, value] of Object.entries(v)) {
         if (/^LOCAL_CUSTOM_[A-Z0-9_]{1,48}$/.test(key)) this.addCustomVaultField(key, value);
       }
-      this.openModal(this.vaultModal);
+      this.renderVaultDocuments(documentsResponse.documents);
+    }
+    this.vaultReviewNotice.hidden = !this.vaultReviewRequired;
+    if (this.vaultReviewRequired) {
+      this.vaultSaveBtn.textContent = 'Review and save values';
+    }
+    this.vaultLoaded = true;
+    this.setVaultControlsDisabled(false);
+    this.setVaultSaveStatus(this.vaultReviewRequired
+      ? 'Old values remain encrypted and unavailable to the agent until you review and save them.'
+      : 'Vault loaded. Changes are encrypted when saved.');
+  }
+
+  setVaultControlsDisabled(disabled) {
+    const dialog = this.vaultModal?.querySelector('.vault-modal-dialog');
+    dialog?.querySelectorAll('input, textarea, select, #vault-add-custom-btn, #vault-doc-add-btn, #save-vault-btn, .vault-doc-field button')
+      .forEach((control) => { control.disabled = disabled; });
+    const save = this.vaultSaveBtn || this.$('save-vault-btn');
+    if (save) save.disabled = disabled || this.vaultSaving || !this.vaultLoaded ||
+      (this.vaultReviewRequired && !this.vaultReviewConfirm?.checked);
+  }
+
+  setVaultReviewReveal(reveal) {
+    this.vaultModal?.querySelectorAll('[data-vault-review-mask="true"]').forEach((input) => {
+      input.type = reveal ? 'text' : 'password';
     });
+  }
+
+  renderVaultDocuments(documents) {
+    const list = this.$('vault-doc-list');
+    if (!list) return;
+    list.replaceChildren();
+    for (const document of documents) {
+      list.appendChild(this.vaultDocumentRow(document.name, document.fileName, document.mimeType, document.byteLength));
+    }
+    this.setVaultDocStatus(documents.length
+      ? `${documents.length} document${documents.length === 1 ? '' : 's'} stored on this device.`
+      : 'No documents stored yet.');
+  }
+
+  vaultDocumentRow(existingName = '', existingFile = '', existingMime = '', existingBytes = null) {
+    const field = document.createElement('div');
+    field.className = 'vault-field vault-doc-field';
+
+    const header = document.createElement('div');
+    header.className = 'vault-label-row';
+    const name = document.createElement('input');
+    name.type = 'text';
+    name.autocomplete = 'off';
+    name.placeholder = 'Document name, e.g. aadhar';
+    name.value = existingName ? existingName.replace(/^LOCAL_DOCUMENT_/, '').replace(/_/g, ' ') : '';
+    name.dataset.docName = 'true';
+    name.dataset.originalVaultDoc = existingName || '';
+    name.setAttribute('aria-label', existingName ? `Stored document name: ${name.value}` : 'Document name');
+    name.readOnly = Boolean(existingName);
+    const token = document.createElement('code');
+    token.className = 'mono-token';
+    token.textContent = existingName || 'LOCAL_DOCUMENT_…';
+    if (!existingName) {
+      name.addEventListener('input', () => {
+        const slug = this.vaultDocumentToken(name.value);
+        token.textContent = slug || 'LOCAL_DOCUMENT_…';
+      });
+    }
+    header.append(name, token);
+
+    const file = document.createElement('input');
+    file.type = 'file';
+    const fileLabel = document.createElement('label');
+    fileLabel.className = 'muted small';
+    const fileLabelId = `vault-doc-file-${++this.vaultDocumentRowId}`;
+    file.id = fileLabelId;
+    fileLabel.htmlFor = fileLabelId;
+    fileLabel.textContent = 'Choose a document';
+    file.dataset.docFile = 'true';
+    file.dataset.originalVaultDoc = existingName || '';
+    if (existingFile) file.dataset.existingFile = existingFile;
+    const summary = document.createElement('p');
+    summary.className = 'muted small';
+    summary.textContent = existingName
+      ? `${existingFile || 'stored file'}${existingBytes ? ` · ${formatBytes(existingBytes)}` : ''}`
+      : 'Choose a file (max 8 MB). It is encrypted at rest; the website can read it after you approve attachment.';
+
+    if (existingName) {
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'btn btn-secondary';
+      remove.textContent = 'Remove';
+      remove.addEventListener('click', () => {
+        remove.disabled = true;
+        this.send(MessageType.DELETE_VAULT_DOCUMENT, { name: existingName }, (res) => {
+          if (res?.deleted) {
+            this.setVaultDocStatus('Document removed from this device.');
+            field.remove();
+          } else {
+            remove.disabled = false;
+            this.setVaultDocStatus(res?.error || 'The document could not be removed.', true);
+          }
+        });
+      });
+      field.append(header, summary, remove);
+      return field;
+    }
+
+    field.append(header, fileLabel, file, summary);
+    return field;
+  }
+
+  addVaultDocumentRow() {
+    this.$('vault-doc-list')?.appendChild(this.vaultDocumentRow());
+  }
+
+  /** Mirror the backend's token grammar so an invalid name is never sent. */
+  vaultDocumentToken(inputValue) {
+    const slug = String(inputValue || '').toUpperCase().trim().replace(/[^A-Z0-9]+/g, '_')
+      .replace(/^_|_$/g, '').slice(0, 48);
+    return slug ? `LOCAL_DOCUMENT_${slug}` : null;
+  }
+
+  setVaultDocStatus(message, isError = false) {
+    const status = this.$('vault-doc-status');
+    if (!status) return;
+    status.textContent = message;
+    status.dataset.error = isError ? 'true' : 'false';
+  }
+
+  setVaultSaveStatus(message, isError = false) {
+    if (!this.vaultSaveStatus) return;
+    this.vaultSaveStatus.textContent = message;
+    this.vaultSaveStatus.dataset.error = isError ? 'true' : 'false';
+  }
+
+  async saveVaultDocuments() {
+    const rows = [...(this.$('vault-doc-list')?.querySelectorAll('.vault-doc-field') || [])];
+    const pending = rows.filter((row) => row.querySelector('input[type="file"]')?.files?.[0]);
+    if (!pending.length) return true;
+    this.setVaultDocStatus('Encrypting and storing…');
+    const pendingNames = new Set();
+    const storedNames = new Set(rows.map((row) =>
+      row.querySelector('[data-original-vault-doc]')?.dataset.originalVaultDoc
+    ).filter(Boolean));
+    for (const row of pending) {
+      const nameInput = row.querySelector('[data-doc-name]');
+      const fileInput = row.querySelector('input[type="file"]');
+      const file = fileInput?.files?.[0];
+      if (!file) continue;
+      const name = this.vaultDocumentToken(nameInput?.value);
+      if (!name) {
+        this.setVaultDocStatus('Give each document a name, e.g. aadhar.', true);
+        return false;
+      }
+      if (pendingNames.has(name)) {
+        this.setVaultDocStatus(`Use a different name for each new document (${name}).`, true);
+        return false;
+      }
+      if (storedNames.has(name)) {
+        this.setVaultDocStatus(`${name} is already stored. Remove it first or choose a different name.`, true);
+        return false;
+      }
+      pendingNames.add(name);
+      if (!file.size) {
+        this.setVaultDocStatus('That file is empty, so it cannot be stored.', true);
+        return false;
+      }
+      if (file.size > 8 * 1024 * 1024) {
+        this.setVaultDocStatus('That file is larger than the 8 MB vault limit.', true);
+        return false;
+      }
+    }
+    for (const row of pending) {
+      const nameInput = row.querySelector('[data-doc-name]');
+      const fileInput = row.querySelector('input[type="file"]');
+      const file = fileInput?.files?.[0];
+      if (!file) continue;
+      const name = this.vaultDocumentToken(nameInput?.value);
+      const data = await readFileAsBase64(file);
+      const stored = await this.sendAsync(MessageType.STORE_VAULT_DOCUMENT, {
+        name, data, fileName: file.name, mimeType: file.type || 'application/octet-stream'
+      });
+      if (!stored?.success) {
+        this.setVaultDocStatus(stored?.error || 'The document could not be stored.', true);
+        return false;
+      }
+      row.replaceWith(this.vaultDocumentRow(name, stored.document?.fileName || file.name,
+        stored.document?.mimeType || file.type, stored.document?.byteLength || file.size));
+      this.setVaultDocStatus('Document stored on this device.');
+    }
+    return true;
   }
 
   addCustomVaultField(key = '', value = '') {
@@ -1014,6 +1485,7 @@ class SidePanelApp {
     header.append(label, token);
     const input = document.createElement('input');
     input.type = 'password';
+    input.dataset.vaultReviewMask = 'true';
     input.autocomplete = 'off';
     input.dataset.originalVaultKey = key;
     input.value = typeof value === 'string' ? value : '';
@@ -1024,9 +1496,15 @@ class SidePanelApp {
     });
     field.append(header, input);
     customFields.append(field);
+    if (this.vaultReviewReveal?.checked) this.setVaultReviewReveal(true);
   }
 
-  saveVault() {
+  async saveVault() {
+    if (!this.vaultLoaded || this.vaultSaving) return;
+    if (this.vaultReviewRequired && !this.vaultReviewConfirm.checked) {
+      this.setVaultSaveStatus('Review the displayed values and check the confirmation box before enabling them.', true);
+      return;
+    }
     const updates = [
       ['LOCAL_AADHAAR', this.$('vault-aadhaar').value],
       ['LOCAL_PAN', this.$('vault-pan').value],
@@ -1034,6 +1512,16 @@ class SidePanelApp {
       ['LOCAL_DOB', this.$('vault-dob').value],
       ['LOCAL_PHONE', this.$('vault-phone').value],
       ['LOCAL_EMAIL', this.$('vault-email').value],
+      ['LOCAL_ADDRESS', this.$('vault-address').value],
+      ['LOCAL_CITY', this.$('vault-city').value],
+      ['LOCAL_STATE', this.$('vault-state').value],
+      ['LOCAL_ZIP', this.$('vault-zip').value],
+      ['LOCAL_COUNTRY', this.$('vault-country').value],
+      ['LOCAL_GENDER', this.$('vault-gender').value],
+      ['LOCAL_CREDIT_CARD', this.$('vault-credit-card').value],
+      ['LOCAL_CVV', this.$('vault-cvv').value],
+      ['LOCAL_TERMS', this.$('vault-terms').value],
+      ['LOCAL_PROFILE', this.$('vault-profile').value],
       ['LOCAL_PASSWORD', this.$('vault-password').value],
       ['LOCAL_SSN', this.$('vault-ssn').value],
       ['LOCAL_SIN', this.$('vault-sin').value],
@@ -1050,12 +1538,34 @@ class SidePanelApp {
           return oldKey && oldKey !== key ? [[oldKey, ''], [key, input.value]] : [[key, input.value]];
         })
     ];
-    (async () => {
-      for (const [key, value] of updates) {
-        await new Promise((r) => this.send(MessageType.UPDATE_VAULT, { key, value }, () => r()));
+    this.vaultSaving = true;
+    this.setVaultControlsDisabled(true);
+    this.setVaultSaveStatus(this.vaultReviewRequired ? 'Saving reviewed vault values…' : 'Saving vault values…');
+    try {
+      if (this.vaultReviewRequired) {
+        const response = await this.sendAsync(MessageType.CONFIRM_VAULT_REVIEW, {
+          values: Object.fromEntries(updates)
+        });
+        if (!response?.success) throw new Error(response?.error || 'Reviewed vault values could not be saved.');
+        this.vaultReviewRequired = false;
+        this.vaultReviewNotice.hidden = true;
+        this.vaultSaveBtn.textContent = 'Save changes';
+      } else {
+        for (const [key, value] of updates) {
+          const response = await this.sendAsync(MessageType.UPDATE_VAULT, { key, value });
+          if (!response?.success) throw new Error(response?.error || `Could not save ${key}.`);
+        }
       }
+      const documentsSaved = await this.saveVaultDocuments();
+      if (!documentsSaved) throw new Error('Correct the document details above, then save again.');
+      this.setVaultSaveStatus('Vault saved on this device.');
       this.closeModal(this.vaultModal);
-    })();
+    } catch (error) {
+      this.setVaultSaveStatus(error?.message || 'Vault could not be saved.', true);
+    } finally {
+      this.vaultSaving = false;
+      this.setVaultControlsDisabled(false);
+    }
   }
 
   applySettingsToUI() {
@@ -1140,6 +1650,63 @@ class SidePanelApp {
       this.llmScreenshotPreviewCard.hidden = true;
       this.llmScreenshotPreviewCard.open = false;
     }
+    this.renderLatestRedactedShot();
+  }
+
+  /**
+   * The newest redacted image, shown in the Privacy Shield without needing to
+   * expand anything. It is the same data URL that was attached to the request,
+   * not a re-render of the live page, so what is on screen here is exactly
+   * what the vision model received.
+   */
+  renderLatestRedactedShot() {
+    const image = this.$('redacted-shot-image');
+    const frame = this.$('redacted-shot-frame');
+    const empty = this.$('redacted-shot-empty');
+    const status = this.$('redacted-shot-status');
+    if (!image || !frame || !empty || !status) return;
+    const latest = this.vlmScreenshotPreviews?.[0] || null;
+    const history = this.$('redacted-shot-history-list');
+    const count = this.$('redacted-shot-history-count');
+
+    if (!latest) {
+      image.removeAttribute('src');
+      frame.hidden = true;
+      empty.hidden = false;
+      status.textContent = 'No image sent yet';
+      status.dataset.state = 'idle';
+      if (history) history.replaceChildren();
+      if (count) count.textContent = '0';
+      return;
+    }
+
+    image.src = latest.screenshot;
+    frame.hidden = false;
+    empty.hidden = true;
+    const label = latest.redactionStatus === 'masked'
+      ? 'Masked before sending'
+      : latest.redactionStatus === 'checked'
+        ? 'Sent, no known regions to mask'
+        : 'Privacy status unavailable';
+    status.textContent = latest.step ? `Step ${latest.step} · ${label}` : label;
+    status.dataset.state = latest.redactionStatus;
+
+    const older = this.vlmScreenshotPreviews.slice(1);
+    if (count) count.textContent = String(older.length);
+    if (history) {
+      history.replaceChildren();
+      for (const preview of older) {
+        const item = el('figure', 'redacted-shot-thumb');
+        const thumb = document.createElement('img');
+        thumb.loading = 'lazy';
+        thumb.decoding = 'async';
+        thumb.alt = preview.step ? `Redacted screenshot from step ${preview.step}` : 'Earlier redacted screenshot';
+        thumb.src = preview.screenshot;
+        item.append(thumb, el('figcaption', 'redacted-shot-thumb-cap',
+          preview.step ? `Step ${preview.step}` : 'Earlier'));
+        history.appendChild(item);
+      }
+    }
   }
 
   addVlmScreenshotPreview(data = {}) {
@@ -1163,6 +1730,7 @@ class SidePanelApp {
       screenshot: safeDataUrl
     });
     this.vlmScreenshotPreviews = this.vlmScreenshotPreviews.slice(0, MAX_VLM_SCREENSHOT_PREVIEWS);
+    this.renderLatestRedactedShot();
     const previewChars = () => this.vlmScreenshotPreviews.reduce(
       (sum, preview) => sum + preview.screenshot.length, 0
     );
@@ -1396,6 +1964,18 @@ function downloadText(text, filename) {
   anchor.download = filename;
   anchor.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function spreadsheetSafeCell(value) {
+  const cell = String(value ?? '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, ' ').replace(/[\t\r\n]+/g, ' ').trim();
+  // Treat PDF text as data when pasted into a spreadsheet. This prevents a
+  // cell beginning with a formula marker from executing as a Sheets formula.
+  return /^[\s]*[=+\-@]/.test(cell) ? `'${cell}` : cell;
+}
+
+function safeFileStem(filename) {
+  const stem = String(filename || 'pdf').replace(/\.pdf$/i, '').replace(/[^a-z0-9_-]+/gi, '-').replace(/^-+|-+$/g, '').slice(0, 64);
+  return stem || 'pdf';
 }
 
 function truncate(s, n) {

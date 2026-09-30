@@ -321,15 +321,12 @@ test('CLEAR_OVERLAYS is acknowledged', async () => {
   assert.equal(response.success, true);
 });
 
-// ── Upload guard ──────────────────────────────────────────────────────────
+// ── Upload route ─────────────────────────────────────────────────────────
 
-test('a real document upload is refused; the synthetic demo body is the only path', () => {
-  const guard = extractMethod(CONTENT_SOURCE, '_executeUpload');
-  assert.ok(guard, '_executeUpload must exist in the shipped content script');
-  assert.match(guard, /demo\s*!==\s*true/, 'upload must require demo === true');
-  assert.match(guard, /content\s*!==\s*['"][^'"]{1,200}['"]/, 'the body must be compared against a fixed literal');
-  const names = [...guard.matchAll(/fileName\s*=\s*['"]([^'"]+)['"]/g)].map((m) => m[1]);
-  assert.deepEqual(names, ['synthetic-demo.txt'], 'the uploaded filename must be a constant');
+test('the shipped content script only has the named vault document upload route', () => {
+  assert.match(CONTENT_SOURCE, /Choose a named document from the local vault before attaching a file/);
+  assert.match(CONTENT_SOURCE, /async _executeVaultDocumentUpload\(/);
+  assert.doesNotMatch(CONTENT_SOURCE, /_executeUpload|SYNTHETIC DEMO FILE|synthetic-demo\.txt/);
 });
 
 // ── Viewport scale ────────────────────────────────────────────────────────
@@ -341,4 +338,188 @@ test('the observation reports the device pixel scale', async () => {
   // CSS pixels. Without the scale factor, every vision-derived coordinate on a
   // HiDPI display hit an element twice as far away.
   assert.equal(extraction.data.viewport.scale, 2);
+});
+
+// ── Accessible-name resolution (no site-specific field names) ─────────────
+
+test('aria-labelledby with several ids joins every label part', async () => {
+  // W3C: aria-labelledby is a space-separated id list whose texts join in
+  // order. Passing the whole string to getElementById returns null, so every
+  // field on such a page (Google Forms, ARIA widgets) lost its label and the
+  // agent could not tell "Name" from "Phone number".
+  const input = new FakeElement('input', { type: 'text', name: 'entry.1234567' });
+  input.setAttribute('aria-labelledby', 'i1 i2');
+  const page = bootPage({
+    elements: [input],
+    labelTexts: { i1: 'Name', i2: '(required)' }
+  });
+
+  const extraction = await page.send('EXTRACT_DOM', {});
+  assert.equal(extraction.data.elements[0].label, 'Name (required)');
+});
+
+test('a single aria-labelledby id still resolves', async () => {
+  const input = new FakeElement('input', { type: 'text', name: 'q1' });
+  input.setAttribute('aria-labelledby', 'only');
+  const page = bootPage({ elements: [input], labelTexts: { only: 'Email' } });
+
+  const extraction = await page.send('EXTRACT_DOM', {});
+  assert.equal(extraction.data.elements[0].label, 'Email');
+});
+
+test('an auto-generated control name is never used as the label', async () => {
+  // "entry.2005620554" is not a field name; returning it made every classifier
+  // match the wrong thing. Label resolution must fall through instead.
+  for (const opaque of ['entry.2005620554', 'question-12', 'field_3', 'input42', 'answer.7']) {
+    const input = new FakeElement('input', { type: 'text', name: opaque, placeholder: 'Your answer' });
+    const page = bootPage({ elements: [input] });
+    const extraction = await page.send('EXTRACT_DOM', {});
+    assert.equal(extraction.data.elements[0].label, 'Your answer',
+      `opaque name ${opaque} must not be reported as the label`);
+  }
+});
+
+test('a meaningful control name is still used when nothing better exists', async () => {
+  const input = new FakeElement('input', { type: 'text', name: 'household_income' });
+  const page = bootPage({ elements: [input] });
+  const extraction = await page.send('EXTRACT_DOM', {});
+  assert.equal(extraction.data.elements[0].label, 'household_income');
+});
+
+test('labels from an aria-labelledby list are read in document order', async () => {
+  const input = new FakeElement('input', { type: 'text', name: 'e1' });
+  input.setAttribute('aria-labelledby', 'a b c');
+  const page = bootPage({ elements: [input], labelTexts: { a: 'Address', b: 'street', c: 'line' } });
+  const extraction = await page.send('EXTRACT_DOM', {});
+  assert.equal(extraction.data.elements[0].label, 'Address street line');
+});
+
+// ── Off-screen form fields (long forms) ───────────────────────────────────
+
+test('a field below the fold is still observed and is typable', async () => {
+  // The extractor used to keep only viewport-visible controls, so on a long
+  // form the agent saw one screenful, asked the user for values it already
+  // had, and could never reach the fields underneath.
+  const below = new FakeElement('input', { type: 'text', name: 'entry.9' });
+  below.rect = { left: 0, top: 5000, width: 600, height: 40, right: 600, bottom: 5040 };
+  const page = bootPage({ elements: [below], innerHeight: 800 });
+
+  const extraction = await page.send('EXTRACT_DOM', {});
+  const field = extraction.data.elements.find((el) => el.id === 'el_1');
+
+  assert.ok(field, 'a rendered control below the fold must be observed');
+  assert.equal(field.in_viewport, false, 'it must be reported as off-screen');
+  assert.equal(field.is_visible, true, 'but it is present and can be typed into');
+
+  const result = await page.send('EXECUTE_ACTION', {
+    action: 'TYPE', target: { element_id: field.id }, resolvedValue: 'Pune'
+  });
+  assert.equal(result.success, true);
+  assert.equal(below.value, 'Pune');
+});
+
+test('a control that is not rendered at all is still excluded', async () => {
+  // The fix must not turn the extractor into "extract everything": a
+  // display:none control is not a real field.
+  const hidden = new FakeElement('input', { type: 'text', name: 'gone' });
+  hidden.rect = { left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0 };
+  const page = bootPage({ elements: [hidden] });
+  const extraction = await page.send('EXTRACT_DOM', {});
+  assert.equal(extraction.data.elements.length, 0);
+});
+
+test('local screenshot coverage is established only when DOM extraction was not truncated', async () => {
+  const completePage = bootPage({
+    elements: [new FakeElement('input', { name: 'q' })],
+    visibleText: 'A complete short page excerpt.'
+  });
+  const complete = await completePage.send('EXTRACT_DOM', {});
+  assert.deepEqual(complete.data.privacy_coverage, {
+    established: true,
+    interactive_elements_complete: true,
+    visible_text_complete: true
+  });
+
+  const crowdedPage = bootPage({
+    elements: Array.from({ length: 121 }, (_, index) => new FakeElement('input', { name: `field_${index}` }))
+  });
+  const crowded = await crowdedPage.send('EXTRACT_DOM', {});
+  assert.equal(crowded.data.elements.length, 120);
+  assert.equal(crowded.data.privacy_coverage.interactive_elements_complete, false);
+  assert.equal(crowded.data.privacy_coverage.established, false);
+
+  const longTextPage = bootPage({ visibleText: 'x'.repeat(4001) });
+  const longText = await longTextPage.send('EXTRACT_DOM', {});
+  assert.equal(longText.data.privacy_coverage.visible_text_complete, false);
+  assert.equal(longText.data.privacy_coverage.established, false);
+});
+
+// ── Scroll ────────────────────────────────────────────────────────────────
+
+test('SCROLL reports the resulting position instead of faking success', async () => {
+  const page = bootPage({ elements: [new FakeElement('input', { name: 'q' })] });
+  await page.send('EXTRACT_DOM', {});
+  const result = await page.send('EXECUTE_ACTION', { action: 'SCROLL', deltaY: 400 });
+  assert.equal(result.success, true, result.error);
+  // The planner uses this to know whether more content is reachable; a
+  // silent "success" on a page that did not move hides an unreachable form.
+  assert.equal(result.moved, true);
+  assert.equal(result.scroll.y, 400);
+  assert.ok(result.scroll.maxY >= 0);
+});
+
+// ── Question-text labels (no field-name hardcoding) ───────────────────────
+
+test('a date input labelled only by its format hint resolves to the question text', async () => {
+  // The date question exposed "mm/dd/yyyy" and no aria-labelledby, so the
+  // field arrived with no identity at all: no DOB mapping, and the agent
+  // asked the user for a date it should have taken from the local vault.
+  const input = new FakeElement('input', { type: 'date', name: 'entry.104', placeholder: 'mm/dd/yyyy' });
+  input.innerText = '';
+  const question = new FakeElement('div', { innerText: 'date of birth' });
+  question.getBoundingClientRect = () => ({ left: 0, top: 100, width: 400, height: 24, right: 400, bottom: 124 });
+  input.closest = (selector) => (/fieldset|group|radiogroup|listitem|section|article|li/.test(selector) ? question : null);
+
+  const page = bootPage({ elements: [input] });
+  const extraction = await page.send('EXTRACT_DOM', {});
+
+  assert.equal(extraction.data.elements[0].label, 'date of birth');
+});
+
+test('a generic prompt label is not reported as the field name', async () => {
+  const input = new FakeElement('input', { type: 'text', name: 'entry.3', placeholder: 'Your answer' });
+  input.innerText = '';
+  const page = bootPage({ elements: [input] });
+  const extraction = await page.send('EXTRACT_DOM', {});
+  // With no question available the placeholder is still the last resort, but a
+  // bare type word such as "Date" must never stand in for a field identity.
+  assert.ok(['Your answer', ''].includes(extraction.data.elements[0].label),
+    `generic prompt leaked as a label: ${extraction.data.elements[0].label}`);
+});
+
+test('a filled question block contributes its question, never the typed answer', async () => {
+  // Regression: once the agent filled "Name", the question block's innerText is
+  // "Name\nvishal". Reading the whole block as the field name put the user's
+  // own name into the label — and with no matching vault key there is no local
+  // rule that can scrub a bare first name, so it reached the outbound payload
+  // and the privacy gate blocked the request.
+  const input = new FakeElement('input', { type: 'text', name: 'entry.1' });
+  const section = new FakeElement('div', { innerText: 'Name\nvishal' });
+  section.getBoundingClientRect = () => ({ left: 0, top: 50, width: 600, height: 120, right: 600, bottom: 170 });
+  input.closest = (selector) => (/fieldset|group|radiogroup|listitem|section|article|li/.test(selector) ? section : null);
+
+  const page = bootPage({ elements: [input] });
+  const extraction = await page.send('EXTRACT_DOM', {});
+  const label = extraction.data.elements[0].label;
+
+  assert.equal(label, 'Name');
+  assert.doesNotMatch(label, /vishal/, 'a typed answer must never become the field name');
+});
+
+test('a real accessible name still wins over question text', async () => {
+  const input = new FakeElement('input', { type: 'text', name: 'entry.1' });
+  input.setAttribute('aria-labelledby', 'q1');
+  const page = bootPage({ elements: [input], labelTexts: { q1: 'Email address' } });
+  const extraction = await page.send('EXTRACT_DOM', {});
+  assert.equal(extraction.data.elements[0].label, 'Email address');
 });

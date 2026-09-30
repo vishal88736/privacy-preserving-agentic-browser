@@ -2,19 +2,21 @@
  * GPT-OSS 120B Reasoning Client
  * Sends a COMPACT grounded observation (not a raw DOM dump) to /reason.
  *
- * Planning is backend-LLM-only. The regex-driven local planner fallback and
- * the form-plan-builder route were removed: when the reasoning backend is
- * unreachable the client reports planner-unavailable instead of inventing a
- * heuristic plan, so a dead backend can never masquerade as a working agent.
+ * Planning is backend-LLM-only. When the reasoning backend is unreachable,
+ * the client reports planner-unavailable instead of inventing a heuristic
+ * plan, so a dead backend can never masquerade as a working agent.
  * The UPLOAD guard below is NOT part of that removal — it is a safety
- * boundary (local documents must never be read or uploaded by the agent).
+ * boundary. It still refuses to let the agent read an arbitrary local file:
+ * an upload is possible only for a document the USER stored and named, and any
+ * other UPLOAD is still routed to ASK_USER.
  */
 
-import { ServerDefaults, ActionType, RiskLevel, SymbolicSecretSource } from '../shared/constants.js';
+import { ServerDefaults, ActionType, RiskLevel, SymbolicSecretSource, isDocumentToken } from '../shared/constants.js';
 import { validateAction, validateReasonPayload } from '../shared/schemas.js';
 import { createLogger } from '../shared/logger.js';
 import { defaultPolicyEngine } from '../privacy/policy-engine.js';
 import { defaultDOMSanitizer } from '../privacy/dom-sanitizer.js';
+import { defaultLocalVault } from '../privacy/local-vault.js';
 import { defaultActionParser } from './action-parser.js';
 import { defaultPromptBuilder } from './prompt-builder.js';
 import { defaultTaskGrounding } from '../perception/task-grounding.js';
@@ -42,11 +44,50 @@ function sanitizePlannerText(value, maxLength) {
 }
 
 export class GPTOSSClient {
-  constructor(baseUrl = ServerDefaults.BACKEND_BASE_URL) {
+  constructor(baseUrl = ServerDefaults.BACKEND_BASE_URL, { vault = defaultLocalVault } = {}) {
     this.baseUrl = baseUrl;
     this.authToken = '';
     this.policyEngine = defaultPolicyEngine;
     this.actionParser = defaultActionParser;
+    this.vault = vault;
+  }
+
+  /**
+   * Names of the documents the user has stored, or [] when there are none.
+   *
+   * Names are safe to send (a token, not a value); the bytes are not, and no
+   * call on this path ever reads them. This list is the entire vocabulary the
+   * model is given for attaching a file: anything not on it is unroutable, and
+   * the resolver will refuse to resolve a token that names nothing.
+   */
+  async _storedDocumentTokens() {
+    try {
+      await this.vault.ready;
+      return this.vault.getDocumentsSummary().map((doc) => doc.name);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Is this an upload the user actually authorized?
+   *
+   * All three must hold: the model named one of the user's stored documents
+   * (never a path, a URL, or an inline body), that document exists right now,
+   * and the target is a file input the current observation actually saw. A
+   * model that emits UPLOAD with anything else gets ASK_USER instead, which is
+   * what this guard has always done.
+   */
+  _isAuthorizedDocumentUpload(action, fusedObservation, storedTokens) {
+    if (action?.action !== ActionType.UPLOAD) return false;
+    if (!isDocumentToken(action.value_source)) return false;
+    if (!storedTokens.includes(action.value_source)) return false;
+    if (this.vault.hasDocument && !this.vault.hasDocument(action.value_source)) return false;
+    const targetId = action.target?.element_id;
+    if (!targetId) return false;
+    const element = (fusedObservation?.elements || []).find((item) => item.id === targetId);
+    const domType = String(element?.dom?.type || element?.dom?.input_type || '').toLowerCase();
+    return domType === 'file';
   }
 
   /**
@@ -134,10 +175,13 @@ export class GPTOSSClient {
   }
 
   async interpretTask(taskPrompt) {
+    // The outbound scanner must see the decrypted vault before it decides
+    // whether a request contains one of the user's configured values.
+    await Promise.all([this.vault?.ready, defaultLocalVault.ready]);
     const payload = { task: taskPrompt };
     let remoteCallAttempted = false;
     try {
-      this.policyEngine.enforceOutboundSafety(payload);
+      await this.policyEngine.enforceOutboundSafety(payload);
       remoteCallAttempted = true;
       const response = await this.post('/interpret', payload);
       if (!response.ok) {
@@ -160,21 +204,28 @@ export class GPTOSSClient {
   }
 
   async planNextStep(task, fusedObservation, taskHistory = [], taskState = null, pageState = null) {
+    // Do not sanitize, scan, or choose the empty-document fallback against a
+    // vault that is still being decrypted after a service-worker restart.
+    await Promise.all([this.vault?.ready, defaultLocalVault.ready]);
     // taskState is seeded from the backend /interpret call at task start, so
     // it is always present on the live path. There is no local keyword
     // interpreter anymore: an unknown intent means "ask the planner", which
     // is exactly what the backend planner + critic loop is for.
     const interpreted = taskState || { intent: 'unknown', constraints: [] };
-    if (String(interpreted?.intent || '').toUpperCase() === 'UPLOAD' || /\b(upload|attach)\b/i.test(String(task || ''))) {
+    const storedDocuments = await this._storedDocumentTokens();
+    if ((String(interpreted?.intent || '').toUpperCase() === 'UPLOAD' || /\b(upload|attach)\b/i.test(String(task || ''))) &&
+        !storedDocuments.length) {
+      // Nothing the user stored can be attached, so there is nothing the agent
+      // may do here beyond telling the user to pick a file themselves.
       return {
         task_understanding: { intent: 'UPLOAD', constraints: interpreted.constraints || [] },
         page_understanding: { page_type: fusedObservation?.page?.page_type || 'document_upload' },
-        thought: 'Local document selection is unsupported; the user must choose the file in the webpage.',
+        thought: 'No matching document is stored in the Local Vault. The user can choose a file in the webpage or save a document in the vault first.',
         action: {
           action: ActionType.ASK_USER,
           risk: RiskLevel.LOW,
           requires_confirmation: false,
-          value: { prompt: 'Choose the file directly in the webpage file picker. The extension does not read or upload local documents.' }
+          value: { prompt: 'Choose the file directly in the webpage file picker, or save it in Vault → Documents so PrivAgent can attach it after your confirmation.' }
         },
         isTerminal: false,
         remoteCallMade: false,
@@ -220,6 +271,10 @@ export class GPTOSSClient {
       page_state: compactPageState,
       fused_observation: compactObs,
       task_history: history,
+      // Stored document tokens are disclosed to the reasoning backend/model so
+      // it can name only a document the user saved. File names, types, and
+      // bytes stay out of this payload.
+      stored_documents: storedDocuments,
       timestamp: Date.now()
     };
 
@@ -229,7 +284,7 @@ export class GPTOSSClient {
       // A rejected payload is never sent. Privacy blocks and transport failures
       // are reported to the controller so they cannot turn into fake WAIT
       // actions or be mistaken for successful planning.
-      this.policyEngine.enforceOutboundSafety(payload);
+      await this.policyEngine.enforceOutboundSafety(payload);
       // AbortController via post(): a hung backend must not block the agent
       // loop indefinitely (the loop is awaiting this request).
       const response = await this.post(ServerDefaults.REASON_ENDPOINT, payload);
@@ -255,20 +310,22 @@ export class GPTOSSClient {
 
       const data = await response.json();
       if (data && data.action && typeof data.action === 'object') {
-        // The live prompt excludes UPLOAD and directs file selection to the
-        // user. Fail closed if a model nevertheless emits the legacy action:
-        // never let it reach the action executor or page file input.
-        if (data.action.action === ActionType.UPLOAD) {
-          log.warn('Remote planner emitted unsupported UPLOAD; routing to user');
+        // The live prompt only permits UPLOAD for a document listed in
+        // STORED_DOCUMENTS. Fail closed if the model emits the legacy action
+        // anyway, or names a document the user never stored: never let it
+        // reach the action executor or a page file input.
+        if (data.action.action === ActionType.UPLOAD &&
+            !this._isAuthorizedDocumentUpload(data.action, fusedObservation, storedDocuments)) {
+          log.warn('Remote planner emitted an upload without a stored document; routing to user');
           data.action = {
             action: ActionType.ASK_USER,
             risk: RiskLevel.LOW,
             requires_confirmation: false,
             value: {
-              prompt: 'Choose the file directly in the webpage file picker. The extension does not read or upload local documents.'
+              prompt: 'Choose the file directly in the webpage file picker, or save the intended document in Vault → Documents and try again.'
             }
           };
-          data.thought = 'Local document selection is unsupported; the user must choose the file in the webpage.';
+          data.thought = 'I could not verify that this is a stored document and an observed file field, so the user must choose the file on the page.';
           data.final_response = '';
         }
         try {

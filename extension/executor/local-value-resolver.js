@@ -2,12 +2,27 @@
  * Local Value Resolver
  * Maps symbolic tokens (e.g. LOCAL_AADHAAR) to their actual values
  * from the LocalVault immediately prior to in-browser execution.
+ *
+ * Document tokens (LOCAL_DOCUMENT_<NAME>) resolve to a structured descriptor
+ * instead of a string. The bytes are attached to that descriptor here, in the
+ * background, at the last possible moment — they are never written into the
+ * action, the task history, the planner payload, or any log line.
  */
 
 import { createLogger } from '../shared/logger.js';
 import { defaultLocalVault } from '../privacy/local-vault.js';
+import { isDocumentToken } from '../shared/constants.js';
 
 const log = createLogger({ scope: 'LocalValueResolver', surface: 'background' });
+
+/**
+ * Marker on a resolved document descriptor.
+ *
+ * The content script routes on this marker rather than on a shape, so a
+ * string, a page-supplied object, or a model-supplied value can never be
+ * mistaken for a stored document.
+ */
+export const VAULT_DOCUMENT_MARKER = '__vaultDocument';
 
 // Canonical state/province names used to split a free-form address record
 // into city/state/zip parts. Matched case-insensitively; the matched
@@ -140,6 +155,8 @@ export class LocalValueResolver {
    * Resolves the target value for an action.
    * If value_source is provided, queries the local vault.
    * If regular value is provided, returns it as-is.
+   * A LOCAL_DOCUMENT_<NAME> token resolves to a document descriptor
+   * ({name, bytes, fileName, mimeType}) that only the upload path consumes.
    * For bulk FILL_FORM_PLAN: sensitive tokens throw when missing so the
    * failure is loud; generic profile fallbacks resolve to '' instead.
    * @param {Object} action
@@ -160,6 +177,15 @@ export class LocalValueResolver {
         }
 
         try {
+          // A document is not a form value. Plan fields are typed or selected
+          // into a control; attaching a file needs the upload path, so this is
+          // reported as unavailable rather than silently resolving to bytes
+          // that the form filler would try to type.
+          if (isDocumentToken(field.value_source)) {
+            field.status = 'UNAVAILABLE';
+            field.unavailable_reason = 'A stored document is attached with UPLOAD on a file input, not typed into a form field.';
+            return;
+          }
           const resolved = this.vault.resolveSecret(field.value_source);
           if (resolved === null || resolved === undefined || resolved === '') {
             const directToken = { city: 'LOCAL_CITY', state: 'LOCAL_STATE', zip: 'LOCAL_ZIP' }[field.address_part];
@@ -207,12 +233,45 @@ export class LocalValueResolver {
     }
 
     if (action.value_source) {
+      // A named document is the ONLY source that can produce file bytes, and
+      // it can only produce a document the user stored under that exact name.
+      // There is no path, no URL, and no file-picker API on this path, so a
+      // model cannot read a local file it was not given.
+      if (isDocumentToken(action.value_source)) {
+        const document = this.vault.resolveDocument(action.value_source);
+        if (!document) {
+          throw new Error(`No document named "${action.value_source}" is stored in your Local Vault. Save it there first, or choose the file yourself on the page.`);
+        }
+        // Privacy: token name and byte count only.
+        log.info(`Resolved stored document ${action.value_source} (${document.byteLength} bytes)`);
+        return {
+          [VAULT_DOCUMENT_MARKER]: true,
+          name: document.name,
+          bytes: document.bytes,
+          fileName: document.fileName,
+          mimeType: document.mimeType,
+          byteLength: document.byteLength
+        };
+      }
       const resolved = this.vault.resolveSecret(action.value_source);
       if (resolved === null || resolved === undefined) {
         throw new Error(`Local credential "${action.value_source}" is not configured in your Local Vault.`);
       }
       if (action.value_source === 'LOCAL_DOCUMENT') {
         throw new Error('Real document upload is not supported. Choose the file directly on the webpage.');
+      }
+      // Address sub-fields (city/state/PIN inputs worded differently from the
+      // saved address record): derive the requested part instead of typing the
+      // whole address into a city box. Mirrors the FILL_FORM_PLAN path below.
+      if (action.address_part && typeof resolved === 'string') {
+        const directToken = { city: 'LOCAL_CITY', state: 'LOCAL_STATE', zip: 'LOCAL_ZIP' }[action.address_part];
+        const directVal = directToken ? this.vault.resolveSecret(directToken) : null;
+        const value = directVal || this.parseAddressParts(resolved)[action.address_part];
+        if (!value) {
+          throw new Error(`Could not derive the ${action.address_part} from the saved address. Add it to the vault or enter it on the page.`);
+        }
+        log.info(`Resolved action value_source ${action.value_source}+${action.address_part} (kept local)`);
+        return value;
       }
       // Privacy: token name only — never the plaintext value.
       log.info(`Resolved action value_source ${action.value_source} (kept local)`);

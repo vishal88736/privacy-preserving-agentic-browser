@@ -79,6 +79,9 @@ export class ObservationFusion {
         sensitive: domEl.sensitive,
         semantic_type: domEl.semantic_type,
         value_source: domEl.value_source,
+        // Extractor filled bit (strict boolean, no value): preserved so
+        // filled checks can tell a redacted-but-filled field from an empty one.
+        has_value: domEl.has_value === true,
         checked: Boolean(domEl.checked),
         selected: Boolean(domEl.selected || selectedOption),
         selected_option: selectedOption ? {
@@ -90,6 +93,10 @@ export class ObservationFusion {
         is_interactive: domEl.is_interactive,
         is_visible: visible,
         disabled: Boolean(domEl.disabled),
+        readonly: Boolean(domEl.readonly),
+        ariaReadonly: domEl.ariaReadonly || '',
+        is_contenteditable: domEl.is_contenteditable === true,
+        radio_group_id: domEl.radio_group_id || null,
         in_form: Boolean(domEl.in_form),
         form_id: domEl.form_id || null,
         required: Boolean(domEl.required),
@@ -107,7 +114,8 @@ export class ObservationFusion {
             (domEl.tag !== 'input' && domEl.tag !== 'textarea' && domEl.tag !== 'select')
           )
         ),
-        typeable: (domEl.tag === 'input' && domEl.type !== 'checkbox' && domEl.type !== 'radio' && domEl.type !== 'button' && domEl.type !== 'submit') || domEl.tag === 'textarea',
+        typeable: (domEl.tag === 'input' && domEl.type !== 'checkbox' && domEl.type !== 'radio' && domEl.type !== 'button' && domEl.type !== 'submit') ||
+          domEl.tag === 'textarea' || domEl.is_contenteditable === true || String(domEl.role || '').toLowerCase() === 'textbox',
         uploadable: domEl.type === 'file'
       },
       matched_by: 'DOM_ONLY',
@@ -125,7 +133,8 @@ export class ObservationFusion {
     // Generate Form State
     const inputs = unifiedElements.filter(el =>
       el.interaction.typeable || el.interaction.uploadable || el.dom?.tag === 'select' ||
-      ['checkbox', 'radio'].includes(String(el.dom?.type || '').toLowerCase())
+      ['checkbox', 'radio'].includes(String(el.dom?.type || '').toLowerCase()) ||
+      ['checkbox', 'radio'].includes(String(el.dom?.role || '').toLowerCase())
     );
     const isMeaningfulValue = (v) => {
       if (v == null) return false;
@@ -137,8 +146,14 @@ export class ObservationFusion {
     };
     const isFieldFilled = (el) => {
       const type = String(el.dom?.type || '').toLowerCase();
-      if (type === 'checkbox') return Boolean(el.dom?.checked);
-      if (type === 'radio') {
+      const role = String(el.dom?.role || '').toLowerCase();
+      if (type === 'checkbox' || role === 'checkbox') return Boolean(el.dom?.checked || el.dom?.has_value);
+      if (type === 'radio' || role === 'radio') {
+        const radioGroupId = el.dom?.radio_group_id;
+        if (radioGroupId) {
+          return inputs.some((candidate) => candidate.dom?.radio_group_id === radioGroupId &&
+            (Boolean(candidate.dom?.checked) || candidate.dom?.has_value === true));
+        }
         const group = el.dom?.form_id || '';
         const name = el.dom?.name || '';
         if (!name) return Boolean(el.dom?.checked);
@@ -149,17 +164,32 @@ export class ObservationFusion {
         );
       }
       if (el.dom?.tag === 'select') return Boolean(el.dom?.selected_option && isMeaningfulValue(el.dom.selected_option.value));
+      // Filled bit from the extractor (preserved verbatim by the sanitizer).
+      // A redacted sensitive value reads '[REDACTED]', which looks empty but
+      // means the field holds something — without this bit, filled fields
+      // report EMPTY forever and the agent re-types them in a loop.
+      if (el.dom?.has_value === true) return true;
+      if (el.dom?.has_value === false) return false;
       return isMeaningfulValue(el.dom?.value);
     };
-    const formFields = inputs.map((el) => ({
-      id: el.id,
-      role: el.role,
-      semantic_type: el.dom?.semantic_type || 'UNKNOWN',
-      state: isFieldFilled(el) ? 'FILLED' : 'EMPTY',
-      required: Boolean(el.dom?.required),
-      form_group_id: el.dom?.form_id || el.form_group_id || null,
-      sensitive: Boolean(el.dom?.sensitive)
-    }));
+    const seenRadioGroups = new Set();
+    const formFields = inputs.flatMap((el) => {
+      const radioGroupId = el.dom?.radio_group_id;
+      if (radioGroupId && seenRadioGroups.has(radioGroupId)) return [];
+      if (radioGroupId) seenRadioGroups.add(radioGroupId);
+      const groupMembers = radioGroupId
+        ? inputs.filter((candidate) => candidate.dom?.radio_group_id === radioGroupId)
+        : [el];
+      return [{
+        id: el.id,
+        role: radioGroupId ? 'radiogroup' : el.role,
+        semantic_type: el.dom?.semantic_type || 'UNKNOWN',
+        state: isFieldFilled(el) ? 'FILLED' : 'EMPTY',
+        required: groupMembers.some((member) => Boolean(member.dom?.required)),
+        form_group_id: el.dom?.form_id || el.form_group_id || null,
+        sensitive: groupMembers.some((member) => Boolean(member.dom?.sensitive))
+      }];
+    });
     const formGroups = new Map();
     for (const field of formFields) {
       if (!field.form_group_id) continue;

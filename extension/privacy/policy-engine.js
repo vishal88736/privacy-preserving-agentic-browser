@@ -29,7 +29,26 @@ export class PolicyEngine {
    * Deeply scans an outbound object/payload for leaked plaintext values.
    * Throws OutboundPolicyViolationError if any raw secret is discovered.
    */
-  enforceOutboundSafety(payload) {
+  async enforceOutboundSafety(payload) {
+    // LocalVault protects synchronous reads until encrypted storage has been
+    // hydrated. The outbound gate must wait for that same boundary; scanning
+    // against an empty, half-loaded vault could otherwise miss a configured
+    // secret and approve a request too early.
+    try {
+      await this.vault?.ready;
+    } catch (error) {
+      throw new OutboundPolicyViolationError(
+        'Outbound policy blocked payload: the local vault could not be loaded for privacy checks.',
+        { reason: 'vault_unavailable', cause: error?.message || String(error) }
+      );
+    }
+    if (this.vault?.storageError) {
+      throw new OutboundPolicyViolationError(
+        'Outbound policy blocked payload: the local vault is unavailable for privacy checks.',
+        { reason: 'vault_unavailable' }
+      );
+    }
+
     const serialized = typeof payload === 'string' ? payload : JSON.stringify(payload);
     // Strip machine-generated numeric metadata that is never PII so the
     // phone/card patterns cannot false-positive on it (e.g. Date.now()
@@ -67,6 +86,12 @@ export class PolicyEngine {
           throw new OutboundPolicyViolationError(
             'Outbound policy blocked payload: local redaction withheld this image; it must not be transmitted.',
             { reason: 'withheld_image' }
+          );
+        }
+        if (!attestation.withheldStatusPresent) {
+          throw new OutboundPolicyViolationError(
+            'Outbound policy blocked payload: the image attestation did not confirm that it was safe to transmit.',
+            { reason: 'incomplete_attestation' }
           );
         }
         if (!attestation.coverageEstablished) {
@@ -112,7 +137,15 @@ export class PolicyEngine {
       SymbolicSecretSource.LOCAL_GENDER,
       SymbolicSecretSource.LOCAL_TERMS
     ]);
-    const secrets = this.vault.getAllSecretsForUI();
+    let secrets;
+    try {
+      secrets = this.vault.getAllSecretsForUI();
+    } catch (error) {
+      throw new OutboundPolicyViolationError(
+        'Outbound policy blocked payload: the local vault is unavailable for privacy checks.',
+        { reason: 'vault_unavailable', cause: error?.message || String(error) }
+      );
+    }
     for (const [key, value] of Object.entries(secrets)) {
       if (nonSecretTokens.has(key)) continue;
       const minLength = key === SymbolicSecretSource.LOCAL_CVV ? 3 : 4;
@@ -208,6 +241,15 @@ function collectImageDataUrls(payload) {
  */
 function collectRedactionAttestations(payload) {
   const attestations = new Map();
+  const explicitFlag = (audit, snakeCase, camelCase, expected) => {
+    const hasSnake = Object.prototype.hasOwnProperty.call(audit, snakeCase);
+    const hasCamel = Object.prototype.hasOwnProperty.call(audit, camelCase);
+    if (!hasSnake && !hasCamel) return false;
+    if ((hasSnake && typeof audit[snakeCase] !== 'boolean') ||
+        (hasCamel && typeof audit[camelCase] !== 'boolean')) return false;
+    if (hasSnake && hasCamel && audit[snakeCase] !== audit[camelCase]) return false;
+    return (hasSnake ? audit[snakeCase] : audit[camelCase]) === expected;
+  };
   const walk = (value) => {
     if (Array.isArray(value)) {
       value.forEach(walk);
@@ -218,13 +260,27 @@ function collectRedactionAttestations(payload) {
     if (audit && typeof audit === 'object') {
       const image = value.image || value.sanitized_screenshot || value.screenshot;
       if (typeof image === 'string' && /^data:image\/[^;]+;base64,/i.test(image)) {
-        attestations.set(image, {
+        const current = {
           // An explicit `screenshot_withheld` flag means the sanitizer replaced
           // the image with a placeholder; those bytes must never be sent.
           withheld: audit.screenshot_withheld === true || audit.withheld === true,
-          coverageEstablished: audit.coverage_established !== false,
-          localVisionCompleted: audit.local_vision_completed !== false
-        });
+          // Missing or malformed properties are unproven. Only explicit
+          // booleans from the local audit can authorize image transmission.
+          withheldStatusPresent: explicitFlag(audit, 'screenshot_withheld', 'withheld', false),
+          coverageEstablished: explicitFlag(audit, 'coverage_established', 'coverageEstablished', true),
+          localVisionCompleted: explicitFlag(audit, 'local_vision_completed', 'localVisionCompleted', true)
+        };
+        const previous = attestations.get(image);
+        // The client places an audit both beside the image and in metadata.
+        // Merge duplicate records conservatively: one missing, false, or
+        // conflicting copy invalidates the image instead of letting whichever
+        // object happens to be visited last override the stricter one.
+        attestations.set(image, previous ? {
+          withheld: previous.withheld || current.withheld,
+          withheldStatusPresent: previous.withheldStatusPresent && current.withheldStatusPresent,
+          coverageEstablished: previous.coverageEstablished && current.coverageEstablished,
+          localVisionCompleted: previous.localVisionCompleted && current.localVisionCompleted
+        } : current);
       }
     }
     Object.values(value).forEach(walk);

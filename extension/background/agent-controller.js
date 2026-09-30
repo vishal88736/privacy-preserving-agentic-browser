@@ -19,6 +19,7 @@ import { MessageType } from '../shared/messages.js';
 import { createLogger } from '../shared/logger.js';
 import { taskManager } from './task-manager.js';
 import { defaultDOMSanitizer } from '../privacy/dom-sanitizer.js';
+import { defaultPolicyEngine } from '../privacy/policy-engine.js';
 import { defaultLocalVault } from '../privacy/local-vault.js';
 import { defaultScreenshotSanitizer } from '../privacy/screenshot-sanitizer.js';
 import { defaultScreenshotService } from '../perception/screenshot.js';
@@ -160,6 +161,330 @@ export function latestConfirmationReview(steps) {
   return defaultDOMSanitizer.sanitizeUserPrompt(latest.result.extractedText).slice(0, 3500);
 }
 
+// Normalized intent across the local seed (lowercase, e.g. 'search_and_select',
+// 'fill_form') and the backend interpreter (UPPERCASE, e.g. 'PLAY', 'FILL_FORM').
+function normalizedIntent(task) {
+  const raw = String(task?.taskState?.intent || task?.taskIntent || '').toLowerCase();
+  if (!raw || raw === 'unknown' || raw === 'act') return '';
+  if (raw === 'search_and_select') return 'SEARCH';
+  return raw.toUpperCase();
+}
+
+function taskRequires(task, verb) {
+  const required = task?.taskState?.required_actions || [];
+  if (Array.isArray(required) && required.map((a) => String(a).toUpperCase()).includes(verb)) return true;
+  return false;
+}
+
+function promptAsksPlay(task) {
+  return /\b(play|watch|stream)\b/i.test(String(task?.prompt || ''));
+}
+
+function actionTargetIds(action) {
+  if (Array.isArray(action?.targetIds)) return action.targetIds.filter((id) => typeof id === 'string');
+  if (Array.isArray(action?.value?.fields)) {
+    return action.value.fields.map((field) => field?.field_id).filter((id) => typeof id === 'string');
+  }
+  const elementId = action?.target?.element_id || action?.targetId;
+  return typeof elementId === 'string' ? [elementId] : [];
+}
+
+function observationElement(observation, elementId) {
+  return (observation?.elements || []).find((element) => element?.id === elementId) || null;
+}
+
+/**
+ * Map an observed element's tag/type onto the executor's control-type
+ * vocabulary. The planner's `ambiguousFields` metadata is optional, so a user
+ * answer defaulted to TEXT and was then rejected by the executor's own
+ * control-type check ("expected TEXT, found DATE") — which silently discarded
+ * the user's date on any native date input. Deriving the type from the
+ * element the observation actually saw keeps the answer applicable.
+ * Returns null when the element is unknown.
+ */
+export function observedControlType(tag, type, role = '', isContentEditable = false) {
+  const t = String(tag || '').toLowerCase();
+  const ty = String(type || '').toLowerCase();
+  const r = String(role || '').toLowerCase();
+  if (!t && !ty && !r && !isContentEditable) return null;
+  if (t === 'select') return 'SELECT';
+  if (ty === 'checkbox' || r === 'checkbox') return 'CHECKBOX';
+  if (ty === 'radio' || r === 'radio') return 'RADIO';
+  if (t === 'textarea' || isContentEditable || r === 'textbox') return 'TEXTAREA';
+  if (ty === 'email') return 'EMAIL';
+  if (ty === 'tel') return 'PHONE';
+  if (ty === 'number') return 'NUMBER';
+  if (['date', 'datetime-local', 'month', 'week'].includes(ty)) return 'DATE';
+  if (['time'].includes(ty)) return 'TEXT';
+  if (t === 'input' || t === 'textarea' || t === 'select') return 'TEXT';
+  return null;
+}
+
+function formGroupForAction(action, observation) {
+  const groups = new Set();
+  for (const elementId of actionTargetIds(action)) {
+    const element = observationElement(observation, elementId);
+    const groupId = element?.form_group_id || element?.dom?.form_id || null;
+    if (groupId) groups.add(groupId);
+  }
+  return groups.size === 1 ? [...groups][0] : null;
+}
+
+function formForGroup(observation, groupId) {
+  if (!groupId) return null;
+  return (observation?.form_state?.forms || []).find((form) => form?.form_group_id === groupId) || null;
+}
+
+function normalizedFieldPhrase(text) {
+  return String(text || '').normalize('NFKC').toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+}
+
+function fieldLabelInObservation(observation, fieldId) {
+  const element = observationElement(observation, fieldId);
+  return String(
+    element?.dom?.label || element?.dom?.ariaLabel || element?.dom?.accessible_name ||
+    element?.dom?.placeholder || element?.label || element?.accessible_name || ''
+  ).replace(/\s+/g, ' ').trim();
+}
+
+function fieldExplicitlyRequested(task, label) {
+  const wanted = normalizedFieldPhrase(label);
+  const prompt = normalizedFieldPhrase(task?.prompt);
+  if (wanted.length < 3 || !prompt) return false;
+  return (` ${prompt} `).includes(` ${wanted} `);
+}
+
+/** Select one relevant form instead of treating every form on the page as the task target. */
+function targetFormForCompletion(task, observation, verificationContext = null) {
+  const touched = formTouchedByVerifiedStep(task, observation, verificationContext);
+  if (touched?.form) return touched.form;
+  const forms = observation?.form_state?.forms || [];
+  if (forms.length === 1) return forms[0];
+
+  // A previous grounded form action or saved user answers identify the form
+  // even when the last action was a WAIT/SCROLL or the executor reported a
+  // field-level failure.
+  for (const step of [...(task?.steps || [])].reverse()) {
+    const action = step?.action || {};
+    if (!isFormMutationAction(action.action) && !Array.isArray(step?.result?.resolvedFieldIds)) continue;
+    const ids = [...new Set([
+      ...actionTargetIds(action),
+      ...(Array.isArray(step?.result?.resolvedFieldIds) ? step.result.resolvedFieldIds : [])
+    ])];
+    const groups = new Set(ids.map((id) => {
+      const element = observationElement(observation, id);
+      return element?.form_group_id || element?.dom?.form_id || null;
+    }).filter(Boolean));
+    if (groups.size === 1) return formForGroup(observation, [...groups][0]);
+  }
+
+  // If the prompt names fields, use them to distinguish between multiple
+  // independent forms. Ambiguous pages fall back to planner judgment rather
+  // than letting unrelated required fields block or complete the task.
+  const requestedGroups = new Set();
+  for (const form of forms) {
+    if ((form.fields || []).some((field) => fieldExplicitlyRequested(task, fieldLabelInObservation(observation, field.id)))) {
+      requestedGroups.add(form.form_group_id);
+    }
+  }
+  return requestedGroups.size === 1
+    ? forms.find((form) => form.form_group_id === [...requestedGroups][0]) || null
+    : null;
+}
+
+function verifiedStep(task, observation, verificationContext) {
+  const verification = verificationContext?.verification;
+  if (verification?.verified !== true ||
+      verification.observation_id !== observation?.observation_id ||
+      verificationContext?.execution?.success !== true) return null;
+  const step = (task?.steps || []).find((candidate) =>
+    candidate?.stepNumber === verificationContext.stepNumber
+  );
+  if (!step || step.success !== true) return null;
+  return { step, verification, beforeObservation: verificationContext.beforeObservation };
+}
+
+function isFormMutationAction(action) {
+  return [ActionType.TYPE, ActionType.SELECT, ActionType.CHECK, ActionType.UNCHECK, ActionType.FILL_FORM_PLAN]
+    .includes(String(action || '').toUpperCase());
+}
+
+function formTouchedByVerifiedStep(task, observation, verificationContext) {
+  const verified = verifiedStep(task, observation, verificationContext);
+  if (!verified || verified.verification.visible_state_changed !== true ||
+      !isFormMutationAction(verified.step.action?.action)) return null;
+  const groupId = formGroupForAction(verified.step.action, verified.beforeObservation);
+  const form = formForGroup(observation, groupId);
+  return form ? { form, groupId, verified } : null;
+}
+
+function hasPositiveSubmitConfirmation(observation, beforeObservation) {
+  const confirmationPattern = /\b(?:thank you|thanks for (?:submitting|contacting)|submission (?:received|successful|complete)|submitted successfully|we (?:have )?received your|your (?:application|request|response|submission|order|booking) (?:has been )?(?:submitted|received|recorded|confirmed|placed)|response (?:has been )?recorded|order confirmed|booking confirmed|successfully (?:submitted|registered|sent)|message sent|form submitted)\b/i;
+  const getEvidence = (source) => {
+    const headings = Array.isArray(source?.headings) ? source.headings : [];
+    return [
+      source?.page?.title,
+      ...headings.map((heading) => heading?.text),
+      source?.visible_text
+    ].filter((value) => typeof value === 'string').join(' ');
+  };
+  return confirmationPattern.test(getEvidence(observation)) &&
+    !confirmationPattern.test(getEvidence(beforeObservation));
+}
+
+function mediaStartedSince(beforeObservation, afterObservation) {
+  const beforeMedia = beforeObservation?.local_media_state?.media || [];
+  const afterMedia = afterObservation?.local_media_state?.media || [];
+  return afterMedia.some((media) => {
+    if (!media || media.paused !== false || media.ended === true) return false;
+    const previous = beforeMedia.find((item) => item?.ordinal === media.ordinal && item?.tag === media.tag);
+    return !previous || previous.paused !== false || previous.ended === true;
+  });
+}
+
+function playControlWasClicked(verified) {
+  const action = verified?.step?.action;
+  if (String(action?.action || '').toUpperCase() !== ActionType.CLICK) return false;
+  const targetId = actionTargetIds(action)[0];
+  const target = observationElement(verified.beforeObservation, targetId);
+  const labels = [
+    target?.accessible_name,
+    target?.label,
+    target?.text,
+    target?.title,
+    target?.dom?.accessible_name,
+    target?.dom?.label,
+    target?.dom?.text,
+    target?.dom?.title
+  ].filter((value) => typeof value === 'string');
+  const playControlLabel = /^\s*(?:play|resume)(?:\s+(?:(?:the\s+)?video|media|playback|button))?[\s.!…]*$/i;
+  return Boolean(targetId && labels.some((label) => playControlLabel.test(label)));
+}
+
+function requestedMediaMatchesPage(task, observation) {
+  const state = task?.taskState || {};
+  const requested = [state.search_query, state.target?.entity]
+    .filter((value) => typeof value === 'string' && value.trim())
+    .join(' ');
+  const generic = new Set([
+    'a', 'an', 'the', 'on', 'to', 'for', 'of', 'and', 'play', 'watch', 'stream', 'listen',
+    'video', 'song', 'music', 'youtube', 'open', 'find', 'search', 'latest', 'official'
+  ]);
+  const terms = [...new Set(requested.toLowerCase().match(/[a-z0-9]+/g) || [])]
+    .filter((term) => term.length > 2 && !generic.has(term));
+  if (!terms.length) return true;
+  const pageIdentity = [
+    observation?.page?.title,
+    ...(observation?.headings || []).map((heading) => heading?.text)
+  ].filter((value) => typeof value === 'string').join(' ').toLowerCase();
+  return terms.every((term) => new RegExp(`\\b${term}\\b`, 'i').test(pageIdentity));
+}
+
+// General goal check across intents. Each branch needs positive page evidence,
+// never the mere absence of work — without evidence we return null and let the
+// planner (DONE), the user, or the existing stuck/no-progress breakers decide.
+// Safety-critical flows (LOGIN, BOOK/payment, UPLOAD, DOWNLOAD) are
+// intentionally model-only and never auto-completed here.
+export function taskGoalStatus(task, fusedObservation, verificationContext = null) {
+  if (!task || !fusedObservation) return null;
+  if ([AgentState.COMPLETED, AgentState.FAILED, AgentState.CANCELLED].includes(task.state)) return null;
+  const intent = normalizedIntent(task);
+
+  // PLAY / watch / stream: require a verified click on an observed play control,
+  // a playback transition after that click, and a page identity matching the
+  // requested item. A pre-existing ad/background player is not enough.
+  if (intent === 'PLAY' || taskRequires(task, 'PLAY') || (!intent && promptAsksPlay(task))) {
+    const verified = verifiedStep(task, fusedObservation, verificationContext);
+    if (verified && playControlWasClicked(verified) &&
+        verified.verification.visible_state_changed === true &&
+        mediaStartedSince(verified.beforeObservation, fusedObservation) &&
+        requestedMediaMatchesPage(task, fusedObservation)) {
+      return { satisfied: true, message: 'The requested media is now playing.' };
+    }
+    return null;
+  }
+
+  // NAVIGATE: current page already matches the requested destination.
+  if (intent === 'NAVIGATE') {
+    const remainingActions = (task?.taskState?.required_actions || [])
+      .map((action) => String(action).toUpperCase())
+      .filter((action) => action !== 'NAVIGATE');
+    if (remainingActions.length) return null;
+    try {
+      const goal = getNavigationGoal(task.prompt);
+      const currentUrl = fusedObservation?.page?.url || '';
+      if (goal?.url && currentUrl && urlsMatchForVerification(goal.url, currentUrl)) {
+        return { satisfied: true, message: `Navigated to ${currentUrl}.` };
+      }
+    } catch { /* fall through to planner */ }
+    return null;
+  }
+
+  // FILL_FORM: fields filled (submission guarded) or submitted (submit requested).
+  if (intent === 'FILL_FORM' || intent === 'LOGIN') {
+    if (intent === 'LOGIN') return null; // credential flows stay model-only.
+    const verified = verifiedStep(task, fusedObservation, verificationContext);
+    if (String(verified?.step?.action?.action || '').toUpperCase() === ActionType.SUBMIT &&
+        verified.verification.visible_state_changed === true &&
+        hasPositiveSubmitConfirmation(fusedObservation, verified.beforeObservation)) {
+      const groupId = formGroupForAction(verified.step.action, verified.beforeObservation);
+      const beforeForm = formForGroup(verified.beforeObservation, groupId);
+      if (Number(beforeForm?.completion?.filled) > 0 && Number(beforeForm?.completion?.required_empty) === 0) {
+        return { satisfied: true, message: 'The page confirmed that the form was submitted.' };
+      }
+    }
+    return null;
+  }
+
+  // EXTRACT cannot be inferred from a non-empty extraction: that may be an
+  // unrelated page dump. Let the planner identify the requested fact.
+
+  return null;
+}
+
+/**
+ * Labels of required form fields that are still empty, for fill tasks.
+ *
+ * The planner only ever sees sanitized counts, so it can report DONE over a
+ * form that is visibly unfilled. This re-derives the same fact locally from the
+ * element list, and returns [] for every other task type (the count fields
+ * above are only meaningful while a form is being filled).
+ */
+export function unmetRequiredFields(task, fusedObservation, verificationContext = null) {
+  if (!task || !fusedObservation) return [];
+  const intent = normalizedIntent(task);
+  if (intent !== 'FILL_FORM') return [];
+  const formState = fusedObservation.form_state || {};
+  const targetForm = targetFormForCompletion(task, fusedObservation, verificationContext);
+  // With multiple forms and no grounded target, do not scan the whole page and
+  // mistake an unrelated sign-in/newsletter form for the user's requested one.
+  // A `form_state` with no `forms` list is a single-form observation, so its
+  // top-level `fields` are the right scope.
+  const fields = targetForm?.fields || (
+    formState.forms === undefined || formState.forms?.length === 1
+      ? formState.fields || []
+      : []
+  );
+  if (!fields.length) return [];
+  const labels = new Map(fields.map((field) => [
+    field.id,
+    fieldLabelInObservation(fusedObservation, field.id).slice(0, 60)
+  ]));
+  return fields
+    .filter((field) => field?.state === 'EMPTY' && (
+      field?.required === true || fieldExplicitlyRequested(task, labels.get(field.id))
+    ))
+    .map((field) => labels.get(field.id) || field.semantic_type || field.id)
+    .slice(0, 8);
+}
+
+// Backward-compatible alias (PLAY-only entry point used by earlier revision).
+export function isPlayTaskSatisfied(task, fusedObservation, verificationContext = null) {
+  const status = taskGoalStatus(task, fusedObservation, verificationContext);
+  return status?.satisfied === true && /playing/i.test(status.message);
+}
+
 export class AgentController {
   constructor({ plannerProvider = createDefaultPlannerChain(defaultGPTOSSClient) } = {}) {
     this.activeTabId = null;
@@ -210,7 +535,9 @@ export class AgentController {
   }
 
   async startTask(userPrompt, tabId) {
-    await taskManager.ready;
+    // The prompt sanitizer and outbound policy both consult configured vault
+    // values. Do not process or expose a task until storage decryption settles.
+    await Promise.all([taskManager.ready, defaultLocalVault.ready]);
     const previousTask = taskManager.getTask();
     // Invalidate any previous loop. Disarm its pending user prompts first so
     // the superseded loop's await resolves and it exits via the token check
@@ -505,7 +832,7 @@ export class AgentController {
       if (capability === PageCapability.EXTENSION_INTERNAL) {
         throw new Error('The agent cannot run inside its own panel tab. Please click on the webpage first, then start the task.');
       }
-      throw new Error(`This page cannot be automated (browser internal page: ${capability}). Open a website or test portal (e.g. http://localhost:5000), then start the task again.`);
+      throw new Error(`This page cannot be automated (browser internal page: ${capability}). Open a website first, then start the task again.`);
     }
 
     const loop = this._createLoopMachine(task);
@@ -586,8 +913,12 @@ export class AgentController {
     })));
     const { sanitizedElements, sensitiveCount, detectedCategories } = sanitizedPage;
     const extras = sanitizedPage.extras;
+    const { privacy_coverage: localPrivacyCoverage, ...remoteSafeDOM } = rawDOM;
     const screenshotPrivacyAudit = {
-      coverageEstablished: Array.isArray(rawDOM.elements),
+      // The content extractor marks coverage only if it completed its bounded
+      // control scan and did not truncate the page-text audit. An elements
+      // array alone is not evidence that the screenshot was fully covered.
+      coverageEstablished: localPrivacyCoverage?.established === true,
       // Local OCR compares category counts with the DOM's value-free audit
       // counts. Any unmatched occurrence sets forceWithhold below.
       unlocatedSensitiveText: defaultDOMSanitizer.hasUnlocatedSensitiveText(rawDOM),
@@ -598,7 +929,7 @@ export class AgentController {
     };
 
     const sanitizedDOM = {
-      ...rawDOM,
+      ...remoteSafeDOM,
       // Keep current-page context useful while stripping query values and
       // pattern-shaped PII from URL/title fields before any server request.
       url: defaultDOMSanitizer.sanitizeUrl(rawDOM.url),
@@ -858,6 +1189,7 @@ export class AgentController {
     // fused and task-grounded. Verify the previous action against that new
     // observation before asking the planner for the next action.
     const pendingVerification = task.pendingVerification;
+    let verificationContext = null;
     if (pendingVerification) {
       taskManager.updateState(AgentState.VERIFYING, 'Checking the new page state…', task);
       const verification = defaultActionVerifier.verify({
@@ -866,6 +1198,12 @@ export class AgentController {
         beforeObservation: pendingVerification.beforeObservation,
         afterObservation: fusedObservation
       });
+      verificationContext = {
+        stepNumber: pendingVerification.stepNumber,
+        execution: pendingVerification.execution,
+        beforeObservation: pendingVerification.beforeObservation,
+        verification
+      };
       task.lastVerification = verification;
       const verifiedAction = pendingVerification.action?.action;
       if (verification.verified && !verification.visible_state_changed &&
@@ -901,13 +1239,29 @@ export class AgentController {
         this._transitionLoop(task, loop, AgentLoopState.BLOCKED);
         return false;
       }
-      if (task.currentStep >= task.maxSteps) {
-        taskManager.failTask('Maximum step limit reached without achieving goal', task);
-        this.clearOverlays(task.tabId);
-        this.notify('TASK_FAILED', { error: task.error, hint: task.hint });
-        this._transitionLoop(task, loop, AgentLoopState.BLOCKED);
-        return false;
+    }
+
+    // Auto-complete only from fresh, verified evidence tied to this observation.
+    // The planner handles goals that need semantic judgment, such as deciding
+    // whether extracted text answers the user's question.
+    const goalStatus = taskGoalStatus(task, fusedObservation, verificationContext);
+    if (goalStatus?.satisfied) {
+      if (loop.state === AgentLoopState.GROUND) {
+        this._transitionLoop(task, loop, AgentLoopState.REPLAN);
       }
+      this._transitionLoop(task, loop, AgentLoopState.DONE);
+      taskManager.completeTask(goalStatus.message, task);
+      this.clearOverlays(task.tabId);
+      this.notify('TASK_COMPLETED', { result: task.result });
+      return false;
+    }
+
+    if (task.currentStep >= task.maxSteps) {
+      taskManager.failTask('Maximum step limit reached without achieving goal', task);
+      this.clearOverlays(task.tabId);
+      this.notify('TASK_FAILED', { error: task.error, hint: task.hint });
+      this._transitionLoop(task, loop, AgentLoopState.BLOCKED);
+      return false;
     }
 
     // STEP 5: REASONING & PLANNING
@@ -927,9 +1281,16 @@ export class AgentController {
     // that sanitized representation; provider selection cannot grant action
     // authority or bypass the local validation/risk stages below.
     this._transitionLoop(task, loop, AgentLoopState.PLAN);
+    const plannerClarification = typeof task.pendingPlannerClarification === 'string'
+      ? task.pendingPlannerClarification
+      : '';
+    delete task.pendingPlannerClarification;
+    const plannerTask = plannerClarification
+      ? `${task.prompt}\n\nUser clarification: ${plannerClarification}`
+      : task.prompt;
     const providerOutcome = await this._awaitOwned(task, token, measureStage(task, 'reasoning_request_ms', () =>
       this.plannerProvider.plan({
-        task: task.prompt,
+        task: plannerTask,
         fusedObservation,
         taskHistory: task.steps,
         taskState: task.taskState,
@@ -977,6 +1338,34 @@ export class AgentController {
     }
 
     if (proposedAction?.action === ActionType.DONE) {
+      // A fill task may not report success while the page still shows empty
+      // required fields. The planner sees sanitized counts, so a miscount (or
+      // a field it could not ground) used to produce "COMPLETED" over a
+      // visibly unfilled form. Re-observe and let the planner keep working.
+      const unmet = unmetRequiredFields(task, fusedObservation, verificationContext);
+      // `unmet` is an array, and an empty array is truthy: testing it directly
+      // blocked every completion, including tasks with no form at all.
+      if (unmet.length > 0) {
+        log.warn('Planner reported DONE while required form fields remain empty.', {
+          unmet_required: unmet
+        });
+        taskManager.recordStep({
+          thought: `Cannot finish yet — these required fields are still empty: ${unmet.join(', ')}. Filling them before completing.`,
+          action: { action: ActionType.WAIT, risk: RiskLevel.LOW, requires_confirmation: false },
+          success: false,
+          error: 'Required form fields are still empty.',
+          ...plannerStepMetadata(planResult)
+        }, task);
+        this.notify('STEP_FAILED', {
+          stepNumber: task.currentStep,
+          thought: `These required fields are still empty: ${unmet.join(', ')}. The agent will fill them before finishing.`,
+          action: { action: ActionType.WAIT },
+          success: false,
+          timestamp: Date.now()
+        });
+        this._transitionLoop(task, loop, AgentLoopState.REPLAN);
+        return true;
+      }
       const finalResponse = planResult.final_response || planResult.thought;
       taskManager.completeTask(finalResponse, task);
       this.clearOverlays(task.tabId);
@@ -1163,9 +1552,34 @@ export class AgentController {
       const answerIds = Object.keys(userInput?.answers || {});
       let verificationAction = null;
       let verificationExecution = null;
+      if (!(askData.ambiguousFields || []).length && typeof userInput?.answers?.response === 'string') {
+        const clarification = defaultDOMSanitizer.sanitizeUserPrompt(userInput.answers.response).slice(0, 1500).trim();
+        if (clarification) {
+          try {
+            await this._awaitOwned(task, token, defaultLocalVault.ready);
+            await defaultPolicyEngine.enforceOutboundSafety({ user_clarification: clarification });
+            // Keep the text in memory for the next planner request only. It is
+            // deliberately excluded from task history and task-manager snapshots.
+            task.pendingPlannerClarification = clarification;
+            resolvedFieldIds.push('response');
+          } catch (privacyErr) {
+            if (privacyErr?.name !== 'OutboundPolicyViolationError') throw privacyErr;
+            taskManager.updatePrivacyMetrics({ privacyBlocks: 1 }, task);
+            this.notify('PRIVACY_UPDATED', task.privacyMetrics);
+            taskManager.failTask('Privacy protection blocked this AI request. Remove or rephrase the sensitive content, then try again.', task);
+            this.clearOverlays(task.tabId);
+            this.notify('TASK_FAILED', { error: task.error, hint: task.hint });
+            this._transitionLoop(task, loop, AgentLoopState.BLOCKED);
+            return false;
+          }
+        }
+      }
       if (userInput?.answers && Object.keys(userInput.answers).length > 0) {
         const candidateChoice = userInput.answers.candidate_choice;
-        if (candidateChoice !== undefined && candidateChoice !== null && candidateChoice !== '') {
+        if (!(askData.ambiguousFields || []).length && userInput.answers.response !== undefined) {
+          // This free-text clarification belongs in the next planner context,
+          // not in a synthetic field called `response` on the current page.
+        } else if (candidateChoice !== undefined && candidateChoice !== null && candidateChoice !== '') {
           // A candidate choice is a page action, not a field value. Execute it
           // alone and let the next loop iteration observe the resulting page.
           const answerAction = { action: ActionType.CLICK, target: { element_id: candidateChoice } };
@@ -1189,16 +1603,28 @@ export class AgentController {
           for (const [fieldId, value] of Object.entries(userInput.answers)) {
             if (value === undefined || value === null || value === '') continue;
             const fieldMeta = (askData.ambiguousFields || []).find((field) => field.field_id === fieldId) || {};
-            const inputType = String(fieldMeta.input_type || fieldMeta.element_type || '').toLowerCase();
-            const controlType = String(fieldMeta.control_type || (
-              inputType === 'select' ? 'SELECT'
-                : inputType === 'checkbox' ? 'CHECKBOX'
-                  : inputType === 'radio' ? 'RADIO'
-                    : inputType === 'textarea' ? 'TEXTAREA'
-                      : inputType === 'email' ? 'EMAIL'
-                        : inputType === 'tel' ? 'PHONE'
-                          : inputType === 'number' ? 'NUMBER'
-                            : inputType === 'date' ? 'DATE' : 'TEXT'
+            // The planner's ambiguousFields metadata is optional and usually
+            // absent, which used to default every answer to TEXT. A native
+            // date input then failed the executor's own control-type check
+            // ("type changed: expected TEXT, found DATE") and the user's
+            // answer was silently discarded. Derive the control type from the
+            // element this observation actually saw.
+            const observed = (task.lastFusedObservation?.elements || [])
+              .find((element) => element?.id === fieldId);
+            const dom = observed?.dom || observed || {};
+            const observedTag = String(dom.tag || '').toLowerCase();
+            const observedType = String(dom.type || '').toLowerCase();
+            const controlType = String(fieldMeta.control_type || observedControlType(
+              observedTag, observedType, dom.role, dom.is_contenteditable === true
+            ) || (
+              observedTag === 'select' ? 'SELECT'
+                : observedType === 'checkbox' ? 'CHECKBOX'
+                  : observedType === 'radio' ? 'RADIO'
+                    : observedTag === 'textarea' ? 'TEXTAREA'
+                      : observedType === 'email' ? 'EMAIL'
+                        : observedType === 'tel' ? 'PHONE'
+                          : observedType === 'number' ? 'NUMBER'
+                            : observedType === 'date' ? 'DATE' : 'TEXT'
             )).toUpperCase();
             fields.push({
               field_id: fieldId,
@@ -1369,6 +1795,11 @@ export class AgentController {
 
   _completeFromCriticTermination(task, planResult, proposedAction) {
     if (planResult?.terminate_assessment !== true || proposedAction?.action === ActionType.DONE) return false;
+    // Form tasks have a separate local completion guard below: DONE is
+    // accepted only after the relevant form's required fields are satisfied.
+    // A critic stop flag paired with a non-DONE action must not skip that
+    // check, even if it includes a polished final response.
+    if (normalizedIntent(task) === 'FILL_FORM') return false;
     const finalResponse = typeof planResult.final_response === 'string'
       ? planResult.final_response.trim()
       : '';
@@ -1479,27 +1910,13 @@ export class AgentController {
       }
     }
 
-    if (capability !== PageCapability.AUTOMATABLE_WEB) {
-      // Smart bootstrap: If on a blank new tab with a search/find task
-      // and no specific website was mentioned ("Find cheapest flight...", "Search for laptops..."),
-      // automatically navigate to Google so the agent can execute the search!
-      const currentUrl = currentTab?.url || '';
-      const isNewTabOrBlank = capability === PageCapability.ABOUT_BLANK ||
-        currentUrl.includes('newtab') ||
-        currentUrl === 'about:blank';
-
-      if (!home && isNewTabOrBlank) {
-        home = 'https://www.google.com/';
-      }
-    }
-
     if (home) {
       const validation = validateNavigationUrl(home);
       if (!validation.valid) return notHandled;
       log.info('NAVIGATION', { phase: 'bootstrap', target: validation.normalizedUrl, valid: true });
       return await this._awaitOwned(task, token, this._executeBootstrapNavigation(task, currentTab, validation.normalizedUrl, {
         pure: false,
-        thought: `Navigate to ${home.includes('google') ? 'Google' : site} first, then continue the task.`
+        thought: `Navigate to ${validation.host} first, then continue the task.`
       }, token));
     }
 

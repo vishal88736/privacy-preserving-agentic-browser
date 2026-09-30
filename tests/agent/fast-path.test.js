@@ -221,7 +221,10 @@ test('controller sends no-change verification into the next planning call', asyn
   restore.push(replaceMethod(defaultGPTOSSClient, 'planNextStep', async (_task, _observation, history) => {
     planningIndex++;
     if (planningIndex === 1) {
-      return { thought: 'Click the observed Apply button.', action: { action: 'CLICK', target: { element_id: 'el_apply' } } };
+      // Element ids must use the content script's registry format (`el_<n>`).
+      // The sanitizer reduces any other id to safe words, so a page-authored
+      // id like "el_apply" would never survive to the grounding check.
+      return { thought: 'Click the observed Apply button.', action: { action: 'CLICK', target: { element_id: 'el_1' } } };
     }
     verificationSeenByPlanner = history.at(-1)?.diagnostic?.post_action_verification || null;
     return { thought: 'Stop after considering the unchanged page.', action: { action: 'DONE' }, final_response: 'Done.' };
@@ -243,8 +246,8 @@ test('controller sends no-change verification into the next planning call', asyn
         title: 'Application',
         viewport: { width: 1280, height: 800 },
         elements: [
-          { id: 'el_apply', tag: 'button', type: 'button', label: 'Apply', value: '', bbox: [10, 10, 90, 30], is_interactive: true },
-          { id: 'el_help', tag: 'a', type: 'link', label: 'Help', href: '/help', bbox: [10, 50, 60, 30], is_interactive: true }
+          { id: 'el_1', tag: 'button', type: 'button', label: 'Apply', value: '', bbox: [10, 10, 90, 30], is_interactive: true },
+          { id: 'el_2', tag: 'a', type: 'link', label: 'Help', href: '/help', bbox: [10, 50, 60, 30], is_interactive: true }
         ],
         headings: [], result_items: [],
         visible_text: 'Application form. Apply to continue. Help is available.',

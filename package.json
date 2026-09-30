@@ -31,6 +31,7 @@
   "license": "ISC",
   "dependencies": {
     "@huggingface/transformers": "^4.3.0",
+    "pdfjs-dist": "4.10.38",
     "tesseract.js": "^7.0.0"
   },
   "devDependencies": {

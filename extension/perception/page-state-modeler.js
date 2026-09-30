@@ -83,6 +83,18 @@ export class PageStateModeler {
 
     const grounding = defaultTaskGrounding.ground(taskState, fusedObservation);
     const page_type = this._inferPageType(fullUrl, title, formInputs, links, buttons, fusedObservation);
+    const mediaSummary = this._summarizeMedia(fusedObservation?.local_media_state);
+    const aggregateFormCompletion = fusedObservation?.form_state?.completion || null;
+    const perFormCompletion = (fusedObservation?.form_state?.forms || [])
+      .filter((form) => typeof form?.form_group_id === 'string' && form.completion)
+      .map((form) => ({
+        form_group_id: form.form_group_id,
+        filled: Number(form.completion.filled) || 0,
+        required_empty: Number(form.completion.required_empty) || 0,
+        optional_empty: Number(form.completion.optional_empty) || 0,
+        total: Number(form.completion.total) || 0
+      }))
+      .slice(0, 40);
 
     return {
       url: fullUrl,
@@ -93,7 +105,14 @@ export class PageStateModeler {
       page_type: page_type,
       summary: `Page contains ${formInputs} inputs, ${buttons} buttons, ${links} links, ${(fusedObservation.result_items || []).length} result cards.`,
       elements: candidateElements,
+      media_summary: mediaSummary.text,
+      media_playing: mediaSummary.playing,
       detected_form: fusedObservation?.form_state?.detected || false,
+      // Counts only, scoped to each observed form group. Values stay redacted;
+      // aggregate page counts remain available for older consumers.
+      form_completion: aggregateFormCompletion
+        ? { ...aggregateFormCompletion, forms: perFormCompletion }
+        : null,
       headings: (fusedObservation.headings || []).map((h) => h.text),
       result_sets: grounding.result_sets,
       ranked_candidates: grounding.ranked_candidates,
@@ -111,6 +130,19 @@ export class PageStateModeler {
   }
 
   // L14: Expanded page type inference with many more categories
+  _summarizeMedia(localMediaState) {
+    // Derived booleans only — same privacy contract as PromptBuilder:
+    // no URLs, titles, ordinals, or ready_state cross the boundary.
+    const media = Array.isArray(localMediaState?.media) ? localMediaState.media : [];
+    if (!media.length) return { text: 'no playable media', playing: false };
+    const playing = media.filter((m) => m && m.paused === false && m.ended !== true).length;
+    const playingFlag = playing > 0;
+    const text = media.length === 1
+      ? (playingFlag ? '1 media item playing' : '1 media item paused')
+      : `${media.length} media items (${playing} playing)`;
+    return { text, playing: playingFlag };
+  }
+
   _inferPageType(url, title, formsCount, linksCount, buttonsCount, fused) {
     const urlLower = String(url || '').toLowerCase();
     const titleLower = String(title || '').toLowerCase();

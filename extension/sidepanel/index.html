@@ -36,7 +36,7 @@
           </svg>
           <span id="privacy-pill-text">Filters active</span>
         </button>
-        <button id="vault-btn" class="icon-btn" title="Local Vault (Stays on device)" aria-label="Open local vault">
+        <button id="vault-btn" class="icon-btn" title="Local Vault (encrypted in this browser)" aria-label="Open local vault">
           <svg class="icon-svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <rect width="18" height="11" x="3" y="11" rx="2" ry="2"/>
             <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
@@ -137,6 +137,37 @@
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
             Retry
           </button>
+        </div>
+      </section>
+
+      <!-- Local PDF table extraction for a user-reviewed Google Sheets paste -->
+      <section class="card pdf-sheet-card" aria-labelledby="pdf-sheet-title">
+        <div class="card-head">
+          <div>
+            <span class="card-label" id="pdf-sheet-title">PDF to Google Sheets</span>
+            <p class="pdf-sheet-subtitle">Extract rows locally, review them, then paste into your sheet.</p>
+          </div>
+          <span class="pill-ok">On this device</span>
+        </div>
+        <div class="pdf-file-row">
+          <label class="btn btn-secondary pdf-file-label" for="pdf-sheet-file">Choose PDF</label>
+          <input id="pdf-sheet-file" class="pdf-file-input" type="file" accept="application/pdf,.pdf" aria-label="Choose a PDF to extract">
+          <span id="pdf-sheet-filename" class="pdf-filename">No file selected</span>
+        </div>
+        <p class="pdf-sheet-privacy">The PDF and extracted rows stay in this panel. They are not sent to the agent or backend.</p>
+        <div class="control-row pdf-sheet-controls">
+          <button id="pdf-extract-btn" class="btn btn-primary" type="button" disabled>Extract table</button>
+          <button id="pdf-copy-btn" class="btn btn-secondary" type="button" disabled>Copy rows</button>
+          <button id="pdf-download-btn" class="btn btn-ghost" type="button" disabled>Download CSV</button>
+          <a class="btn btn-ghost pdf-sheets-link" href="https://sheets.new" target="_blank" rel="noopener noreferrer">Open Sheets</a>
+        </div>
+        <p id="pdf-sheet-status" class="pdf-sheet-status" role="status" aria-live="polite">Select a PDF to begin.</p>
+        <div id="pdf-preview-wrap" class="pdf-preview-wrap" hidden>
+          <p id="pdf-preview-note" class="pdf-preview-note"></p>
+          <div class="pdf-preview-scroll">
+            <table id="pdf-preview-table" class="pdf-preview-table"></table>
+          </div>
+          <p class="pdf-paste-help">After copying, switch to Google Sheets, select the first destination cell, and press Ctrl+V (⌘V on Mac).</p>
         </div>
       </section>
 
@@ -262,7 +293,7 @@
           <div class="privacy-col">
             <div class="privacy-col-header">
               <span class="col-dot dot-local"></span>
-              <p class="privacy-col-title ok">Stays on device</p>
+              <p class="privacy-col-title ok">Protected in the local vault</p>
             </div>
             <ul id="local-items-list" class="privacy-list"></ul>
           </div>
@@ -275,10 +306,15 @@
               <li>Sanitized screenshot or neutral placeholder</li>
               <li>Sanitized element roles</li>
               <li>Task text after known-pattern filtering</li>
-              <li>Symbolic tokens only</li>
+              <li>Profile tokens and names of saved documents</li>
             </ul>
           </div>
         </div>
+        <p class="muted small privacy-vault-boundary">
+          Saved values and documents are encrypted at rest here. After you approve filling or attaching one, the active
+          website can read it; submitting the form may send it to that site. Named document tokens are shared with the
+          planner, but document bytes are not sent to the AI or backend.
+        </p>
 
         <!-- Real Metrics Row -->
         <div class="metrics-row">
@@ -296,6 +332,29 @@
           </div>
         </div>
         <p id="privacy-categories" class="privacy-cats-muted"></p>
+
+        <!-- What the VLM actually receives: the redacted image, always visible. -->
+        <div class="redacted-shot" aria-labelledby="redacted-shot-label">
+          <div class="redacted-shot-head">
+            <span class="redacted-shot-title" id="redacted-shot-label">Redacted screenshot (as sent)</span>
+            <span id="redacted-shot-status" class="redacted-shot-status">No image sent yet</span>
+          </div>
+          <p class="redacted-shot-note">
+            This is the exact image attached to the visual request. Black bars are privacy masks applied
+            on this device; the original capture is never transmitted or stored.
+          </p>
+          <div id="redacted-shot-frame" class="redacted-shot-frame" hidden>
+            <img id="redacted-shot-image" class="redacted-shot-image" alt="The redacted screenshot sent to the vision model" decoding="async">
+          </div>
+          <p id="redacted-shot-empty" class="redacted-shot-empty">
+            No image has been sent. The agent uses the sanitized page structure when a screenshot is
+            unnecessary, and withholds the image entirely when local privacy checks cannot vouch for it.
+          </p>
+          <details class="redacted-shot-history">
+            <summary>Earlier screenshots (<span id="redacted-shot-history-count">0</span>)</summary>
+            <div id="redacted-shot-history-list" class="redacted-shot-history-list"></div>
+          </details>
+        </div>
       </section>
 
       <!-- LLM Transparency Card: what is actually sent to the AI -->
@@ -320,18 +379,18 @@
               <li><span class="tick">→</span><span>Element roles + labels with <code class="mono-token">[REDACTED]</code> values</span></li>
               <li><span class="tick">→</span><span>Layout: bboxes, headings, prices</span></li>
               <li><span class="tick">→</span><span>Sanitized screenshot or neutral placeholder</span></li>
-              <li><span class="tick">→</span><span>Symbolic tokens e.g. <code class="mono-token">LOCAL_AADHAAR</code></span></li>
+              <li><span class="tick">→</span><span>Profile tokens and names of saved documents</span></li>
             </ul>
           </div>
           <div class="privacy-col">
             <div class="privacy-col-header">
               <span class="col-dot dot-local"></span>
-              <p class="privacy-col-title ok">Never sent</p>
+              <p class="privacy-col-title ok">Not sent to AI/backend</p>
             </div>
             <ul class="privacy-list">
               <li><span class="tick">✓</span><span class="llm-never">Recognized Aadhaar / PAN / password patterns</span></li>
               <li><span class="tick">✓</span><span class="llm-never">Known vault values (outbound checks)</span></li>
-              <li><span class="tick">✓</span><span class="llm-never">No real document upload is supported by this prototype</span></li>
+              <li><span class="tick">✓</span><span class="llm-never">Document bytes and PDF extraction data stay out of AI/backend requests; approved attachments go to the current website</span></li>
               <li><span class="tick">✓</span><span class="llm-never">Recognized URL patterns are filtered</span></li>
               <li><span class="tick">✓</span><span class="llm-never">Known DOM sensitive regions are masked; arbitrary image text may remain</span></li>
             </ul>
@@ -414,7 +473,7 @@
       </div>
 
       <div id="confirm-review-box" class="confirm-review-box" hidden>
-        <h4>Latest extracted review evidence</h4>
+        <h4 id="confirm-review-title">Latest extracted review evidence</h4>
         <p id="confirm-review-text"></p>
       </div>
 
@@ -439,7 +498,7 @@
 
       <div class="confirm-note">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
-        <span>The action will execute in your browser with local secrets resolved on-device.</span>
+        <span id="confirm-note-text">Review what the page can receive before approving.</span>
       </div>
 
       <div class="modal-actions">
@@ -463,7 +522,7 @@
         <div class="user-input-head-text">
           <div class="confirm-badge-row">
             <h3 id="user-input-title" class="modal-title">Clarification Needed</h3>
-            <span class="mini-tag ok-tag">Interactive</span>
+            <span id="user-input-count" class="mini-tag ok-tag">Reply</span>
           </div>
           <p class="modal-sub">PrivAgent needs your input to continue</p>
         </div>
@@ -481,9 +540,11 @@
         <textarea id="user-input-single-text" rows="3" placeholder="Enter your response or instructions..."></textarea>
       </div>
 
+      <p id="user-input-status" class="user-input-status" role="status" aria-live="polite"></p>
+
       <div class="confirm-note">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
-        <span>Known configured values are filtered from outbound requests; detection is best-effort.</span>
+        <span>Saving an answer to the Local Vault is optional and starts turned off.</span>
       </div>
 
       <div class="modal-actions">
@@ -508,7 +569,7 @@
         <div class="privacy-col">
           <div class="privacy-col-header">
             <span class="col-dot dot-local"></span>
-            <p class="privacy-col-title ok">Local only</p>
+          <p class="privacy-col-title ok">Protected locally</p>
           </div>
           <ul id="privacy-sheet-local" class="privacy-list"></ul>
         </div>
@@ -521,7 +582,7 @@
             <li>Redacted screenshot</li>
             <li>Sanitized DOM structure</li>
             <li>Non-sensitive task text</li>
-            <li>Symbolic token keys</li>
+            <li>Profile tokens and names of saved documents</li>
           </ul>
         </div>
       </div>
@@ -548,14 +609,26 @@
             </svg>
             <h3 id="vault-title" class="modal-title">Local Vault</h3>
           </div>
-          <p class="modal-sub">Stored in this browser profile · Not encrypted by this prototype</p>
+          <p class="modal-sub">Encrypted at rest in this browser profile · no passphrase</p>
         </div>
         <button id="close-vault-btn" class="icon-btn" aria-label="Close vault dialog">✕</button>
       </div>
 
       <p class="muted small modal-explainer">
-        The agent requests these values using symbolic tokens. When executing, PrivAgent injects them into the webpage locally.
+        Saved text values are resolved in this browser when needed. A webpage can read values after they are entered into its fields.
       </p>
+
+      <div id="vault-review-notice" class="vault-review-notice" role="alert" hidden>
+        <p><strong>Review saved values before use.</strong> These encrypted values came from an older vault version. They are shown only here and still checked by local privacy protection, but the agent cannot fill or resolve them until you review and save. Edit or clear any value you do not recognize.</p>
+        <label class="vault-review-confirm">
+          <input id="vault-review-confirm" type="checkbox">
+          I reviewed these values and want the values shown here enabled for the agent.
+        </label>
+        <label class="vault-review-confirm">
+          <input id="vault-review-reveal" type="checkbox">
+          Show values in password-style fields while reviewing.
+        </label>
+      </div>
 
       <div class="vault-grid">
         <label class="vault-field">
@@ -601,6 +674,49 @@
           <input id="vault-email" type="email" autocomplete="email" placeholder="you@example.com">
         </label>
         <label class="vault-field">
+          <div class="vault-label-row">
+            <span>Street address</span>
+            <code class="mono-token">LOCAL_ADDRESS</code>
+          </div>
+          <input id="vault-address" autocomplete="street-address" placeholder="Flat, street, city, state, PIN">
+        </label>
+        <label class="vault-field">
+          <div class="vault-label-row"><span>City</span><code class="mono-token">LOCAL_CITY</code></div>
+          <input id="vault-city" autocomplete="address-level2" placeholder="Your city">
+        </label>
+        <label class="vault-field">
+          <div class="vault-label-row"><span>State or region</span><code class="mono-token">LOCAL_STATE</code></div>
+          <input id="vault-state" autocomplete="address-level1" placeholder="Your state or region">
+        </label>
+        <label class="vault-field">
+          <div class="vault-label-row"><span>Postal code</span><code class="mono-token">LOCAL_ZIP</code></div>
+          <input id="vault-zip" autocomplete="postal-code" placeholder="Postal code">
+        </label>
+        <label class="vault-field">
+          <div class="vault-label-row"><span>Country</span><code class="mono-token">LOCAL_COUNTRY</code></div>
+          <input id="vault-country" autocomplete="country-name" placeholder="Country">
+        </label>
+        <label class="vault-field">
+          <div class="vault-label-row"><span>Gender</span><code class="mono-token">LOCAL_GENDER</code></div>
+          <input id="vault-gender" autocomplete="off" placeholder="Optional">
+        </label>
+        <label class="vault-field">
+          <div class="vault-label-row"><span>Credit card</span><code class="mono-token">LOCAL_CREDIT_CARD</code></div>
+          <input id="vault-credit-card" inputmode="numeric" autocomplete="cc-number" placeholder="Card number">
+        </label>
+        <label class="vault-field">
+          <div class="vault-label-row"><span>Card security code</span><code class="mono-token">LOCAL_CVV</code></div>
+          <input id="vault-cvv" type="password" data-vault-review-mask="true" inputmode="numeric" autocomplete="cc-csc" placeholder="CVV">
+        </label>
+        <label class="vault-field">
+          <div class="vault-label-row"><span>Terms or agreement answer</span><code class="mono-token">LOCAL_TERMS</code></div>
+          <input id="vault-terms" autocomplete="off" placeholder="Optional">
+        </label>
+        <label class="vault-field">
+          <div class="vault-label-row"><span>Profile notes</span><code class="mono-token">LOCAL_PROFILE</code></div>
+          <textarea id="vault-profile" rows="2" autocomplete="off" placeholder="Optional profile details"></textarea>
+        </label>
+        <label class="vault-field">
           <div class="vault-label-row"><span>US Social Security number</span><code class="mono-token">LOCAL_SSN</code></div>
           <input id="vault-ssn" autocomplete="off" placeholder="XXX-XX-XXXX">
         </label>
@@ -625,7 +741,7 @@
             <span>Password</span>
             <code class="mono-token">LOCAL_PASSWORD</code>
           </div>
-          <input id="vault-password" type="password" autocomplete="new-password" placeholder="••••••••">
+          <input id="vault-password" type="password" data-vault-review-mask="true" autocomplete="new-password" placeholder="••••••••">
         </label>
       </div>
 
@@ -638,8 +754,24 @@
         <div id="vault-custom-fields" class="vault-grid"></div>
       </div>
 
+      <!-- Named documents can be attached only after explicit high-risk confirmation. -->
+      <div class="vault-custom-section vault-docs">
+        <div class="vault-label-row">
+          <span>Documents</span>
+          <button id="vault-doc-add-btn" class="btn btn-secondary" type="button">Add document</button>
+        </div>
+        <p class="muted small">
+          Store a file under a name such as <code class="mono-token">aadhar</code> and the agent can attach it to a
+          matching file field. The planner receives its name, not its bytes. After you approve attachment, the page can
+          read the file and may upload it; saving it here does not submit the website form.
+        </p>
+        <div id="vault-doc-list" class="vault-grid"></div>
+        <p id="vault-doc-status" class="muted small" role="status"></p>
+      </div>
+
+      <p id="vault-save-status" class="vault-save-status" role="status" aria-live="polite"></p>
       <div class="modal-actions">
-        <button id="save-vault-btn" class="btn btn-primary" style="width:100%">Save vault locally</button>
+        <button id="save-vault-btn" class="btn btn-primary" style="width:100%">Save changes</button>
       </div>
     </div>
   </div>

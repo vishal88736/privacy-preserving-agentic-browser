@@ -4,7 +4,7 @@
  * L4: Now correctly skips validation for actions that don't require a target element.
  */
 
-import { ActionType } from '../shared/constants.js';
+import { ActionType, isDocumentToken } from '../shared/constants.js';
 import { SemanticType } from '../perception/semantic-capability.js';
 import { validateNavigationUrl } from '../navigation/navigation.js';
 
@@ -33,6 +33,18 @@ const SEMANTIC_TYPE_CONFLICTS = {
   SUBMIT: new Set([SemanticType.LINK, SemanticType.VOICE_INPUT, SemanticType.NEXT, SemanticType.PREVIOUS, SemanticType.DOWNLOAD])
 };
 
+function isVaultDocumentDescriptor(value) {
+  return Boolean(value) && typeof value === 'object' && value.__vaultDocument === true;
+}
+
+function actionCarriesDocument(action) {
+  if (isDocumentToken(action?.value_source) || isDocumentToken(action?.value) || isVaultDocumentDescriptor(action?.value)) return true;
+  return action?.action === ActionType.FILL_FORM_PLAN &&
+    Array.isArray(action.value?.fields) && action.value.fields.some((field) =>
+      isDocumentToken(field?.value_source) || isDocumentToken(field?.value) || isVaultDocumentDescriptor(field?.value)
+    );
+}
+
 export class ActionValidator {
   /**
    * Validates if the action can be safely dispatched to the browser tab
@@ -44,6 +56,13 @@ export class ActionValidator {
   validatePreExecution(action, fusedObservation = {}, taskState = null) {
     const availableElements = fusedObservation.elements || [];
     const formState = fusedObservation.form_state || { completion: { empty: 0 } };
+
+    // File bytes must travel only through UPLOAD. TYPE can never turn a
+    // document token or descriptor into text, even when aimed at a file input
+    // or invoked without the shared schema validation layer.
+    if (action?.action !== ActionType.UPLOAD && actionCarriesDocument(action)) {
+      return { valid: false, reason: 'A stored document can only be attached with UPLOAD on a file input.' };
+    }
 
     // A destination URL is a navigation decision whichever verb carries it.
     // OPEN_TAB previously reached the content script with only a scheme regex,
@@ -75,16 +94,29 @@ export class ActionValidator {
         if (match.dom?.disabled) return { valid: false, reason: `Form field "${id}" is disabled.` };
         const domTag = String(match.dom?.tag || '').toLowerCase();
         const domType = String(match.dom?.type || '').toLowerCase();
+        const domRole = String(match.dom?.role || '').toLowerCase();
         const expectedControl = domTag === 'select' ? 'SELECT'
-          : domTag === 'textarea' ? 'TEXTAREA'
-            : domType === 'radio' ? 'RADIO'
-              : domType === 'checkbox' ? 'CHECKBOX'
+          : domTag === 'textarea' || match.dom?.is_contenteditable === true || domRole === 'textbox' ? 'TEXTAREA'
+            : domType === 'radio' || domRole === 'radio' ? 'RADIO'
+              : domType === 'checkbox' || domRole === 'checkbox' ? 'CHECKBOX'
                 : domType === 'email' ? 'EMAIL'
                   : domType === 'tel' ? 'PHONE'
                     : domType === 'number' ? 'NUMBER'
-                      : domType === 'date' ? 'DATE' : 'TEXT';
+                      : ['date', 'datetime-local', 'month', 'week'].includes(domType) ? 'DATE' : 'TEXT';
         if (field.control_type && field.control_type !== expectedControl) {
           return { valid: false, reason: `Form field "${id}" changed control type after planning.` };
+        }
+        if (match.dom?.readonly || String(match.dom?.ariaReadonly || '').toLowerCase() === 'true') {
+          return { valid: false, reason: `Form field "${id}" is read-only.` };
+        }
+        const nativeTextControl = ['input', 'textarea'].includes(domTag) &&
+          !['button', 'submit', 'reset', 'image', 'file', 'checkbox', 'radio'].includes(domType);
+        const customEditable = match.dom?.is_contenteditable === true || domRole === 'textbox';
+        const supportedControl = domTag === 'select' ||
+          ['checkbox', 'radio'].includes(domType) || ['checkbox', 'radio'].includes(domRole) ||
+          nativeTextControl || customEditable;
+        if (!supportedControl) {
+          return { valid: false, reason: `Form field "${id}" is not a supported writable form control.` };
         }
       }
     }
@@ -150,21 +182,23 @@ export class ActionValidator {
           reason: `Target element "${action.target.element_id}" has no local browser target and cannot be executed.`
         };
       }
-      if (match.visible === false || match.dom?.is_visible === false) {
+      const domTag = String(match.dom?.tag || match.tag || '').toLowerCase();
+      const domType = String(match.dom?.type || match.input_type || '').toLowerCase();
+      const hiddenStoredDocumentInput = action.action === ActionType.UPLOAD &&
+        domTag === 'input' && domType === 'file' && isDocumentToken(action.value_source);
+      if ((match.visible === false || match.dom?.is_visible === false) && !hiddenStoredDocumentInput) {
         return {
           valid: false,
           reason: `Target element "${action.target.element_id}" is not visible in the current observation.`
         };
       }
-      if (match.dom?.disabled || match.enabled === false) {
+      if (match.dom?.disabled || (match.enabled === false && !hiddenStoredDocumentInput)) {
         return {
           valid: false,
           reason: `Target element "${action.target.element_id}" is currently disabled.`
         };
       }
 
-      const domTag = String(match.dom?.tag || match.tag || '').toLowerCase();
-      const domType = String(match.dom?.type || match.input_type || '').toLowerCase();
       const semanticType = String(match.semantics?.semantic_type || match.semantic_action_type || '').toUpperCase();
       if (action.action === ActionType.SELECT && domTag !== 'select') {
         return { valid: false, reason: `SELECT requires a native select element; target "${action.target.element_id}" is ${domTag || 'unknown'}.` };
@@ -172,6 +206,10 @@ export class ActionValidator {
       if ([ActionType.CHECK, ActionType.UNCHECK].includes(action.action) &&
           !(['checkbox', 'radio'].includes(domType) || ['checkbox', 'radio'].includes(String(match.dom?.role || '').toLowerCase()))) {
         return { valid: false, reason: `${action.action} requires a checkbox or radio control.` };
+      }
+      if (action.action === ActionType.UNCHECK &&
+          (domType === 'radio' || String(match.dom?.role || '').toLowerCase() === 'radio')) {
+        return { valid: false, reason: 'A radio option cannot be unchecked without selecting another option.' };
       }
       if (action.action === ActionType.UPLOAD && domType !== 'file') {
         return { valid: false, reason: 'UPLOAD requires a file input element.' };

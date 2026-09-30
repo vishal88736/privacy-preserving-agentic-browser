@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, stat, writeFile, copyFile, readFile } from 'node:fs/promises';
+import { mkdir, stat, writeFile, copyFile, readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -51,20 +51,34 @@ await mkdir(tesseractDir, { recursive: true });
 
 const npm = (relative) => path.join(root, 'node_modules', ...relative.split('/'));
 // Only the assets the extension actually loads are staged. ort.all.bundle.min.mjs
-// embeds the wasm loader and resolves ort-wasm-simd-threaded.jsep.wasm through
-// import.meta.url, so the non-jsep wasm pair is never fetched. A string
-// wasmPaths would instead trigger a dynamic import of the external jsep .mjs,
-// which fails in an extension context (see local-vision.js), so that file is
-// unused too. Shipping them added ~15 MiB of dead weight to every install.
+// embeds the emscripten factory (its `_3` export) and resolves
+// ort-wasm-simd-threaded.jsep.wasm through `new URL(..., import.meta.url)`, so
+// that sibling .wasm is fetched and the external ort-wasm-simd-threaded.jsep.mjs
+// is never imported: the bundle only reaches for it when its embedded factory
+// is missing, or when wasmPaths is set, and model-runtime.js deletes wasmPaths.
+// tesseract-core-simd-lstm.wasm is not staged either: the shipped
+// tesseract-core-simd-lstm.wasm.js is the SINGLE_FILE build, which carries the
+// same 2,857,601-byte core as an embedded base64 payload, and tesseract.js's
+// getCore() only importScripts the file named by corePath. Both files were dead
+// weight in every install (2.8 MiB + 46 KiB).
 await Promise.all([
   copy(npm('@huggingface/transformers/dist/transformers.web.min.js'), path.join(transformerDir, 'transformers.web.min.js')),
   copy(npm('onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.wasm'), path.join(ortDir, 'ort-wasm-simd-threaded.jsep.wasm')),
   copy(npm('onnxruntime-web/dist/ort.all.bundle.min.mjs'), path.join(ortDir, 'ort.all.bundle.min.mjs')),
   copy(npm('tesseract.js/dist/tesseract.esm.min.js'), path.join(tesseractDir, 'tesseract.esm.min.js')),
   copy(npm('tesseract.js/dist/worker.min.js'), path.join(tesseractDir, 'worker.min.js')),
-  copy(npm('tesseract.js-core/tesseract-core-simd-lstm.wasm.js'), path.join(tesseractDir, 'tesseract-core-simd-lstm.wasm.js')),
-  copy(npm('tesseract.js-core/tesseract-core-simd-lstm.wasm'), path.join(tesseractDir, 'tesseract-core-simd-lstm.wasm'))
+  copy(npm('tesseract.js-core/tesseract-core-simd-lstm.wasm.js'), path.join(tesseractDir, 'tesseract-core-simd-lstm.wasm.js'))
 ]);
+
+// Older builds staged these two before the manifest above was narrowed. Drop
+// them from the source tree too, otherwise `cp` in package-extension.mjs keeps
+// shipping whatever is left under extension/vendor/.
+for (const stale of [
+  path.join(ortDir, 'ort-wasm-simd-threaded.jsep.mjs'),
+  path.join(tesseractDir, 'tesseract-core-simd-lstm.wasm')
+]) {
+  await rm(stale, { force: true });
+}
 
 const tfBundle = path.join(transformerDir, 'transformers.web.min.js');
 let tfContent = await readFile(tfBundle, 'utf8');
@@ -87,7 +101,7 @@ await download(
 const allFiles = [
   ...await collectFiles(path.join(extension, 'models')),
   ...await collectFiles(path.join(extension, 'vendor'))
-].filter((file) => file.path !== 'local-vision-assets.json');
+].filter((file) => file.path !== 'local-vision-assets.json' && !file.path.startsWith('pdfjs/'));
 const manifest = {
   object_detection_model: 'Xenova/yolos-tiny',
   revision,

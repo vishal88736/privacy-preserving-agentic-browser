@@ -127,6 +127,10 @@ export function classifyElement(el) {
     semantic = semantic || SemanticType.CHECK;
   } else if (type === 'radio') {
     semantic = semantic || SemanticType.RADIO_OPTION;
+  } else if (role === 'checkbox') {
+    semantic = semantic || SemanticType.CHECK;
+  } else if (role === 'radio') {
+    semantic = semantic || SemanticType.RADIO_OPTION;
   } else if (role === 'tab') {
     semantic = semantic || SemanticType.TAB;
   } else if (tag === 'a' || role === 'link') {

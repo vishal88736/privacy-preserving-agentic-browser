@@ -150,19 +150,85 @@ export function setupMessageRouter(chromeApi = chrome, deps = {}) {
         break;
 
       case MessageType.GET_AGENT_STATUS:
-        manager.ready.then(() => sendResponse({
+        Promise.all([manager.ready, vault.ready]).then(() => sendResponse({
           task: manager.getTask(),
           settings: manager.settings,
           vaultSummary: vault.getAvailableKeysSummary()
-        }));
+        })).catch((err) => {
+          log.exception('Could not load agent status', err);
+          sendResponse({ success: false, error: 'The Local Vault could not be loaded.' });
+        });
         return true;
 
       case MessageType.GET_VAULT:
         // Vault plaintext must never be exposed to webpage contexts.
-        sendResponse({
-          vault: vault.getAllSecretsForUI()
+        Promise.resolve(vault.ready).then(() => {
+          sendResponse({
+            vault: typeof vault.getActiveSecretsForUI === 'function' ? vault.getActiveSecretsForUI() : vault.getAllSecretsForUI(),
+            pendingReview: typeof vault.getPendingReviewForUI === 'function' ? vault.getPendingReviewForUI() : {},
+            reviewRequired: vault.reviewRequired === true,
+            storageError: vault.storageError || null
+          });
+        }).catch((err) => {
+          log.exception('Could not read the Local Vault for the side panel', err);
+          sendResponse({ success: false, error: 'The Local Vault could not be loaded.' });
         });
-        break;
+        return true;
+
+      case MessageType.CONFIRM_VAULT_REVIEW:
+        if (!payload?.values || typeof payload.values !== 'object' || Array.isArray(payload.values)) {
+          sendResponse({ success: false, error: 'The reviewed vault values are invalid.' });
+          break;
+        }
+        Promise.resolve(vault.confirmReview(payload.values)).then(() => {
+          sendResponse({ success: true });
+        }).catch((err) => {
+          sendResponse({ success: false, error: err?.message || 'Vault review could not be saved.' });
+        });
+        return true;
+
+      case MessageType.GET_VAULT_DOCUMENTS:
+        // Metadata only: name, file name, type, byte length. No bytes.
+        Promise.resolve(vault.ready).then(() => {
+          sendResponse({
+            documents: typeof vault.getDocumentsSummary === 'function' ? vault.getDocumentsSummary() : [],
+            storageError: vault.storageError || null
+          });
+        }).catch((err) => {
+          log.exception('Could not read stored document metadata for the side panel', err);
+          sendResponse({ success: false, error: 'The Local Vault could not be loaded.' });
+        });
+        return true;
+
+      case MessageType.STORE_VAULT_DOCUMENT:
+        // The vault validates the name against LOCAL_DOCUMENT_<NAME> and
+        // encrypts the bytes before they touch chrome.storage.local.
+        if (!payload?.name || typeof payload?.data !== 'string') {
+          sendResponse({ success: false, error: 'A document needs a name and its file data.' });
+          break;
+        }
+        Promise.resolve(vault.updateDocument(payload.name, {
+          data: payload.data,
+          fileName: payload.fileName,
+          mimeType: payload.mimeType
+        })).then((document) => {
+          sendResponse({ success: true, document });
+        }).catch((err) => {
+          sendResponse({ success: false, error: err?.message || 'Document could not be stored.' });
+        });
+        return true;
+
+      case MessageType.DELETE_VAULT_DOCUMENT:
+        if (!payload?.name) {
+          sendResponse({ success: false, error: 'Missing document name.' });
+          break;
+        }
+        Promise.resolve(vault.deleteDocument(payload.name)).then((deleted) => {
+          sendResponse({ success: true, deleted: deleted === true });
+        }).catch((err) => {
+          sendResponse({ success: false, error: err?.message || 'Document could not be deleted.' });
+        });
+        return true;
 
       case MessageType.UPDATE_VAULT:
         if (!payload?.key) {

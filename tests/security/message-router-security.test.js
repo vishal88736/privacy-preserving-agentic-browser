@@ -15,7 +15,15 @@ function harness() {
   const record = (k) => (...args) => { calls.push([k, ...args]); return true; };
   const controller = Object.fromEntries(['startTask','pauseTask','resumeTask','cancelTask','handleUserConfirmation','handleUserInput'].map(k => [k, record(k)]));
   controller.subscribe = () => {};
-  const vault = { getAllSecretsForUI: () => { calls.push(['vault-read']); return { LOCAL_TEST: 'secret' }; }, getAvailableKeysSummary: () => [], updateSecret: async (...x) => calls.push(['vault-write', ...x]) };
+  const vault = {
+    reviewRequired: true,
+    getAllSecretsForUI: () => { calls.push(['vault-read']); return { LOCAL_TEST: 'secret' }; },
+    getActiveSecretsForUI: () => ({}),
+    getPendingReviewForUI: () => ({ LOCAL_TEST: 'quarantined' }),
+    getAvailableKeysSummary: () => [],
+    updateSecret: async (...x) => calls.push(['vault-write', ...x]),
+    confirmReview: async (values) => { calls.push(['vault-review', values]); return true; }
+  };
   setupMessageRouter(chromeApi, { agentController: controller, taskManager: manager, localVault: vault });
   return { listener, calls };
 }
@@ -30,12 +38,15 @@ test('webpage cannot approve, start, change settings, or read/write vault', asyn
     [MessageType.START_TASK, { prompt: 'transfer money', tabId: 8 }],
     [MessageType.UPDATE_SETTINGS, { requireConfirmation: false }],
     [MessageType.GET_VAULT, {}],
-    [MessageType.UPDATE_VAULT, { key: 'LOCAL_PAN', value: 'fake' }]
+    [MessageType.UPDATE_VAULT, { key: 'LOCAL_PAN', value: 'fake' }],
+    [MessageType.CONFIRM_VAULT_REVIEW, { values: { LOCAL_PAN: 'fake' } }]
   ];
   for (const [type, payload] of attacks) {
     let response;
     listener({ type, payload }, page, value => { response = value; });
-    if (type === MessageType.UPDATE_VAULT || type === MessageType.UPDATE_SETTINGS) await new Promise(resolve => setImmediate(resolve));
+    if ([MessageType.UPDATE_VAULT, MessageType.CONFIRM_VAULT_REVIEW, MessageType.UPDATE_SETTINGS].includes(type)) {
+      await new Promise(resolve => setImmediate(resolve));
+    }
     assert.equal(response?.success, false, `${type} should be rejected`);
   }
   assert.deepEqual(calls, []);
@@ -61,6 +72,26 @@ test('the legitimate side panel can approve a pending action, forwarding correla
   // Correlation ids must reach the controller untouched: it is the only place
   // that can reject an approval meant for a different task or a stale prompt.
   assert.deepEqual(calls[0], ['handleUserConfirmation', payload]);
+});
+
+test('only the trusted side panel can read and confirm quarantined vault values', async () => {
+  const { listener, calls } = harness();
+  let response;
+  listener({ type: MessageType.GET_VAULT, payload: {} }, sidePanel, x => { response = x; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(response, {
+    vault: {},
+    pendingReview: { LOCAL_TEST: 'quarantined' },
+    reviewRequired: true,
+    storageError: null
+  });
+
+  response = null;
+  const values = { LOCAL_TEST: 'reviewed' };
+  listener({ type: MessageType.CONFIRM_VAULT_REVIEW, payload: { values } }, sidePanel, x => { response = x; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(response, { success: true });
+  assert.deepEqual(calls.at(-1), ['vault-review', values]);
 });
 
 test('the side panel cannot read a different task by omitting correlation ids', () => {

@@ -211,7 +211,7 @@ def _value_matches_option(value: str, options: List[str]) -> bool:
     return False
 
 
-def _repair_action(parsed: dict, allowed: set, page_state: Optional[Dict[str, Any]], fused_observation: Optional[Dict[str, Any]] = None) -> dict:
+def _repair_action(parsed: dict, allowed: set, page_state: Optional[Dict[str, Any]], fused_observation: Optional[Dict[str, Any]] = None, stored_documents: Optional[List[str]] = None) -> dict:
     act = parsed.get("action") or {}
     if not isinstance(act, dict):
         _log_safe_plan_shape(parsed)
@@ -224,6 +224,20 @@ def _repair_action(parsed: dict, allowed: set, page_state: Optional[Dict[str, An
 
     action_type = act.get("action")
     downgrade_reason = None
+
+    # Upload guard: an UPLOAD is only meaningful as "attach THIS one of the
+    # user's own stored documents". A token that is not in STORED_DOCUMENTS —
+    # or a value/path where a token belongs — is an invented handle, not a
+    # file the user chose, so it is downgraded rather than forwarded. The
+    # extension enforces the same rule again before anything is executed.
+    if action_type == "UPLOAD":
+        allowed_docs = {
+            str(name) for name in (stored_documents or [])
+            if re.fullmatch(r"LOCAL_DOCUMENT_[A-Z0-9_]{1,48}", str(name))
+        }
+        source = act.get("value_source")
+        if not isinstance(source, str) or source not in allowed_docs:
+            downgrade_reason = "UPLOAD must name a document from STORED_DOCUMENTS"
 
     # Value hallucination guard 1: TYPE with neither an inline value nor a
     # symbolic source would be rejected by the extension's schema anyway —
@@ -361,7 +375,7 @@ Output ONLY a valid JSON object. Do NOT include markdown blocks:
                 "confidence": 0.0
             }
 
-    def plan_step(self, task: str, fused_observation: Dict[str, Any], task_history: List[Dict[str, Any]], task_state: Optional[Dict[str, Any]] = None, page_state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def plan_step(self, task: str, fused_observation: Dict[str, Any], task_history: List[Dict[str, Any]], task_state: Optional[Dict[str, Any]] = None, page_state: Optional[Dict[str, Any]] = None, stored_documents: Optional[List[str]] = None) -> Dict[str, Any]:
         if not settings.API_KEY:
             raise Exception("API_KEY is missing. General semantic reasoning requires a live model.")
 
@@ -380,7 +394,7 @@ Output ONLY a valid JSON object. Do NOT include markdown blocks:
             # stay stable for the live prompt's contract; values compact.
             # ALLOWED_ELEMENT_IDS is never truncated (grounding authority).
             page_evidence = build_page_evidence(
-                fused_observation, page_state, allowed, task_history
+                fused_observation, page_state, allowed, task_history, stored_documents
             )
             user_msg = {
                 "ORIGINAL_USER_REQUEST": task,
@@ -452,7 +466,7 @@ Output ONLY a valid JSON object. Do NOT include markdown blocks:
                         valid_sources = ("LOCAL_AADHAAR", "LOCAL_PAN", "LOCAL_DOCUMENT", "LOCAL_PASSWORD", "LOCAL_FULL_NAME", "LOCAL_DOB", "LOCAL_PHONE", "LOCAL_EMAIL", "LOCAL_ADDRESS", "LOCAL_PROFILE", "LOCAL_CREDIT_CARD", "LOCAL_CVV", "LOCAL_SSN", "LOCAL_SIN", "LOCAL_NIN", "LOCAL_NHS", "LOCAL_IBAN", "LOCAL_CITY", "LOCAL_STATE", "LOCAL_ZIP", "LOCAL_COUNTRY", "LOCAL_GENDER", "LOCAL_TERMS")
                         if act["value_source"] not in valid_sources and not re.fullmatch(r"LOCAL_CUSTOM_[A-Z0-9_]{1,48}", str(act["value_source"])):
                             act["value_source"] = None
-                    parsed = _repair_action(parsed, allowed, page_state, fused_observation)
+                    parsed = _repair_action(parsed, allowed, page_state, fused_observation, stored_documents)
                     # Planner + Critique roles, carried through for the side
                     # panel's transparency view and the log file. The
                     # extension acts only on `action`; these fields never

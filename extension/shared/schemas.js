@@ -2,7 +2,7 @@
  * Strict Schemas & Validators for Privacy-Preserving Agentic Browser
  */
 
-import { ActionType, RiskLevel, SymbolicSecretSource } from './constants.js';
+import { ActionType, RiskLevel, SymbolicSecretSource, isDocumentToken, DOCUMENT_NAME_PATTERN } from './constants.js';
 
 export class ValidationError extends Error {
   constructor(message, details = null) {
@@ -10,6 +10,22 @@ export class ValidationError extends Error {
     this.name = 'ValidationError';
     this.details = details;
   }
+}
+
+/**
+ * Every symbolic source a model may name.
+ *
+ * The three families are all closed regexes or fixed enums — a token is never
+ * interpolated into anything, and no token can express a filesystem path, URL,
+ * or command. LOCAL_DOCUMENT_<NAME> names one of the user's own stored
+ * documents and nothing else.
+ */
+function isKnownValueSource(valueSource) {
+  return typeof valueSource === 'string' && (
+    Object.values(SymbolicSecretSource).includes(valueSource) ||
+    /^LOCAL_CUSTOM_[A-Z0-9_]{1,48}$/.test(valueSource) ||
+    DOCUMENT_NAME_PATTERN.test(valueSource)
+  );
 }
 
 /**
@@ -22,6 +38,21 @@ export function validateAction(action) {
 
   if (!action.action || !Object.values(ActionType).includes(action.action)) {
     throw new ValidationError(`Invalid action type: ${action.action}. Allowed types: ${Object.values(ActionType).join(', ')}`);
+  }
+
+  // A named vault document is an attachment handle, never a text value. Keep
+  // the single document-bearing operation explicit so a TYPE or form-plan
+  // path cannot bypass the planner's UPLOAD authorization checks.
+  const isVaultDocumentDescriptor = (value) => Boolean(value) && typeof value === 'object' &&
+    value.__vaultDocument === true;
+  const hasDocumentSource = isDocumentToken(action.value_source) ||
+    isDocumentToken(action.value) || isVaultDocumentDescriptor(action.value) ||
+    (action.action === ActionType.FILL_FORM_PLAN &&
+      Array.isArray(action.value?.fields) &&
+      action.value.fields.some((field) => isDocumentToken(field?.value_source) ||
+        isDocumentToken(field?.value) || isVaultDocumentDescriptor(field?.value)));
+  if (hasDocumentSource && action.action !== ActionType.UPLOAD) {
+    throw new ValidationError('Stored document tokens may only be used by UPLOAD actions.');
   }
 
   // Reject arbitrary script execution or eval immediately.
@@ -71,9 +102,20 @@ export function validateAction(action) {
     if (!action.value && !action.value_source) {
       throw new ValidationError('TYPE action requires either value or value_source');
     }
-    if (action.value_source && !Object.values(SymbolicSecretSource).includes(action.value_source) &&
-        !/^LOCAL_CUSTOM_[A-Z0-9_]{1,48}$/.test(action.value_source)) {
+    if (action.value_source && !isKnownValueSource(action.value_source)) {
       throw new ValidationError(`Invalid value_source: ${action.value_source}`);
+    }
+  }
+
+  // Validate the UPLOAD source. When a file is attached at all it is attached
+  // by naming a document the user stored: there is no "read this path"
+  // argument in the schema, so a model cannot express one even by accident.
+  if (action.action === ActionType.UPLOAD) {
+    if (action.value_source !== undefined && !isDocumentToken(action.value_source)) {
+      throw new ValidationError('UPLOAD may only reference a stored document (LOCAL_DOCUMENT_<NAME>)');
+    }
+    if (action.value) {
+      throw new ValidationError('UPLOAD takes no inline value; the document is selected by value_source only');
     }
   }
 
@@ -92,8 +134,7 @@ export function validateAction(action) {
       if (field.control_type && !allowedControls.has(field.control_type)) {
         throw new ValidationError(`Invalid form control type: ${field.control_type}`);
       }
-      if (field.value_source && !Object.values(SymbolicSecretSource).includes(field.value_source) &&
-          !/^LOCAL_CUSTOM_[A-Z0-9_]{1,48}$/.test(field.value_source)) {
+      if (field.value_source && !isKnownValueSource(field.value_source)) {
         throw new ValidationError(`Invalid form value_source: ${field.value_source}`);
       }
     }

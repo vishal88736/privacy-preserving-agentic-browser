@@ -6,6 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { SecretDetector } from '../../extension/privacy/secret-detector.js';
+import { DOMSanitizer } from '../../extension/privacy/dom-sanitizer.js';
 import { PIICategory, SymbolicSecretSource } from '../../extension/shared/constants.js';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -225,4 +226,95 @@ test('SecretDetector - bare security PIN is still PASSWORD', () => {
   const r = d.classifyElement({ label: 'Enter UPI PIN', name: 'upi_pin', id: 'pin', type: 'text' });
   assert.equal(r.isSensitive, true);
   assert.equal(r.source, 'LOCAL_PASSWORD');
+});
+
+// ── label-wording variants (same vault value, different form wording) ───────
+
+test('SecretDetector - misspelled "Aadhar" triggers AADHAAR', () => {
+  const d = makeDetector();
+  const r = d.classifyElement({ type: 'text', label: 'Aadhar Number', name: 'aadhar_no' });
+  assert.equal(r.isSensitive, true);
+  assert.equal(r.category, PIICategory.AADHAAR);
+  assert.equal(r.source, SymbolicSecretSource.LOCAL_AADHAAR);
+});
+
+test('SecretDetector - "Candidate Name" triggers FULL_NAME', () => {
+  const d = makeDetector();
+  const r = d.classifyElement({ type: 'text', label: 'Candidate Name', name: 'candidateName' });
+  assert.equal(r.isSensitive, true);
+  assert.equal(r.category, PIICategory.FULL_NAME);
+  assert.equal(r.source, SymbolicSecretSource.LOCAL_FULL_NAME);
+});
+
+test('SecretDetector - "Surname" triggers FULL_NAME', () => {
+  const d = makeDetector();
+  const r = d.classifyElement({ type: 'text', label: 'Surname', name: 'surname' });
+  assert.equal(r.isSensitive, true);
+  assert.equal(r.source, SymbolicSecretSource.LOCAL_FULL_NAME);
+});
+
+test('SecretDetector - "User name" is NOT routed to legal name', () => {
+  const d = makeDetector();
+  const r = d.classifyElement({ type: 'text', label: 'User name', name: 'username' });
+  assert.equal(r.category === PIICategory.FULL_NAME, false);
+});
+
+test('SecretDetector - "Account holder name" triggers FULL_NAME', () => {
+  const d = makeDetector();
+  const r = d.classifyElement({ type: 'text', label: 'Account holder name', name: 'acct_holder' });
+  assert.equal(r.isSensitive, true);
+  assert.equal(r.source, SymbolicSecretSource.LOCAL_FULL_NAME);
+});
+
+test('SecretDetector - "Telephone" triggers PHONE', () => {
+  const d = makeDetector();
+  const r = d.classifyElement({ type: 'text', label: 'Telephone', name: 'tel_no' });
+  assert.equal(r.isSensitive, true);
+  assert.equal(r.category, PIICategory.PHONE);
+  assert.equal(r.source, SymbolicSecretSource.LOCAL_PHONE);
+});
+
+test('SecretDetector - "Permanent Address" triggers ADDRESS', () => {
+  const d = makeDetector();
+  const r = d.classifyElement({ type: 'text', label: 'Permanent Address', name: 'perm_addr' });
+  assert.equal(r.isSensitive, true);
+  assert.equal(r.category, PIICategory.ADDRESS);
+  assert.equal(r.source, SymbolicSecretSource.LOCAL_ADDRESS);
+});
+
+test('SecretDetector - "Born On" triggers DOB', () => {
+  const d = makeDetector();
+  const r = d.classifyElement({ type: 'text', label: 'Born On', name: 'born_on' });
+  assert.equal(r.isSensitive, true);
+  assert.equal(r.category, PIICategory.DOB);
+});
+
+test('SecretDetector - autocomplete=street-address triggers ADDRESS', () => {
+  const d = makeDetector();
+  const r = d.classifyElement({ type: 'text', autocomplete: 'street-address', name: 'addr' });
+  assert.equal(r.isSensitive, true);
+  assert.equal(r.source, SymbolicSecretSource.LOCAL_ADDRESS);
+});
+
+test('SecretDetector - common address aliases and address-level autocomplete are sensitive', () => {
+  const d = makeDetector();
+  for (const name of ['addr1', 'street_2', 'zip_code', 'postcode', 'apartment']) {
+    const result = d.classifyElement({ type: 'text', name });
+    assert.equal(result.category, PIICategory.ADDRESS, `${name} should map to ADDRESS`);
+  }
+  const state = d.classifyElement({ type: 'text', autocomplete: 'address-level1' });
+  const city = d.classifyElement({ type: 'text', autocomplete: 'address-level2' });
+  assert.equal(state.category, PIICategory.ADDRESS);
+  assert.equal(city.category, PIICategory.ADDRESS);
+});
+
+test('a field label is scrubbed as a value carrier, not only as an example', () => {
+  // Defence in depth: a label resolved from a question container can carry the
+  // value the user just typed. That is user data, not a placeholder example,
+  // so it must be scrubbed with the value policy before it can travel.
+  const sanitizer = new DOMSanitizer();
+  const { sanitizedElements } = sanitizer.sanitizeElements([
+    { id: 'el_1', tag: 'input', type: 'text', name: 'entry.1', label: 'Contact adbaidba@gmail.com', value: '' }
+  ]);
+  assert.doesNotMatch(sanitizedElements[0].label, /adbaidba@gmail\.com/);
 });

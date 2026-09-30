@@ -4,7 +4,7 @@
  * the action is safe to execute automatically or requires explicit human confirmation.
  */
 
-import { ActionType, RiskLevel, SymbolicSecretSource } from '../shared/constants.js';
+import { ActionType, RiskLevel, SymbolicSecretSource, isDocumentToken } from '../shared/constants.js';
 
 export class RiskGate {
   /**
@@ -31,7 +31,9 @@ export class RiskGate {
       targetDom?.placeholder
     ].filter((part) => typeof part === 'string').join(' ').toLowerCase();
     const localSource = (source) => Boolean(source && (
-      Object.values(SymbolicSecretSource).includes(source) || /^LOCAL_CUSTOM_[A-Z0-9_]{1,48}$/.test(source)
+      Object.values(SymbolicSecretSource).includes(source) ||
+      /^LOCAL_CUSTOM_[A-Z0-9_]{1,48}$/.test(source) ||
+      isDocumentToken(source)
     ));
     const nestedSources = verb === ActionType.FILL_FORM_PLAN && Array.isArray(value?.fields)
       ? value.fields.map((field) => field?.value_source).filter(Boolean)
@@ -107,7 +109,13 @@ export class RiskGate {
     }
 
     // 3. High-Risk Action: Document Uploads
-    if (verb === ActionType.UPLOAD || value_source === SymbolicSecretSource.LOCAL_DOCUMENT || nestedSources.includes(SymbolicSecretSource.LOCAL_DOCUMENT)) {
+    // Unchanged in severity, widened in coverage: a named stored document
+    // (LOCAL_DOCUMENT_<NAME>) is now a real source, and attaching one still
+    // requires the user's explicit approval exactly like the UPLOAD verb does.
+    const attachesDocument = isDocumentToken(value_source) ||
+      nestedSources.some((source) => isDocumentToken(source));
+    if (verb === ActionType.UPLOAD || value_source === SymbolicSecretSource.LOCAL_DOCUMENT ||
+        nestedSources.includes(SymbolicSecretSource.LOCAL_DOCUMENT) || attachesDocument) {
       return {
         allowed: true,
         risk: RiskLevel.HIGH,

@@ -115,25 +115,68 @@ export class FakeElement {
 }
 
 /**
+ * Minimal CSS selector matcher for the selector lists the content script uses.
+ * Supports comma lists, bare tag names, `[attr]`, `[attr="value"]`, and
+ * `:not(...)` on simple compounds — enough to mirror a real browser for the
+ * control, button, link, heading, and media queries under test.
+ */
+export function matchesSelector(element, selector) {
+  return String(selector).split(',').some((part) => {
+    const compound = part.trim();
+    return compound ? matchesCompound(element, compound) : false;
+  });
+}
+
+function matchesCompound(element, compound) {
+  let selector = compound;
+  const negatives = [];
+  selector = selector.replace(/:not\(([^)]*)\)/g, (_, inner) => {
+    negatives.push(inner.trim());
+    return '';
+  });
+
+  const tagMatch = selector.match(/^[a-zA-Z][a-zA-Z0-9-]*/);
+  if (tagMatch) {
+    if (element.tagName !== tagMatch[0].toUpperCase()) return false;
+    selector = selector.slice(tagMatch[0].length);
+  }
+
+  const attrRe = /\[([a-zA-Z-]+)(?:([~^$*|]?=)"?([^\]"]*)"?)?\]/g;
+  let match;
+  while ((match = attrRe.exec(selector))) {
+    const [, name, , value] = match;
+    const actual = element.getAttribute(name);
+    if (value === undefined) {
+      if (actual === null || actual === undefined) return false;
+    } else if (String(actual) !== value) {
+      return false;
+    }
+  }
+
+  return !negatives.some((negative) => matchesCompound(element, negative));
+}
+
+/**
  * @param {Object} opts
  * @param {FakeElement[]} opts.elements  Elements the extractor should discover.
  * @param {number} opts.devicePixelRatio
+ * @param {string} opts.visibleText Visible page text used by privacy coverage tests.
  */
-export function bootPage({ elements = [], devicePixelRatio = 1, innerWidth = 1280, innerHeight = 800 } = {}) {
+export function bootPage({ elements = [], devicePixelRatio = 1, innerWidth = 1280, innerHeight = 800, labelTexts = {}, visibleText = '' } = {}) {
   const console_ = globalThis.console;
   const realLog = console_.log;
   const realWarn = console_.warn;
   console_.log = () => {};
   console_.warn = () => {};
 
-  const bySelectorPass = {
-    'input, select, textarea, [role="textbox"], [role="checkbox"]':
-      elements.filter((el) => ['INPUT', 'SELECT', 'TEXTAREA'].includes(el.tagName)),
-    'button, [role="button"], [role="option"]':
-      elements.filter((el) => el.tagName === 'BUTTON'),
-    'video, audio': elements.filter((el) => ['VIDEO', 'AUDIO'].includes(el.tagName)),
-    'a, [role="link"], [tabindex]:not([tabindex="-1"])':
-      elements.filter((el) => el.tagName === 'A')
+  // The extractor queries with CSS selector lists and relies on the browser to
+  // evaluate them. This stand-in must therefore understand the selectors the
+  // shipped content script actually uses, rather than a hand-copied allowlist
+  // that silently drifts when the selector changes (which would make every
+  // control "disappear" and every extraction test vacuously pass or fail).
+  const queryAll = (selector) => {
+    if (selector === '*') return [];
+    return elements.filter((el) => matchesSelector(el, selector));
   };
 
   class PrototypeStub {}
@@ -144,9 +187,24 @@ export function bootPage({ elements = [], devicePixelRatio = 1, innerWidth = 128
   globalThis.InputEvent = class { constructor(type, init = {}) { this.type = type; Object.assign(this, init); } };
   globalThis.MouseEvent = class { constructor(type, init = {}) { this.type = type; Object.assign(this, init); } };
   globalThis.KeyboardEvent = class { constructor(type, init = {}) { this.type = type; Object.assign(this, init); } };
-  globalThis.Blob = class { constructor(parts) { this.parts = parts; } };
-  globalThis.File = class { constructor(parts, name) { this.name = name; this.parts = parts; } };
-  globalThis.DataTransfer = class { constructor() { this.items = { add() {} }; this.files = []; } };
+  // Enough of the file API to prove what the executor attaches: the page must
+  // end up holding a File with the stored name, type, and exact bytes. Sizes
+  // are counted rather than stubbed so a wrong byte count is observable.
+  const partSize = (part) => (part instanceof Uint8Array || ArrayBuffer.isView(part) ? part.byteLength : 0);
+  const totalSize = (parts) => [...(parts || [])].reduce((sum, part) => sum + partSize(part), 0);
+  globalThis.Blob = class { constructor(parts, init = {}) { this.parts = parts; this.type = init?.type || ''; this.size = totalSize(parts); } };
+  globalThis.File = class { constructor(parts, name, init = {}) { this.parts = parts; this.name = name; this.type = init?.type || ''; this.size = totalSize(parts); } };
+  globalThis.DataTransfer = class {
+    constructor() {
+      this._files = [];
+      this.items = { add: (file) => { this._files.push(file); } };
+    }
+    get files() {
+      const list = this._files.slice();
+      list.item = (index) => this._files[index] ?? null;
+      return list;
+    }
+  };
 
   globalThis.window = globalThis;
   globalThis.innerWidth = innerWidth;
@@ -154,6 +212,18 @@ export function bootPage({ elements = [], devicePixelRatio = 1, innerWidth = 128
   globalThis.devicePixelRatio = devicePixelRatio;
   globalThis.scrollX = 0;
   globalThis.scrollY = 0;
+  // Real window scrolling, so SCROLL and the off-screen-field path are
+  // exercised rather than stubbed into always-succeed.
+  globalThis.scrollBy = (options) => {
+    const opts = typeof options === 'number' ? { top: options } : (options || {});
+    globalThis.scrollX += opts.left || 0;
+    globalThis.scrollY += opts.top || 0;
+  };
+  globalThis.scrollTo = (options) => {
+    const opts = typeof options === 'number' ? { top: options } : (options || {});
+    if (typeof opts.top === 'number') globalThis.scrollY = opts.top;
+    if (typeof opts.left === 'number') globalThis.scrollX = opts.left;
+  };
   globalThis.location = { href: 'https://example.test/', protocol: 'https:', host: 'example.test' };
   globalThis.URL = URL;
   globalThis.matchMedia = () => ({ matches: false });
@@ -162,12 +232,15 @@ export function bootPage({ elements = [], devicePixelRatio = 1, innerWidth = 128
 
   const doc = {
     documentElement: { appendChild() {}, scrollHeight: 2000, style: {} },
-    body: { style: {} },
+    body: { style: {}, innerText: visibleText },
     style: {},
     title: 'Synthetic Test Page',
-    getElementById: () => null,
+    getElementById: (id) => {
+      const text = labelTexts?.[id];
+      return typeof text === 'string' ? { innerText: text } : null;
+    },
     querySelector: () => null,
-    querySelectorAll: (selector) => (selector === '*' ? [] : (bySelectorPass[selector] || [])),
+    querySelectorAll: (selector) => (selector === '*' ? [] : queryAll(selector)),
     createElement: (tag) => new FakeElement(tag),
     addEventListener() {}
   };

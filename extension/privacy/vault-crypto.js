@@ -39,6 +39,9 @@ const VAULT_STORAGE_KEY = 'agent_local_vault_encrypted';
 const LEGACY_STORAGE_KEY = 'agent_local_vault';
 /** Non-secret marker recording the crypto schema version. */
 const VAULT_META_KEY = 'agent_local_vault_meta';
+// This marker is independent of the AES envelope version. It records that a
+// user explicitly reviewed values recovered from older vault builds.
+const VAULT_REVIEW_VERSION = 1;
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -93,13 +96,13 @@ async function loadOrCreateKey() {
   }
 }
 
-function toBase64(bytes) {
+export function toBase64(bytes) {
   let binary = '';
   for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
   return btoa(binary);
 }
 
-function fromBase64(text) {
+export function fromBase64(text) {
   const binary = atob(text);
   const out = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
@@ -161,7 +164,10 @@ export async function readEncryptedVault() {
     return { ok: false, values: {}, reason: `The vault key is unavailable: ${error?.message || 'unknown error'}` };
   }
 
-  const stored = await chrome.storage.local.get(VAULT_STORAGE_KEY);
+  const [stored, metaStored] = await Promise.all([
+    chrome.storage.local.get(VAULT_STORAGE_KEY),
+    chrome.storage.local.get(VAULT_META_KEY)
+  ]);
   const envelope = stored?.[VAULT_STORAGE_KEY];
   if (!envelope || typeof envelope !== 'object') return { ok: true, values: {} };
 
@@ -179,14 +185,16 @@ export async function readEncryptedVault() {
       return { ok: false, values: {}, reason: `The vault entry for "${name}" could not be authenticated; it may have been altered.` };
     }
   }
-  return { ok: true, values };
+  const meta = metaStored?.[VAULT_META_KEY];
+  const reviewRequired = Object.keys(envelope).length > 0 && meta?.reviewVersion !== VAULT_REVIEW_VERSION;
+  return { ok: true, values, reviewRequired };
 }
 
 /**
  * Encrypt and persist the vault, then remove any plaintext copy.
  * @param {Object} values
  */
-export async function writeEncryptedVault(values) {
+export async function writeEncryptedVault(values, { reviewed = true } = {}) {
   if (!isEncryptionSupported()) {
     throw new Error('Encryption is unavailable in this environment.');
   }
@@ -198,7 +206,12 @@ export async function writeEncryptedVault(values) {
   }
   await chrome.storage.local.set({
     [VAULT_STORAGE_KEY]: envelope,
-    [VAULT_META_KEY]: { encrypted: true, version: 1, updatedAt: Date.now() }
+    [VAULT_META_KEY]: {
+      encrypted: true,
+      version: 1,
+      reviewVersion: reviewed ? VAULT_REVIEW_VERSION : 0,
+      updatedAt: Date.now()
+    }
   });
   // Drop the legacy plaintext key if one is still present, so a migration never
   // leaves readable secrets behind.
@@ -222,7 +235,9 @@ export async function migrateLegacyVault() {
   for (const [key, value] of Object.entries(legacy)) {
     if (typeof value === 'string' && value !== '') values[key] = value;
   }
-  await writeEncryptedVault(values);
+  // Values recovered from the old plaintext layout stay encrypted but are not
+  // activated until the user reviews them in the trusted vault UI.
+  await writeEncryptedVault(values, { reviewed: false });
   return values;
 }
 
@@ -241,6 +256,17 @@ export async function clearVaultStorage() {
 
 /** Storage key for the encrypted backend shared secret. */
 export const BACKEND_TOKEN_STORAGE_KEY = 'agent_backend_token_encrypted';
+
+/**
+ * Storage key for the named-document store.
+ *
+ * Document bytes are identity documents (Aadhaar scans, passports, PAN cards),
+ * so they are the most sensitive thing this extension holds. They are stored
+ * as ONE encrypted envelope under the same non-extractable AES-GCM key as every
+ * other secret — never as loose base64 in chrome.storage.local, which would be
+ * plaintext with a cosmetic disguise.
+ */
+export const VAULT_DOCUMENTS_STORAGE_KEY = 'agent_local_vault_documents_encrypted';
 
 /**
  * Store one value as an encrypted envelope.
@@ -276,5 +302,6 @@ export async function deleteEncryptedSecret(storageKey) {
 export const VAULT_STORAGE_KEYS = Object.freeze({
   encrypted: VAULT_STORAGE_KEY,
   legacy: LEGACY_STORAGE_KEY,
-  meta: VAULT_META_KEY
+  meta: VAULT_META_KEY,
+  documents: VAULT_DOCUMENTS_STORAGE_KEY
 });

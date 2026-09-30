@@ -20,6 +20,7 @@ hallucinations.
 """
 
 import json
+import re
 from typing import Any, Dict, List, Optional
 
 # Serialized budget for the page-evidence block. ~12K chars ≈ 3K tokens,
@@ -151,11 +152,27 @@ def select_relevant_elements(
     return (prioritized + remainder)[:max_elements]
 
 
+def _stored_document_tokens(stored_documents: Optional[List[str]]) -> List[str]:
+    """Keep only well-formed ``LOCAL_DOCUMENT_<NAME>`` tokens, de-duplicated.
+
+    The extension already validates names; re-validating here means a tampered
+    or buggy client cannot widen the planner's vocabulary into something the
+    extension would not accept anyway.
+    """
+    tokens = set()
+    for raw in stored_documents or []:
+        name = str(raw)
+        if re.fullmatch(r"LOCAL_DOCUMENT_[A-Z0-9_]{1,48}", name):
+            tokens.add(name)
+    return sorted(tokens)
+
+
 def build_page_evidence(
     fused_observation: Optional[Dict[str, Any]],
     page_state: Optional[Dict[str, Any]],
     allowed: set,
     task_history: Optional[List[Dict[str, Any]]],
+    stored_documents: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Assemble the compact page-evidence block for one reasoning call.
 
@@ -197,6 +214,18 @@ def build_page_evidence(
             "perception_provenance": state.get("provenance") or fused.get("provenance") or "DOM_ONLY",
             "visual_layout": visual_layout[:500],
             "visual_state": visual_state[:500],
+            # Derived playback signal (booleans/counts only, never raw media
+            # objects). Without this the planner cannot tell playing from
+            # paused: after CLICK play every later observation looks identical,
+            # so it clicks again (toggling pause) and never emits DONE.
+            "media_summary": state.get("media_summary") or fused.get("media_summary") or "no playable media",
+            "media_playing": bool(state.get("media_playing") or fused.get("media_playing")),
+            # Form fill counts only (no values) so the planner can terminate
+            # fill tasks itself instead of re-filling a completed form.
+            "form_completion": state.get("form_completion") or (
+                (fused.get("form_state") or {}).get("completion")
+                if isinstance(fused.get("form_state"), dict) else None
+            ),
             "summary": state.get("summary"),
             "headings": headings,
             "result_sets": state.get("result_sets") or fused.get("result_sets"),
@@ -211,6 +240,11 @@ def build_page_evidence(
         "ALLOWED_ELEMENT_IDS": sorted(allowed),
         "AVAILABLE_ELEMENTS": select_relevant_elements(fused, state),
         "ACTION_HISTORY": summarize_history(task_history),
+        # Token names of the documents the user stored in their local vault.
+        # Names are not personal values and never leave the extension as
+        # anything else, but they are the whole vocabulary an UPLOAD may use:
+        # an action naming anything absent from this list is unroutable.
+        "STORED_DOCUMENTS": _stored_document_tokens(stored_documents),
     }
     if _serialized_len(evidence) <= MAX_EVIDENCE_CHARS:
         return evidence

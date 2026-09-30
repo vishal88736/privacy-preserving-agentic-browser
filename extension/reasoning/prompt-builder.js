@@ -4,7 +4,6 @@
  * Untrusted webpage text is quarantined; the model may only act on listed IDs.
  *
  * L16: Always keeps submit buttons, selects, radio/checkbox elements
- * L17: Added explicit scroll context (percentage, below-fold indicator)
  * L21: Added symbolic token reference guide in prompt
  */
 
@@ -126,6 +125,9 @@ export class PromptBuilder {
       sensitive: el.dom?.sensitive || false,
       value_source: el.dom?.value_source || null,
       current_value: el.dom?.value || '',
+      // Filled bit only (no value): lets the planner see that a redacted
+      // field already holds something instead of re-typing it in a loop.
+      filled: el.dom?.has_value === true,
       href: el.dom?.href || undefined,
       state: el.dom?.disabled ? 'disabled' : (el.dom?.checked ? 'checked' : (el.dom?.selected ? 'selected' : 'enabled')),
       clickable: Boolean(el.interaction?.clickable),
@@ -151,6 +153,15 @@ export class PromptBuilder {
       perception_provenance: unifiedObservation.provenance || 'DOM_ONLY',
       visual_layout: unifiedObservation.visual_layout_summary,
       visual_state: unifiedObservation.visual_state_summary,
+      // Privacy-safe derived media signal (not the raw verifier object).
+      // The planner is otherwise blind to play state: after CLICK play the
+      // next observation looks identical, so it clicks again (toggling pause)
+      // and never emits DONE. Only paused/ended booleans are summarized —
+      // no URLs, titles, ordinals, or ready_state values leave the device.
+      media_summary: this._mediaSummary(unifiedObservation.local_media_state)
+        || pageState?.media_summary || 'no playable media',
+      media_playing: this._isMediaPlaying(unifiedObservation.local_media_state)
+        || pageState?.media_playing === true,
       headings: pageState?.headings || (unifiedObservation.headings || []).map((h) => h.text),
       result_sets: pageState?.result_sets || unifiedObservation.result_items || [],
       ranked_candidates: pageState?.ranked_candidates || [],
@@ -163,23 +174,21 @@ export class PromptBuilder {
     };
   }
 
-  // L17: Generate a human-readable scroll context summary. The viewport
-  // height comes from the observation (carried by the content script), never
-  // from a global `window` reference that is absent in service workers and
-  // test environments.
-  _scrollContext(scroll, viewport = null) {
-    if (!scroll) return 'Scroll position unknown.';
-    const { y, maxY } = scroll;
-    const viewportH = (Array.isArray(viewport) && Number.isFinite(viewport[1]) && viewport[1] > 0)
-      ? viewport[1]
-      : ((viewport && Number.isFinite(viewport.height) && viewport.height > 0) ? viewport.height : 800);
-    if (!maxY || maxY <= 0) return 'Page is fully visible (no scrollable content).';
-    const pct = Math.round((y / Math.max(1, maxY - viewportH)) * 100);
-    const clampedPct = Math.min(100, Math.max(0, pct));
-    const remainingPx = Math.max(0, maxY - y - viewportH);
-    if (clampedPct === 0) return `At the top of the page. ~${remainingPx}px of content below the fold.`;
-    if (clampedPct >= 95) return 'At the bottom of the page. No more content below.';
-    return `Scrolled ${clampedPct}% down the page. ~${remainingPx}px of content below the fold.`;
+  // Derived playback signal for the planner. Counts and booleans only —
+  // the raw local_media_state object (with ordinals/ready_state) is never
+  // serialized, per the privacy test below.
+  _mediaSummary(localMediaState) {
+    const media = Array.isArray(localMediaState?.media) ? localMediaState.media : [];
+    if (!media.length) return 'no playable media';
+    const playing = media.filter((m) => m && m.paused === false && m.ended !== true).length;
+    const total = media.length;
+    if (playing > 0) return total === 1 ? '1 media item playing' : `${total} media items (${playing} playing)`;
+    return total === 1 ? '1 media item paused' : `${total} media items (all paused)`;
+  }
+
+  _isMediaPlaying(localMediaState) {
+    const media = Array.isArray(localMediaState?.media) ? localMediaState.media : [];
+    return media.some((m) => m && m.paused === false && m.ended !== true);
   }
 
 }

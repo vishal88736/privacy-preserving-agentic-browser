@@ -67,18 +67,19 @@ The current VLM backend's heuristic emits DOM annotations, not screenshot-derive
 PrivAgent currently uses:
 
 - **Local vision:** Xenova YOLOS-Tiny, quantized Q4 ONNX, pinned revision, loaded from packaged extension assets through Transformers.js and ONNX Runtime Web.
-- **Local OCR:** packaged Tesseract.js 7 with English language data and WASM. OCR text is consumed locally and discarded.
+- **Local OCR:** packaged Tesseract.js 7 with English language data and WASM. Page-perception OCR is consumed locally for masking and discarded; the separate PDF tool keeps recognized rows in side-panel memory only for the user's preview/export.
+- **Local PDF tables:** PDF.js 4.10.38, worker, and CMaps are packaged under `extension/vendor/pdfjs/`; scanned pages reuse the packaged Tesseract worker. It makes no network/backend calls. The user reviews the inferred rows and copies TSV into Sheets or downloads CSV for Sheets' import flow. No Sheets API/OAuth credentials are configured.
 - **Server VLM:** Qwen2.5-VL-72B-Instruct by default, configurable in the backend.
 - **Server reasoning:** GPT-OSS-120B by default, configurable in the backend.
 - **Local LLM:** none.
 
 `extension/runtime/` separates capability detection and packaged model lifecycle from perception. ONNX uses WebGPU when an adapter is available and the pipeline initializes; it falls back to WASM on initialization failure. Firefox remains on WASM when WebGPU is unavailable, and its WASM path does not depend on RunAnywhere's Chrome/Edge-only offscreen/OPFS design. No benchmark in this checkout establishes that WebGPU is faster.
 
-The extension is about 48.1 MB unpacked. RunAnywhere's browser-agent docs reference Qwen3.5-4B Q4_K_M at 2.55 GB, LFM2.5-1.2B Q5_K_M at 0.79 GB, and Qwen3-0.6B Q4_K_M at about 397 MB. PrivAgent has no declared bundle allowance, no local LLM runtime, and no model download/cache system. Adding one of those models would materially change package size, memory, startup, download, caching, and offline behavior, so the production reasoning path remains the server provider. The disabled `FutureRunAnywherePlannerProvider` is an explicit future seam, not an installed model.
+The current extension file set selected for packaging is about 52.2 MB decimal (49.8 MiB), including the PDF parser. RunAnywhere's browser-agent docs reference Qwen3.5-4B Q4_K_M at 2.55 GB, LFM2.5-1.2B Q5_K_M at 0.79 GB, and Qwen3-0.6B Q4_K_M at about 397 MB. PrivAgent has no local LLM runtime or model download/cache system. Adding one of those models would materially change package size, memory, startup, download, caching, and offline behavior, so the production reasoning path remains the server provider. The disabled `FutureRunAnywherePlannerProvider` is an explicit future seam, not an installed model.
 
 ## Measurements
 
-The earlier architecture audit measured a pre-refactor baseline of 48,059,440 bytes (Chrome) and 48,059,581 bytes (Firefox), then 48,093,748 bytes and 48,093,889 bytes after that refactor (**+34,308 bytes**). Clean builds of the currently tracked baseline reproduce those post-refactor sizes. This patch adds **3,209 bytes** per package; final sizes are 48,096,957 bytes and 48,097,098 bytes (about 0.0067% over the tracked baseline, 37,517 bytes over the earlier pre-refactor baseline). No project bundle-size budget is declared.
+The earlier architecture audit measured a pre-refactor baseline of 48,059,440 bytes (Chrome) and 48,059,581 bytes (Firefox), then 48,093,748 bytes and 48,093,889 bytes after that refactor (**+34,308 bytes**). The packaging script enforces a 50 MiB unpacked-size cap. With the PDF feature in the current working tree, its packaging file selection totals 52,206,338 bytes for Chrome and 52,206,395 bytes for Firefox, leaving about 222 KB under that cap. These are calculated from the current source file set; a clean extension build has not been run after this change.
 
 A local-only smoke benchmark ran the packaged Chrome extension in headless Chromium 1243 with GPU disabled, using a synthetic 640×360 image and a synthetic page with 80 inputs. Results were one environment sample, not a cross-device guarantee:
 

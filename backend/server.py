@@ -213,6 +213,10 @@ class ReasonRequest(BaseModel):
     page_state: Optional[Dict[str, Any]] = Field(default=None, max_length=64)
     fused_observation: Dict[str, Any] = Field(max_length=128)
     task_history: Optional[List[Dict[str, Any]]] = Field(default_factory=list, max_length=50)
+    # Names of the identity documents the user stored in their local vault.
+    # Tokens only, never file names or bytes: the planner is told what it may
+    # reference, and this list is the whole vocabulary for an UPLOAD action.
+    stored_documents: Optional[List[str]] = Field(default_factory=list, max_length=32)
 
 class InterpretRequest(BaseModel):
     task: str = Field(min_length=1, max_length=3500)
@@ -259,7 +263,8 @@ def process_reason(req: ReasonRequest):
             fused_observation=req.fused_observation,
             task_history=req.task_history or [],
             task_state=req.task_state,
-            page_state=req.page_state
+            page_state=req.page_state,
+            stored_documents=req.stored_documents or []
         )
         return plan
     except OutboundPrivacyError as val_err:

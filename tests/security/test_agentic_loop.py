@@ -447,5 +447,50 @@ class CompactContextTests(unittest.TestCase):
         self.assertIn("visible_state_changed=False", evidence["ACTION_HISTORY"])
 
 
+class UploadGroundingTests(unittest.TestCase):
+    """The backend half of the stored-document invariant.
+
+    The extension re-checks this before anything is executed, but the planner
+    should never forward an upload the user never authorized in the first
+    place: an ``UPLOAD`` that does not name one of the user's own stored
+    documents is an invented handle, not a file the user chose.
+    """
+
+    def _repair(self, action, stored_documents):
+        sys.path.insert(0, str(ROOT / "backend"))
+        from gpt_oss_service import _repair_action
+        parsed = {"action": action}
+        return _repair_action(parsed, {"el_file"}, None, {"elements": []}, stored_documents)
+
+    def test_upload_naming_a_stored_document_is_forwarded(self):
+        result = self._repair(
+            {"action": "UPLOAD", "target": {"element_id": "el_file"}, "value_source": "LOCAL_DOCUMENT_AADHAAR"},
+            ["LOCAL_DOCUMENT_AADHAAR"],
+        )
+        self.assertEqual(result["action"]["action"], "UPLOAD")
+        self.assertEqual(result["action"]["value_source"], "LOCAL_DOCUMENT_AADHAAR")
+
+    def test_upload_naming_anything_else_is_downgraded(self):
+        for action in (
+            {"action": "UPLOAD", "target": {"element_id": "el_file"}},
+            {"action": "UPLOAD", "target": {"element_id": "el_file"}, "value_source": "LOCAL_DOCUMENT_PASSPORT"},
+            {"action": "UPLOAD", "target": {"element_id": "el_file"}, "value_source": "/home/me/passport.pdf"},
+            {"action": "UPLOAD", "target": {"element_id": "el_file"}, "value": "file:///etc/passwd"},
+            {"action": "UPLOAD", "target": {"element_id": "el_file"}, "value_source": "LOCAL_PAN"},
+        ):
+            with self.subTest(action=action):
+                result = self._repair(action, ["LOCAL_DOCUMENT_AADHAAR"])
+                self.assertEqual(result["action"]["action"], "WAIT")
+                self.assertIn("STORED_DOCUMENTS", result["thought"])
+
+    def test_stored_document_tokens_are_validated_server_side(self):
+        from agentic.context import build_page_evidence
+        evidence = build_page_evidence(
+            {"elements": []}, {"url": "https://example.test"}, set(), [],
+            ["LOCAL_DOCUMENT_AADHAAR", "../../etc/passwd", "LOCAL_AADHAAR", "LOCAL_DOCUMENT_aadhar"],
+        )
+        self.assertEqual(evidence["STORED_DOCUMENTS"], ["LOCAL_DOCUMENT_AADHAAR"])
+
+
 if __name__ == "__main__":
     unittest.main()
