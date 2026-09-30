@@ -104,18 +104,37 @@ test('an element id from before a new observation is stale even if the id is reu
   assert.equal(button.clickCount, 0);
 });
 
-test('a changed mutation revision invalidates an otherwise current element id', async () => {
+test('an unrelated page mutation does not invalidate a plan against a live target', async () => {
+  // A video player's clock, view counts and ad slots mutate the document
+  // continuously. Freshness is decided by the observation's identity and the
+  // target's liveness, not by a document-wide counter, so an action against a
+  // still-connected element must survive a revision bump.
   const button = new FakeElement('button', { innerText: 'Continue' });
   const page = bootPage({ elements: [button] });
   await page.send('EXTRACT_DOM', {});
-  const staleContext = { ...page.lastObservationContext, mutationRevision: page.lastObservationContext.mutationRevision + 1 };
+  const liveContext = { ...page.lastObservationContext, mutationRevision: page.lastObservationContext.mutationRevision + 1 };
 
   const result = await page.send('EXECUTE_ACTION', {
-    action: 'CLICK', target: { element_id: 'el_1' }, observationContext: staleContext
+    action: 'CLICK', target: { element_id: 'el_1' }, observationContext: liveContext
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(button.clickCount, 1);
+});
+
+test('a target detached after observation is rejected', async () => {
+  const button = new FakeElement('button', { innerText: 'Continue' });
+  const page = bootPage({ elements: [button] });
+  await page.send('EXTRACT_DOM', {});
+  // The node the plan named is gone; the id may still resolve to nothing.
+  button.remove();
+
+  const result = await page.send('EXECUTE_ACTION', {
+    action: 'CLICK', target: { element_id: 'el_1' }, observationContext: page.lastObservationContext
   });
 
   assert.equal(result.success, false);
-  assert.match(result.error, /page changed after this observation/i);
+  assert.match(result.error, /stale|no longer present/i);
   assert.equal(button.clickCount, 0);
 });
 

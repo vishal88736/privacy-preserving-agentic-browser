@@ -6,7 +6,7 @@ from typing import Dict, Any, List, Optional
 import requests
 from config import settings
 from privacy_rules import OutboundPrivacyError, find_sensitive_category
-from vlm_service import _looks_like_provider_error
+from vlm_service import looks_like_provider_error
 from agentic.orchestrator import compose_reasoning_messages
 from agentic.context import build_page_evidence
 
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 _SAFE_ACTION_TYPES = {
     "CLICK", "TYPE", "SELECT", "CHECK", "UNCHECK", "HOVER", "SUBMIT", "UPLOAD", "NAVIGATE", "SCROLL",
     "WAIT", "DONE", "ASK_USER", "PRESS_KEY", "GO_BACK", "GO_FORWARD",
-    "EXTRACT", "OPEN_TAB", "SWITCH_TAB"
+    "EXTRACT", "OPEN_TAB", "SWITCH_TAB", "FILL_FORM_PLAN"
 }
 
 
@@ -126,7 +126,7 @@ def _try_parse_plan(content: str) -> Optional[Dict[str, Any]]:
     raise here would skip the retry and end the task.
     """
     try:
-        parsed = _extract_json(_strip_reasoning(content))
+        parsed = _extract_json(content)
     except Exception:
         return None
     return parsed if isinstance(parsed, dict) and "action" in parsed else None
@@ -443,7 +443,7 @@ Output ONLY a valid JSON object. Do NOT include markdown blocks:
                     raise Exception("Empty response from reasoning model")
                 # Gateways can return HTTP 200 whose content is the provider's
                 # error text; that must never be parsed as a plan.
-                if _looks_like_provider_error(content):
+                if looks_like_provider_error(content):
                     raise Exception("Reasoning provider returned an error instead of a plan")
                 parsed = _try_parse_plan(content)
                 if parsed is None:

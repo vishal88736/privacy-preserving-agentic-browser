@@ -92,3 +92,70 @@ test('verification metadata for a form plan contains field IDs but never values'
   assert.deepEqual(summary, { action: 'FILL_FORM_PLAN', targetIds: ['el_1', 'el_2'] });
   assert.doesNotMatch(JSON.stringify(summary), /Jane Doe|jane@example\.com/);
 });
+
+// ── Redacted fields must still register as progress ────────────────────────
+//
+// The regression: for every field the sanitizer treats as sensitive, `value`
+// is the identical '[REDACTED]' marker before and after a successful TYPE.
+// Comparing it reported "no visible change" for a fill that demonstrably
+// worked, so after three filled PII fields the no-progress breaker aborted
+// the task mid-form. `has_value` is the extractor's privacy-safe filled bit.
+
+const redactedField = (value, hasValue) => ({
+  observation_id: null,
+  page: { url: 'https://example.test/form', title: 'Form' },
+  elements: [{
+    id: 'el_1',
+    tag: 'input',
+    type: 'email',
+    label: 'Email address',
+    visible: true,
+    enabled: true,
+    dom: { value, has_value: hasValue, sensitive: true }
+  }]
+});
+
+test('a successful TYPE into a redacted field counts as a visible change', () => {
+  const verifier = new ActionVerifier();
+  const result = verifier.verify({
+    action: { action: 'TYPE', targetId: 'el_1' },
+    execution: { success: true },
+    beforeObservation: { ...redactedField('[REDACTED]', false), observation_id: 'snapshot_1' },
+    afterObservation: { ...redactedField('[REDACTED]', true), observation_id: 'snapshot_2' }
+  });
+
+  assert.equal(result.verified, true);
+  assert.equal(result.status, 'OBSERVED_STATE_CHANGE');
+  assert.equal(result.visible_state_changed, true,
+    'a filled redacted field is progress even though the marker is unchanged');
+  assert.equal(result.target_state_changed, true);
+});
+
+test('an unfilled redacted field still reports no change', () => {
+  const verifier = new ActionVerifier();
+  const result = verifier.verify({
+    action: { action: 'TYPE', targetId: 'el_1' },
+    execution: { success: true },
+    beforeObservation: { ...redactedField('[REDACTED]', false), observation_id: 'snapshot_1' },
+    afterObservation: { ...redactedField('[REDACTED]', false), observation_id: 'snapshot_2' }
+  });
+
+  assert.equal(result.status, 'OBSERVED_NO_VISIBLE_CHANGE');
+  assert.equal(result.visible_state_changed, false);
+});
+
+test('the filled bit is compared as a boolean, never a value', () => {
+  // has_value is the extractor's strict "control holds something" flag. The
+  // verifier must not read a value or a length out of it, because a length is
+  // itself identifying for some fields.
+  const verifier = new ActionVerifier();
+  const result = verifier.verify({
+    action: { action: 'TYPE', targetId: 'el_1' },
+    execution: { success: true },
+    beforeObservation: { ...redactedField('[REDACTED]', false), observation_id: 'snapshot_1' },
+    afterObservation: { ...redactedField('[REDACTED]', true), observation_id: 'snapshot_2' }
+  });
+  assert.equal(result.visible_state_changed, true);
+  assert.equal(JSON.stringify(result).includes('E2E'), false,
+    'the verification summary must not carry a field value');
+});

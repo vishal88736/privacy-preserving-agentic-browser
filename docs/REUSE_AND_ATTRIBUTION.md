@@ -77,7 +77,7 @@ The extension build includes these upstream assets so screenshot analysis does n
 | Component | Source / Inspiration | Implementation Type | Privacy Status |
 | :--- | :--- | :--- | :--- |
 | **Observe-Act-Verify Loop** | Magnitude | Clean-room rewrite for MV3 | Enhanced with Sanitization step |
-| **Task State Machine** | AI Browser Agent & Magnitude | Re-architected as 14-state FSM | Strict state-transition guards |
+| **Task State Machine** | AI Browser Agent & Magnitude | Re-architected into two layers: a 15-state task lifecycle (`extension/shared/constants.js`) over a 10-state enforced per-step FSM (`extension/agent/state-machine.js`) | Strict state-transition guards; per-step observation binding |
 | **DOM Element Grounding** | Magnitude (`renderMinimalAccessibilityTree`) | Re-implemented for Content Script | Enforces PII attribute scrubbing |
 | **Visual Grounding** | Magnitude (`webActions.ts`) | DOM semantic grounding; screenshot-box IoU is not currently implemented | Local coordinate safety gate |
 | **Local PII Detector** | Project implementation | Regex + contextual rules | Runs locally; pattern coverage is incomplete |

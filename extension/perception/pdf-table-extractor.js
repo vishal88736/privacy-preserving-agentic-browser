@@ -24,7 +24,18 @@ function normalizeCell(value) {
   return String(value || '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-function makeRows(items) {
+/**
+ * Groups text fragments into table rows.
+ *
+ * Exported for tests: the column inference below is the part that silently
+ * corrupts a spreadsheet paste, and it can only be regression-tested against
+ * real fragment geometry.
+ *
+ * @param {Array} items PDF.js text items.
+ * @param {Object} [stats] Optional out-parameter reporting what was discarded,
+ *   so the caller can tell the user that page furniture was ignored.
+ */
+export function makeRows(items, stats = {}) {
   const fragments = (items || []).filter((item) => typeof item?.str === 'string' && item.str.trim() && item.transform?.length >= 6)
     .map((item) => ({
       text: normalizeCell(item.str),
@@ -49,26 +60,150 @@ function makeRows(items) {
     line.tolerance = Math.max(line.tolerance, tolerance);
   }
 
-  return lines.sort((a, b) => b.y - a.y).map((line) => {
-    const sorted = line.fragments.sort((a, b) => a.x - b.x);
-    const typicalHeight = sorted.map((item) => item.height).sort((a, b) => a - b)[Math.floor(sorted.length / 2)] || 8;
-    const columnGap = Math.max(9, typicalHeight * 1.25);
-    const cells = [];
-    let cell = '';
-    let previousRight = null;
-    for (const fragment of sorted) {
-      if (previousRight !== null && fragment.x - previousRight > columnGap) {
-        if (cell.trim()) cells.push(cell.trim());
-        cell = fragment.text;
-      } else {
-        cell += `${cell ? ' ' : ''}${fragment.text}`;
-      }
-      previousRight = Math.max(fragment.x + fragment.width, fragment.x);
+  const ordered = lines.sort((a, b) => b.y - a.y);
+  const rows = ordered.map((line) => splitLineByGaps(line));
+  if (rows.length) {
+    const rebuilt = rebuildOnPageWideGrid(rows, ordered);
+    if (rebuilt) {
+      stats.droppedLines = rebuilt.droppedLines;
+      stats.columns = rebuilt.rows[0]?.length || 0;
+      return rebuilt.rows;
     }
-    if (cell.trim()) cells.push(cell.trim());
-    return cells.map(normalizeCell);
-  }).filter((row) => row.some(Boolean));
+  }
+  stats.droppedLines = 0;
+  const fallback = rows.filter((row) => row.cells.some(Boolean)).map((row) => row.cells);
+  stats.columns = fallback[0]?.length || 0;
+  return fallback;
 }
+
+/** Splits one line into cells wherever the horizontal gap is wide enough. */
+function splitLineByGaps(line) {
+  const sorted = [...line.fragments].sort((a, b) => a.x - b.x);
+  const typicalHeight = sorted.map((item) => item.height).sort((a, b) => a - b)[Math.floor(sorted.length / 2)] || 8;
+  const columnGap = Math.max(9, typicalHeight * 1.25);
+  const cells = [];
+  const spans = [];
+  let current = [];
+  let previousRight = null;
+
+  const closeCell = () => {
+    if (!current.length) return;
+    const text = current.map((item) => item.text).join(' ').trim();
+    if (!text) {
+      current = [];
+      return;
+    }
+    cells.push(normalizeCell(text));
+    // The span must describe the fragments that produced THIS cell, not the
+    // one that happened to start the next cell.
+    spans.push({
+      start: Math.min(...current.map((item) => item.x)),
+      end: Math.max(...current.map((item) => item.x + item.width))
+    });
+    current = [];
+  };
+
+  for (const fragment of sorted) {
+    if (previousRight !== null && fragment.x - previousRight > columnGap) closeCell();
+    current.push(fragment);
+    previousRight = Math.max(fragment.x + fragment.width, fragment.x);
+  }
+  closeCell();
+  return { cells, spans };
+}
+
+/**
+ * Re-assigns every fragment onto one page-wide column grid.
+ *
+ * Splitting each line by its own pixel gaps cannot describe a table where the
+ * cells are not spaced the same way in every row. Numeric columns are usually
+ * right-aligned, so their left edges drift by the width of the widest value in
+ * the column, while text headers are packed tightly. A single gap threshold
+ * therefore splits numeric rows correctly and then merges the entire header
+ * row into one cell — which is exactly what happened to a 5-column table whose
+ * headers sat 7.9pt apart and whose values sat 42pt apart.
+ *
+ * The fix derives the columns from the page instead of from each line: the
+ * modal cell count across all lines is the real column count, the median
+ * horizontal centre of each column index is its anchor, and the midpoints
+ * between anchors become the band boundaries. Every fragment is then placed by
+ * its own centre, so a row is free to align itself differently.
+ *
+ * @returns {{rows: string[][], droppedLines: number}|null} null when the page
+ *   does not look tabular, so the caller can keep its per-line result.
+ */
+function rebuildOnPageWideGrid(rows, ordered) {
+  const counts = new Map();
+  for (const row of rows) counts.set(row.cells.length, (counts.get(row.cells.length) || 0) + 1);
+  let columnCount = 0;
+  let bestSupport = 0;
+  for (const [count, support] of counts) {
+    if (count >= 2 && support > bestSupport) {
+      columnCount = count;
+      bestSupport = support;
+    }
+  }
+  // A single line cannot define a grid; two agreeing lines can.
+  if (columnCount < 2 || bestSupport < 2) return null;
+
+  // Median centre per column index, taken only from lines that already have
+  // the modal number of cells.
+  const anchors = [];
+  for (let index = 0; index < columnCount; index += 1) {
+    const centres = [];
+    for (let lineIndex = 0; lineIndex < rows.length; lineIndex += 1) {
+      const row = rows[lineIndex];
+      if (row.cells.length !== columnCount) continue;
+      const span = row.spans[index];
+      const centre = span ? (span.start + span.end) / 2 : null;
+      if (Number.isFinite(centre)) centres.push(centre);
+    }
+    if (!centres.length) return null;
+    centres.sort((a, b) => a - b);
+    anchors.push(centres[Math.floor(centres.length / 2)]);
+  }
+  for (let index = 1; index < anchors.length; index += 1) {
+    if (!(anchors[index] > anchors[index - 1])) return null;
+  }
+
+  const boundaries = anchors.map((anchor, index) => (
+    index === 0 ? -Infinity : (anchors[index - 1] + anchor) / 2
+  ));
+  // boundaries[0] is -Infinity, so the scan starts at the first real midpoint.
+  const bandOf = (centre) => {
+    let band = 0;
+    for (let index = 1; index < boundaries.length; index += 1) {
+      if (centre < boundaries[index]) break;
+      band = index;
+    }
+    return band;
+  };
+
+  const grid = [];
+  let droppedLines = 0;
+  for (const line of ordered) {
+    const sorted = [...line.fragments].sort((a, b) => (a.x + a.width / 2) - (b.x + b.width / 2));
+    const cells = new Array(columnCount).fill('');
+    const occupied = new Set();
+    for (const fragment of sorted) {
+      const band = bandOf(fragment.x + fragment.width / 2);
+      occupied.add(band);
+      cells[band] = cells[band] ? `${cells[band]} ${fragment.text}` : fragment.text;
+    }
+    // A line that lands in a single column is page furniture — a title, a
+    // page number, a running header — not a table row. Keeping it produces a
+    // ragged first or last row that breaks the paste into a spreadsheet.
+    if (occupied.size < 2) {
+      droppedLines += 1;
+      continue;
+    }
+    grid.push(cells.map(normalizeCell));
+  }
+
+  if (grid.length < 2) return null;
+  return { rows: grid, droppedLines };
+}
+
 
 function rowsFromOcrText(text) {
   return String(text || '').split(/\r?\n/).map((line) => {
@@ -156,17 +291,20 @@ export async function extractPdfTableRows(file, { onProgress = () => {}, api = e
     const pageLimit = Math.min(documentProxy.numPages, MAX_PDF_PAGES);
     const rows = [];
     let usedOcr = false;
+    let droppedLines = 0;
     for (let pageNumber = 1; pageNumber <= pageLimit; pageNumber += 1) {
       onProgress({ page: pageNumber, total: pageLimit, phase: 'Reading PDF text' });
       const page = await documentProxy.getPage(pageNumber);
       try {
         const extracted = await extractPageText(page);
-        let pageRows = makeRows(extracted.items);
+        const stats = {};
+        let pageRows = makeRows(extracted.items, stats);
         if (extracted.text.replace(/\s/g, '').length < 20) {
           usedOcr = true;
           onProgress({ page: pageNumber, total: pageLimit, phase: 'Running local OCR' });
           pageRows = rowsFromOcrData(await recognizePage(page, api));
         }
+        droppedLines += stats.droppedLines || 0;
         for (const row of pageRows) {
           if (row.some(Boolean)) rows.push(row);
         }
@@ -181,7 +319,11 @@ export async function extractPdfTableRows(file, { onProgress = () => {}, api = e
       pageCount: documentProxy.numPages,
       processedPages: pageLimit,
       truncated: documentProxy.numPages > pageLimit,
-      usedOcr
+      usedOcr,
+      // Non-tabular lines (titles, page numbers, running headers) that were
+      // left out so the rows paste as one clean rectangle.
+      droppedLines,
+      columnCount: rows[0]?.length || 0
     };
   } finally {
     if (documentProxy) await documentProxy.destroy();

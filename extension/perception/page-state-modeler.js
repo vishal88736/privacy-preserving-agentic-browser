@@ -61,6 +61,19 @@ export class PageStateModeler {
           checked: Boolean(dom.checked ?? el.checked),
           selected: Boolean(dom.selected ?? el.selected),
           selected_option: dom.selected_option || el.selected_option || null,
+          // A dropdown cannot be planned without its options. The planner's
+          // contract is "SELECT uses a value that matches a known option for
+          // the observed element; if options are missing, do not guess", so
+          // omitting them made every select unplannable: the model had to ask
+          // the user to choose a country or a state rather than pick one.
+          // Option text and value are page-authored labels, already scrubbed
+          // by the DOM sanitizer, and are capped so a long list cannot bloat
+          // the request.
+          options: (dom.options || el.options || undefined)?.slice?.(0, 40)?.map((option) => ({
+            text: option?.text || '',
+            value: option?.value || '',
+            selected: Boolean(option?.selected)
+          })),
           parent_element_id: dom.parent_element_id || el.parent_element_id || null,
           child_element_ids: dom.child_element_ids || el.child_element_ids || [],
           form_group_id: dom.form_id || el.form_group_id || null,

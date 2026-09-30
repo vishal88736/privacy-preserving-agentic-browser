@@ -125,6 +125,19 @@ export class PromptBuilder {
       sensitive: el.dom?.sensitive || false,
       value_source: el.dom?.value_source || null,
       current_value: el.dom?.value || '',
+      // Select options, so a dropdown can actually be planned.
+      //
+      // The planner's contract is "SELECT uses a value that matches a known
+      // option for the observed element; if options are missing, do not
+      // guess". Without the list in the payload the model has no way to
+      // produce a valid value, so every country/state/gender dropdown became
+      // an ASK_USER or a rejected guess. Option text and value are
+      // page-authored labels that the DOM sanitizer has already scrubbed.
+      options: (el.dom?.options || el.options || undefined)?.slice?.(0, 40)?.map((option) => ({
+        text: option?.text || '',
+        value: option?.value || '',
+        selected: Boolean(option?.selected)
+      })),
       // Filled bit only (no value): lets the planner see that a redacted
       // field already holds something instead of re-typing it in a loop.
       filled: el.dom?.has_value === true,

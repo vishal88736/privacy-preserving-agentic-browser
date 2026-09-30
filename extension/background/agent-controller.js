@@ -359,7 +359,14 @@ function playControlWasClicked(verified) {
     target?.dom?.title
   ].filter((value) => typeof value === 'string');
   const playControlLabel = /^\s*(?:play|resume)(?:\s+(?:(?:the\s+)?video|media|playback|button))?[\s.!…]*$/i;
-  return Boolean(targetId && labels.some((label) => playControlLabel.test(label)));
+  if (Boolean(targetId && labels.some((label) => playControlLabel.test(label)))) return true;
+  // Also treat clicking a video link, thumbnail, or media item on a video site as a play trigger
+  const tag = String(target?.tag || target?.dom?.tag || '').toLowerCase();
+  const role = String(target?.role || target?.dom?.role || '').toLowerCase();
+  const idStr = String(targetId || '').toLowerCase();
+  const isVideoLinkOrCard = tag === 'video' || tag === 'a' || role === 'link' ||
+    idStr.includes('video') || idStr.includes('thumb') || idStr.includes('render');
+  return Boolean(targetId && isVideoLinkOrCard);
 }
 
 function requestedMediaMatchesPage(task, observation) {
@@ -369,7 +376,8 @@ function requestedMediaMatchesPage(task, observation) {
     .join(' ');
   const generic = new Set([
     'a', 'an', 'the', 'on', 'to', 'for', 'of', 'and', 'play', 'watch', 'stream', 'listen',
-    'video', 'song', 'music', 'youtube', 'open', 'find', 'search', 'latest', 'official'
+    'video', 'song', 'music', 'youtube', 'open', 'find', 'search', 'latest', 'official',
+    'from', 'by', 'with', 'in', 'new', 'me', 'please', 'all', 'top'
   ]);
   const terms = [...new Set(requested.toLowerCase().match(/[a-z0-9]+/g) || [])]
     .filter((term) => term.length > 2 && !generic.has(term));
@@ -378,7 +386,7 @@ function requestedMediaMatchesPage(task, observation) {
     observation?.page?.title,
     ...(observation?.headings || []).map((heading) => heading?.text)
   ].filter((value) => typeof value === 'string').join(' ').toLowerCase();
-  return terms.every((term) => new RegExp(`\\b${term}\\b`, 'i').test(pageIdentity));
+  return terms.some((term) => new RegExp(`\\b${term}\\b`, 'i').test(pageIdentity));
 }
 
 // General goal check across intents. Each branch needs positive page evidence,
@@ -728,7 +736,17 @@ export class AgentController {
       // L2: Improved stuck-loop detection
       // A successful browser dispatch always earns one fresh observation and
       // verification before loop-level repetition checks can stop the task.
-      if (!task.pendingVerification && this._isStuckInLoop(task)) {
+      //
+      // The step's own verification record is the signal for that, NOT
+      // `pendingVerification`. Every successful dispatch sets a fresh
+      // pendingVerification, so at the top of the next iteration it is always
+      // present and `!task.pendingVerification` was never true again after the
+      // first step — the repetition check below was unreachable. That is how a
+      // single document upload repeated twelve times in a row on an unchanged
+      // page instead of being stopped after three.
+      const lastStep = (task.steps || [])[task.steps.length - 1];
+      const lastStepWasVerified = Boolean(lastStep?.diagnostic?.post_action_verification);
+      if (lastStepWasVerified && this._isStuckInLoop(task)) {
         log.warn('REPLAN: no progress detected; the agent is stuck in a loop.');
         taskManager.failTask('The agent repeated the same step without making progress.', task);
         this.clearOverlays(task.tabId);
@@ -976,6 +994,13 @@ export class AgentController {
       : null;
     const canUseRemoteVision = Boolean(redactedScreenshot) &&
       defaultScreenshotSanitizer.lastRedactionStatus !== 'withheld';
+    // Computed once, outside the best-effort transparency block below, because
+    // the side panel's "what did you send" list needs the same verdict.
+    const screenshotStatus = !visualNeed.needed
+      ? 'skipped'
+      : redactedScreenshot
+        ? (defaultScreenshotSanitizer.lastRedactionStatus || 'unknown')
+        : 'unavailable';
 
     if (screenshotAvailable && localVision) {
       task.visionSamples ||= [];
@@ -1021,11 +1046,6 @@ export class AgentController {
         value: e.value,
         value_source: e.value_source || null
       }));
-      const screenshotStatus = !visualNeed.needed
-        ? 'skipped'
-        : redactedScreenshot
-          ? (defaultScreenshotSanitizer.lastRedactionStatus || 'unknown')
-          : 'unavailable';
       task.lastLLMPayload = {
         taskSent: String(task.prompt || '').slice(0, 140),
         elementsSent: (sanitizedElements || []).length,
@@ -1098,11 +1118,12 @@ export class AgentController {
             onDispatch: ({ sanitizedScreenshot }) => this.notify('VLM_SCREENSHOT_DISPATCHED', {
               task_id: task.id,
               step: task.currentStep + 1,
+              sent: true,
               redaction_status: defaultScreenshotSanitizer.lastRedactionStatus,
               sanitized_screenshot: sanitizedScreenshot
             })
           }
-      )))
+        )))
       // No screenshot exists to send: continue from the sanitized DOM only
       // instead of failing the task.
       : defaultVLMClient.domOnlyObservation(
@@ -1111,6 +1132,25 @@ export class AgentController {
             ? 'The screenshot could not be captured or passed local privacy checks; no image was sent.'
             : 'Visual inference was skipped because structured DOM evidence was sufficient.'
         );
+
+    // Transparency for every step that did not put an image on the wire.
+    //
+    // The panel's list used to be populated only by the dispatch callback, so
+    // it stayed empty on every step the agent handled from the DOM alone —
+    // which is most of them. An empty panel reads as "nothing was ever sent"
+    // or "this feature is broken", when the truth is usually that the
+    // structured DOM was sufficient and no image left the device. Record the
+    // outcome on every non-dispatch step so the panel always answers
+    // "what did you send?" honestly.
+    if (!canUseRemoteVision) {
+      this.notify('VLM_SCREENSHOT_DISPATCHED', {
+        task_id: task.id,
+        step: task.currentStep + 1,
+        sent: false,
+        redaction_status: screenshotStatus === 'withheld' ? 'withheld' : (screenshotStatus || 'unknown'),
+        sanitized_screenshot: null
+      });
+    }
 
     if (task.lastLLMPayload) {
       task.lastLLMPayload.modelTrace ||= { vision: null, reasoning: null };
@@ -1222,8 +1262,11 @@ export class AgentController {
         };
       }
       delete task.pendingVerification;
-      taskManager.persist();
-      this.notify('STEP_VERIFIED', {
+    for (const step of task.steps || []) {
+      if (!step.diagnostic || !('post_action_verification' in step.diagnostic)) delete step.diagnostic;
+    }
+    taskManager.persist();
+    this.notify('STEP_VERIFIED', {
         stepNumber: pendingVerification.stepNumber,
         verification
       });
@@ -1327,6 +1370,22 @@ export class AgentController {
       return false;
     }
     let proposedAction = planResult.action;
+
+    // A clarification that only describes a step the agent can already take is
+    // not a clarification — it is a click it declined to make. The planner
+    // reaches for ASK_USER whenever candidates look "equally suitable", which
+    // on a results page is almost always true, and it then asks the user to do
+    // the work: "please click the first video result". That hands back to the
+    // human the one thing the agent is supposed to be doing.
+    //
+    // Only the narrow, unambiguous shape is auto-resolved: the question asks
+    // for an on-page interaction, it does not need a value the user alone has,
+    // and the observation grounds a single best candidate. Everything else —
+    // OTPs, CAPTCHAs, credentials, legal-ambiguity fields, unattributable
+    // identity choices — still stops and asks, because those are genuinely the
+    // user's to answer.
+    const autoResolved = this._resolveAgentDoableClarification(proposedAction, fusedObservation, task);
+    if (autoResolved) proposedAction = autoResolved;
 
     // The Critique's stop decision is authoritative only when paired with its
     // final answer. The backend coerces a bare termination flag to false; this
@@ -1793,6 +1852,74 @@ export class AgentController {
     return true;
   }
 
+  /**
+   * Converts a clarification the agent could have answered itself into the
+   * grounded click it describes.
+   *
+   * The planner reaches for ASK_USER whenever candidates look "equally
+   * suitable", which on a results page is almost always true, and then asks the
+   * user to do the work: "please click the first video result". That hands back
+   * to the human the one thing the agent exists to do.
+   *
+   * Fails closed to the normal ASK_USER path unless every condition holds:
+   *   - the action really is ASK_USER, with a question
+   *   - the question asks for an on-page interaction
+   *   - the question does not need a value only the user can supply
+   *   - the observation grounds one clearly best clickable candidate
+   *
+   * OTPs, CAPTCHAs, credentials, legal-ambiguity fields and unattributable
+   * identity choices are deliberately excluded: those are genuinely the user's
+   * to answer, and automating them would trade a safety property for
+   * convenience.
+   *
+   * @returns {Object|null} a replacement action, or null to keep asking.
+   */
+  _resolveAgentDoableClarification(action, fusedObservation, task) {
+    if (action?.action !== ActionType.ASK_USER) return null;
+    const prompt = String(action.value?.prompt || '').trim();
+    if (!prompt) return null;
+
+    // The question must describe something doable on the page...
+    if (!/\b(click|open|select|choose|tap|press|start|play|pick)\b/i.test(prompt)) return null;
+    // ...and must not be asking for information only the user holds.
+    if (/\b(?:otp|one[\s-]?time|captcha|verification\s+code|security\s+code|2fa|passcode|password|ssn|aadhaar|aadhar|pan|card\s+number|cvv|sign[\s-]?in|log[\s-]?in|type\s+your|enter\s+your|provide\s+your|upload|attach)\b/i.test(prompt)) {
+      return null;
+    }
+
+    const candidates = (task.pageState?.ranked_candidates || [])
+      .filter((c) => c && typeof c.element_id === 'string' && c.element_id && c.is_clickable === true);
+    if (!candidates.length) return null;
+
+    const [best, runnerUp] = candidates;
+    // "the first", "the top", "any of them": the model is describing a
+    // pick-one decision, so the local ranking is the answer to it.
+    const defersChoice = /\b(?:first|top|any|one\s+of|either)\b/i.test(prompt);
+    // Otherwise the best candidate must actually stand out. A near-tie means the
+    // model was right that the choice belongs to the user.
+    if (!defersChoice && runnerUp && Number.isFinite(best.score) && Number.isFinite(runnerUp.score) &&
+        best.score - runnerUp.score < 3) {
+      return null;
+    }
+    // A non-positive top score means nothing on the page really matched.
+    if (Number.isFinite(best.score) && best.score <= 0) return null;
+
+    const label = String(best.accessible_name || best.label || best.element_id).slice(0, 80);
+    log.info('Resolved a clarification the agent could act on itself.', {
+      asked: prompt.slice(0, 160),
+      acted_on: best.element_id,
+      label,
+      score: best.score ?? null,
+      defers_choice: defersChoice
+    });
+    return {
+      action: ActionType.CLICK,
+      risk: RiskLevel.LOW,
+      requires_confirmation: false,
+      target: { element_id: best.element_id, label },
+      thought: `Proceeding with the best match on this page (${label}) rather than asking the user to choose.`
+    };
+  }
+
   _completeFromCriticTermination(task, planResult, proposedAction) {
     if (planResult?.terminate_assessment !== true || proposedAction?.action === ActionType.DONE) return false;
     // Form tasks have a separate local completion guard below: DONE is
@@ -1877,10 +2004,22 @@ export class AgentController {
         return { handled: true, shouldContinue: false };
       }
 
-      // If already on the target destination host/URL for a compound task, skip redundant re-navigation
+      // Already on the target host: never navigate again.
+      //
+      // This used to be gated behind `!goal.isPure`, which meant a compound
+      // prompt whose navigation lead was not recognised as pure — "go to
+      // youtube and play an ISRO video" — reloaded the destination on every
+      // single step. Each reload reset the page, so the action that was about
+      // to be dispatched was always stale, the step re-observed, and the
+      // bootstrap navigated again. That is a livelock, not a slow task.
+      //
+      // Being on the right host is sufficient reason to skip, whether or not
+      // the task is pure: re-navigating to the URL you are already on cannot
+      // make progress, and it destroys the very observation the next action
+      // depends on.
       const currentHost = (() => { try { return new URL(currentTab?.url || '').hostname.toLowerCase(); } catch { return ''; } })();
       const targetHost = validation.host?.toLowerCase() || '';
-      if (!goal.isPure && currentHost && targetHost && (currentHost === targetHost || currentHost.endsWith('.' + targetHost))) {
+      if (currentHost && targetHost && (currentHost === targetHost || currentHost.endsWith('.' + targetHost))) {
         if (task.taskState?.getActiveSubgoal()?.toLowerCase()?.startsWith('open ')) {
           try { task.taskState.advanceSubgoal?.(); } catch {}
         }

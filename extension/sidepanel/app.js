@@ -412,7 +412,16 @@ class SidePanelApp {
       this.pdfDownloadBtn.disabled = false;
       const method = result.usedOcr ? ' Local OCR was used for scanned pages.' : '';
       const pageNote = result.truncated ? ` Processed the first ${result.processedPages} of ${result.pageCount} pages.` : '';
-      this.setPdfStatus(`Extracted ${result.rows.length} rows. Review them, then copy or download.${method}${pageNote}`, 'success');
+      // Say what was left out rather than silently pasting a ragged rectangle:
+      // a dropped line is usually a title or a page number, and the user is
+      // the only one who can tell whether that mattered to them.
+      const droppedNote = result.droppedLines
+        ? ` ${result.droppedLines} non-tabular line${result.droppedLines === 1 ? '' : 's'} (titles or page numbers) were left out.`
+        : '';
+      const widthNote = result.columnCount
+        ? ` ${result.columnCount} columns detected.`
+        : ' No column grid was detected — the page may be prose rather than a table.';
+      this.setPdfStatus(`Extracted ${result.rows.length} rows.${widthNote} Review them, then copy or download.${method}${pageNote}${droppedNote}`, 'success');
     } catch (error) {
       const known = new Set([
         'Choose a PDF file first.',
@@ -1715,16 +1724,18 @@ class SidePanelApp {
     const screenshot = data.sanitized_screenshot;
     const safeDataUrl = typeof screenshot === 'string' && screenshot.length <= MAX_VLM_SCREENSHOT_PREVIEW_CHARS &&
       /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(screenshot)
-      ? screenshot
-      : null;
-    if (!safeDataUrl) {
+        ? screenshot
+        : null;
+    const wasSent = data.sent !== false;
+    if (wasSent && !safeDataUrl) {
       log.warn('Ignored an invalid or oversized VLM screenshot preview.');
       return;
     }
 
     this.vlmScreenshotPreviews.unshift({
       step: Number.isInteger(data.step) && data.step > 0 ? data.step : null,
-      redactionStatus: ['masked', 'checked'].includes(data.redaction_status)
+      sent: wasSent,
+      redactionStatus: ['masked', 'checked', 'withheld', 'skipped', 'unavailable'].includes(data.redaction_status)
         ? data.redaction_status
         : 'unknown',
       screenshot: safeDataUrl
@@ -1732,7 +1743,7 @@ class SidePanelApp {
     this.vlmScreenshotPreviews = this.vlmScreenshotPreviews.slice(0, MAX_VLM_SCREENSHOT_PREVIEWS);
     this.renderLatestRedactedShot();
     const previewChars = () => this.vlmScreenshotPreviews.reduce(
-      (sum, preview) => sum + preview.screenshot.length, 0
+      (sum, preview) => sum + (preview.screenshot ? preview.screenshot.length : 0), 0
     );
     while (this.vlmScreenshotPreviews.length > 1 &&
       previewChars() > MAX_VLM_SCREENSHOT_PREVIEW_TOTAL_CHARS) {
@@ -1750,11 +1761,26 @@ class SidePanelApp {
     this.llmScreenshotPreviewList.replaceChildren();
     for (const preview of this.vlmScreenshotPreviews) {
       const item = el('article', 'llm-screenshot-preview-item');
+      if (!preview.sent) {
+        // A step where the agent deliberately sent no image. Showing this is
+        // what makes the panel honest: an empty list used to be ambiguous
+        // between "nothing was sent", "nothing happened", and "broken".
+        const reason = preview.redactionStatus === 'withheld'
+          ? 'Withheld by local privacy checks — a neutral placeholder was sent instead of pixels.'
+          : preview.redactionStatus === 'skipped'
+            ? 'Not needed — the structured DOM evidence was sufficient, so no screenshot was captured or sent.'
+            : 'No image could be captured or passed local privacy checks, so nothing was sent.';
+        item.appendChild(el('div', 'llm-screenshot-preview-heading',
+          `${preview.step ? `Step ${preview.step} · ` : ''}Nothing sent to the VLM`));
+        item.appendChild(el('p', 'llm-screenshot-preview-note', reason));
+        this.llmScreenshotPreviewList.appendChild(item);
+        continue;
+      }
       const label = preview.redactionStatus === 'masked'
-        ? 'Known sensitive regions masked'
+        ? 'Sent to the VLM · known sensitive regions masked'
         : preview.redactionStatus === 'checked'
-          ? 'Checked; no known regions to mask'
-          : 'Privacy status unavailable';
+          ? 'Sent to the VLM · checked, no known regions to mask'
+          : 'Sent to the VLM · privacy status unavailable';
       item.appendChild(el('div', 'llm-screenshot-preview-heading',
         `${preview.step ? `Step ${preview.step} · ` : ''}${label}`));
       const image = document.createElement('img');

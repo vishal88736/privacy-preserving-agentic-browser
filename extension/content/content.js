@@ -949,6 +949,14 @@
       if (node && typeof node === 'object') this.ignoredNodes.add(node);
     }
 
+    /**
+     * Waits for the document to stop mutating.
+     * @returns {Promise<boolean>} true when the page was quiet for `quietMs`,
+     *   false when it never settled inside `timeoutMs`. Callers must not read a
+     *   timeout as "stable": a continuously rendering page would otherwise be
+     *   reported as settled, which is how an observation could be taken
+     *   mid-render and then treated as authoritative.
+     */
     async waitForStability(quietMs = 120, timeoutMs = 1500) {
       if (!this.observer) this._startObserving();
       const startTime = Date.now();
@@ -958,7 +966,7 @@
         }
         await new Promise(r => setTimeout(r, 25));
       }
-      return true;
+      return false;
     }
   }
 
@@ -966,22 +974,44 @@
 
   // 5. Browser Action Executor
   class BrowserExecutor {
-    _assertFreshObservation(context) {
-      if (!context || context.snapshotId !== registry.snapshotId ||
-          !Number.isInteger(context.mutationRevision) ||
-          context.mutationRevision !== stabilityObserver.revision) {
+    /**
+     * Rejects a plan whose observation is no longer current.
+     *
+     * Freshness is decided by the identity of the observation and of the
+     * element it addressed, never by a document-wide mutation counter. The
+     * observer watches attributes and character data across the whole
+     * document, so on any page that renders live — a video player's clock,
+     * view counts, ad slots, carousels — that counter changes continuously and
+     * equality against it can never hold. Requiring it rejected every action on
+     * a dynamic page, which is what stopped the agent from playing a video.
+     *
+     * What the target-scoped check still catches is everything the global
+     * counter was actually protecting against: a new extraction (ids are
+     * reassigned), a navigation, and a target that was detached, replaced or
+     * rebuilt. Actions dispatch on the resolved node reference rather than on
+     * coordinates, so a list that merely reorders cannot mis-click.
+     */
+    _assertFreshObservation(context, targetElementId) {
+      if (!context || context.snapshotId !== registry.snapshotId) {
         throw new Error('The page changed after this observation. Re-observe and ground the action again.');
+      }
+      if (!targetElementId) return;
+      const element = registry.getElement(targetElementId);
+      if (!element || !element.isConnected) {
+        throw new Error('Target element became stale after observation. Re-observe the page before acting.');
       }
     }
 
     async execute(actionPayload) {
       const { action, target, resolvedValue, coordinates } = actionPayload;
 
-      // Positional element IDs are scoped to one content-script snapshot. A
-      // DOM mutation, navigation, or user-confirmation delay invalidates the
-      // plan so the background must observe and ground the page again.
+      // Element IDs are scoped to one content-script snapshot, so a navigation
+      // or a newer observation invalidates the plan and the background must
+      // observe and ground the page again. The target's own liveness is checked
+      // against the registry rather than against a document-wide mutation
+      // counter — see _assertFreshObservation.
       if (OBSERVATION_BOUND_ACTIONS.has(action)) {
-        this._assertFreshObservation(actionPayload.observationContext);
+        this._assertFreshObservation(actionPayload.observationContext, target?.element_id);
       }
 
       let targetElement = null;
@@ -1010,7 +1040,13 @@
         await this.sleep(SCROLL_SETTLE_MS);
         const settled = registry.getElement(target.element_id);
         if (settled && settled.isConnected) targetElement = settled;
-        if (OBSERVATION_BOUND_ACTIONS.has(action)) this._assertFreshObservation(actionPayload.observationContext);
+        // Re-check after the scroll. The scroll itself mutates the document, so
+        // this can no longer be a whole-document freshness test; what matters
+        // is that the element we are about to act on is still the live node
+        // this observation described.
+        if (OBSERVATION_BOUND_ACTIONS.has(action)) {
+          this._assertFreshObservation(actionPayload.observationContext, target.element_id);
+        }
       }
 
       switch (action) {
@@ -1862,10 +1898,68 @@
     }
 
     async _executePressKey(element, actionPayload) {
-      const key = actionPayload.resolvedValue || actionPayload.value || 'Enter';
+      const key = String(actionPayload.resolvedValue || actionPayload.value || 'Enter');
       const target = element || document.activeElement || document.body;
-      target.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: String(key) }));
-      target.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, cancelable: true, key: String(key) }));
+      const lowerKey = key.toLowerCase();
+      const isEnter = lowerKey === 'enter' || key === '13';
+      const isEscape = lowerKey === 'escape' || lowerKey === 'esc' || key === '27';
+      const isTab = lowerKey === 'tab' || key === '9';
+      const isSpace = lowerKey === 'space' || key === ' ';
+
+      let keyCode = 0;
+      let code = key;
+      if (isEnter) { keyCode = 13; code = 'Enter'; }
+      else if (isEscape) { keyCode = 27; code = 'Escape'; }
+      else if (isTab) { keyCode = 9; code = 'Tab'; }
+      else if (isSpace) { keyCode = 32; code = 'Space'; }
+      else if (key.length === 1) { keyCode = key.charCodeAt(0); }
+
+      const eventInit = {
+        bubbles: true,
+        cancelable: true,
+        key: isEnter ? 'Enter' : key,
+        code,
+        keyCode,
+        which: keyCode
+      };
+
+      target.dispatchEvent(new KeyboardEvent('keydown', eventInit));
+      target.dispatchEvent(new KeyboardEvent('keypress', eventInit));
+      target.dispatchEvent(new KeyboardEvent('keyup', eventInit));
+
+      if (isEnter) {
+        // Synthetic KeyboardEvent does not trigger native form submission in Chromium.
+        // Explicitly trigger form submission or click the search/submit button.
+        const form = target.form || target.closest?.('form');
+        let submitted = false;
+        if (form) {
+          try {
+            if (typeof form.requestSubmit === 'function') {
+              form.requestSubmit();
+              submitted = true;
+            }
+          } catch {
+            // requestSubmit might throw if form validation fails or submit button is disabled
+          }
+          if (!submitted) {
+            const submitBtn = form.querySelector('button[type="submit"], input[type="submit"], button#search-icon-legacy, [aria-label*="Search" i]');
+            if (submitBtn && typeof submitBtn.click === 'function') {
+              submitBtn.click();
+              submitted = true;
+            } else {
+              try { form.submit(); submitted = true; } catch {}
+            }
+          }
+        }
+        if (!submitted) {
+          // Check for nearby search button (common on single-page apps like YouTube)
+          const nearbySubmit = target.parentElement?.querySelector?.('button#search-icon-legacy, button[aria-label*="Search" i]') ||
+            document.querySelector('button#search-icon-legacy, ytd-searchbox button#search-icon-legacy');
+          if (nearbySubmit && typeof nearbySubmit.click === 'function') {
+            nearbySubmit.click();
+          }
+        }
+      }
       return { success: true };
     }
 

@@ -9,6 +9,19 @@ function elementState(element) {
   // This is already sanitized by DOMSanitizer; sensitive values are markers or
   // symbolic references. Keep it only in memory for change comparison.
   state.value = element?.dom?.value ?? null;
+  // The filled bit is the only change signal that survives redaction.
+  //
+  // For every field the sanitizer treats as sensitive — a name, an email, a
+  // phone, an address, an Aadhaar — `value` is the same '[REDACTED]' marker
+  // before and after a successful TYPE. Comparing it therefore reports "no
+  // visible change" for a fill that demonstrably worked, and after
+  // MAX_VERIFICATION_NO_PROGRESS such fills the loop concludes it cannot
+  // confirm progress and aborts the task mid-form.
+  //
+  // `has_value` is the extractor's strict boolean: it records only whether a
+  // control currently holds something, never a value or a length, so it is
+  // privacy-safe to compare and is exactly the signal a fill produces.
+  state.has_value = element?.dom?.has_value === true;
   return state;
 }
 

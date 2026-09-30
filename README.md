@@ -22,7 +22,7 @@
 | 1 | **Visual context accuracy — 25%** | Side Panel → run any portal task | Local YOLOS-Tiny + OCR locate people/text regions; server VLM returns `spatial_layout` + `visual_state` prose with provenance (`REAL_VLM` / `DOM_PLUS_HEURISTIC` / `DOM_ONLY`). Controls stay DOM-grounded for precision. |
 | 2 | **PII recall & precision — 20%** | Open `/government-aadhaar.html`, `/page-b-sensitive-form.html` | DOM signals (`type=password`, `autocomplete`, aria) × pixel OCR × checksum-verified registry: Aadhaar, PAN, cards, SSN/SIN/NIN/NHS/IBAN, IFSC, email, phone, DOB, OTP/password. |
 | 3 | **Redaction precision — 20%** | Same pages | `OffscreenCanvas` solid blackout + 3px bleed + `[REDACTED_*]` labels; fail-closed placeholder when coverage is uncertain; OCR text never leaves device. |
-| 4 | **Client resource use — 20%** | Side Panel → Settings → Developer diagnostics | Quantized `model_q4.onnx`, bundled WASM + lang data, **0 bytes** runtime download; `heap` / `asset_bytes` / per-stage timings exported. |
+| 4 | **Client resource use — 20%** | Side Panel → Settings → Developer diagnostics | Quantized `model_q4.onnx` (~7.5 MB), bundled WASM + lang data, **0 bytes** runtime download; `heap` / `asset_bytes` / per-stage timings exported. |
 | 5 | **End-to-end latency — 15%** | Side Panel diagnostics per step | Detection + OCR run concurrently; one symbolic action per planning call; provider failover to DOM heuristic. Per-stage timings visible live. |
 
 **3-minute demo:** `python3 test-server/app.py` → load `dist/chrome/` → open `/government-aadhaar.html` → type *"Fill this form with my saved profile"* → watch PII blacked out locally → approve submit on confirmation card → done. Vault values are resolved locally at execution time only.
@@ -43,7 +43,7 @@
 | **Client: Privacy-Preserving Filter (bbox redaction / masking)** | **Dual engine:** DOM Sanitizer (values → `[REDACTED]` / `LOCAL_*`) + Screenshot Sanitizer (pixels → blackout). Outbound Policy Engine blocks any raw leak | `extension/privacy/dom-sanitizer.js`, `extension/privacy/screenshot-sanitizer.js`, `extension/privacy/policy-engine.js` |
 | **Server: Anonymized context → LLM/VLM → UI action** | `POST /vision` (layout summary) → `POST /reason` (one symbolic action: `CLICK`/`TYPE`/`SUBMIT`/`SCROLL`…) → local validate → risk-gate → vault-resolve → synthetic browser event | `backend/server.py`, `backend/vlm_service.py`, `backend/gpt_oss_service.py`, `extension/executor/`, `extension/content/content.js` |
 | **Open-weights model (cloud allowed in SIH)** | Reasoning `gpt-oss-120b` (OpenAI-compatible); Vision rotatable OpenRouter / HF / Groq; Bedrock supported | `backend/config.py`, `docs/model-providers.md` |
-| **End-to-end assistive task** | 14-state agent loop + 11 local benchmark portals + human-in-the-loop approvals | `extension/background/agent-controller.js`, `test-server/app.py` |
+| **End-to-end assistive task** | 15-state task lifecycle + 10-state enforced step FSM + 11 local benchmark portals + human-in-the-loop approvals | `extension/shared/constants.js`, `extension/agent/state-machine.js`, `extension/background/agent-controller.js`, `test-server/app.py` |
 | **Chrome + Firefox** | MV3 Side Panel (Chrome) + MV3 Sidebar (Firefox), one-command builds | `extension/manifest.json`, `extension/manifest.firefox.json`, `scripts/package-extension.mjs` |
 
 ✅ **Coverage verdict:** every line of the Expected Solution is implemented and demonstrable. See [Evaluation Scorecard](#-evaluation-scorecard--how-to-verify-each-metric) for exactly where judges should click.
@@ -119,35 +119,55 @@ flowchart TD
 
 </details>
 
-### 🤖 14-State Agent Loop
+### 🤖 Agent State Machines
 
-`IDLE → UNDERSTANDING_TASK → OBSERVING → SANITIZING → VISUAL_ANALYSIS → REASONING → PLANNING → VALIDATING_ACTION → EXECUTING (or WAITING_FOR_USER) → VERIFYING → OBSERVING … → COMPLETED / FAILED / CANCELLED`
+Two layers guard every step.
 
-Governed by `extension/background/agent-controller.js`. Every step records per-stage timings for the latency metric.
+**1. Task lifecycle — 15 states** (`extension/shared/constants.js:5`, `AgentState`). This is what the Side Panel displays via `STATE_CHANGED`:
+
+`IDLE → UNDERSTANDING_TASK → OBSERVING → SANITIZING → VISUAL_ANALYSIS → REASONING → PLANNING → VALIDATING_ACTION → EXECUTING (or WAITING_FOR_USER) → VERIFYING → OBSERVING … → COMPLETED / FAILED / CANCELLED`, plus `PAUSED` for a user-held task.
+
+**2. Enforced per-step FSM — 10 states** (`extension/agent/state-machine.js:9`, `AgentLoopState`). `AgentLoopStateMachine` rejects illegal edges, forces every step to begin in `OBSERVE`, and binds one `observationId` per step so an action planned against a stale observation throws instead of executing:
+
+`OBSERVE → UNDERSTAND → GROUND → PLAN → VALIDATE → EXECUTE → VERIFY → REPLAN → (OBSERVE | PLAN | DONE)`, with `BLOCKED` reachable from every non-terminal state and `DONE` terminal.
+
+Both are driven by `extension/background/agent-controller.js`. Loops stop on `maxSteps` (default 25) or after 3 consecutive failures. Every step records per-stage timings for the latency metric.
 
 ---
 
 ## 🖥️ 1. Local Vision Processing (Client-Side)
 
 - `extension/perception/local-vision.js` — loads pinned `model_q4.onnx`, runs detection + OCR concurrently. Returns `people`, `piiRegions`, `safeToTransmitAfterRedaction`, `backend` (wasm/webgpu), `modelLoadMs` / `inferenceMs` / `totalMs`, heap + asset bytes.
-- `extension/runtime/model-runtime.js` — packaged ONNX loader, no CDN at runtime.
+- `extension/runtime/model-runtime.js` — packaged ONNX loader, no CDN at runtime; WebGPU-first with WASM fallback.
 - `extension/perception/screenshot.js` — viewport capture; `observation-fusion.js` — fuses sanitized DOM + VLM prose; `provenance.js` — labels `REAL_VLM` / `DOM_PLUS_HEURISTIC` / `DOM_ONLY` so judges know what they are looking at.
+- `extension/perception/ocr/local-ocr.js` — shared packaged Tesseract worker for page perception *and* the PDF tool; OCR text returns only to the extension page and is never logged or forwarded to the backend.
+- `extension/perception/page-state-modeler.js` — compact, task-conditioned page view so the reasoner gets relevant evidence, not a DOM dump.
+- `extension/perception/task-grounding.js` — binds the user's natural-language request to real page evidence *before* the remote model plans.
+- `extension/perception/semantic-capability.js` — normalizes each actionable element from general browser semantics only (a11y metadata, role/type, control relationships, visible text, state). No site-specific rules.
+- `extension/perception/perception-provider.js` — selects the local-perception provider and reports which signals are actually available.
+- `extension/perception/pdf-table-extractor.js` — local PDF table extraction with no backend, network, storage, or logging calls. See [PDF to Google Sheets](#pdf-to-google-sheets-on-device).
 
 ## 🔒 2. Privacy-Preserving Filter (Before Any Network Call)
 
 - `extension/privacy/screenshot-sanitizer.js` — solid `#000000` boxes + `[REDACTED TYPE]` label; withholds placeholder on any doubt (unlocated text, missing coverage, opaque canvas/video).
 - `extension/privacy/dom-sanitizer.js` — values → `[REDACTED]` + `LOCAL_*`; scrubs placeholders, labels, URLs, options, headings, visible text.
 - `extension/privacy/pii-rules.js` — **single shared registry** used by DOM + OCR + policy engine alike, with proximity gating (±60 chars) and checksum validators.
+- `extension/privacy/pii-detector.js` — deterministic/contextual detector over that registry; adds Verhoeff checksum validation for Aadhaar.
 - `extension/privacy/policy-engine.js` + `secret-detector.js` — final outbound scan over vault exact-matches + registry; throws `OutboundPolicyViolationError` instead of sending.
+- `extension/privacy/local-vault.js` + `vault-crypto.js` — the vault. One non-extractable AES-GCM-256 `CryptoKey` is generated once and persisted in `chrome.storage.local`; every value is sealed under its own random IV, and GCM authentication failure surfaces as a decrypt error rather than silent plaintext. Backend tokens use the same envelope.
 - `extension/content/content.js` — bounded 120-element Shadow-DOM-aware extractor, synthetic-event executor, stability observer.
+- `extension/navigation/navigation.js` — pure capability-aware navigation helpers (no `chrome.*` dependency) shared by the controller and the executor.
+- `extension/agent/verifier/action-verifier.js` — settle check that decides next subgoal vs. done after execution.
 
 ## ☁️ 3. Server-Side Integration (Redaction-Aware)
 
 - `backend/server.py` — `POST /vision`, `POST /reason`, `POST /interpret`, `GET /health`; extension-origin regex + shared-secret + rate-limit + 5 MB cap.
 - `backend/vlm_service.py` — rotates OpenRouter → HF → Groq (4s timeout), rejects provider error-text-as-content, drops fabricated PII, falls back to DOM heuristic; always reports provenance.
 - `backend/gpt_oss_service.py` + `backend/agentic/prompts.py` — plan + grounding + critique in one call per action; symbolic actions only; hallucinated IDs/values repaired to `WAIT` + re-observe.
+- `backend/agentic/orchestrator.py` — composes the single fused Planner + Critique call per step. The loop itself lives in the extension, which owns tabs, confirmations, and the vault. `context.py` compacts the request to a 12K-char budget (short history + relevant observation + current request) after providers rejected oversized payloads with HTTP 413; `schemas.py` holds the structured plan/critique models.
+- `backend/agentic/_upstream/` + `VENDORING.md` — byte-identical reference copies of the four pinned TheAgenticBrowser Python files, with SHA-256 checksums and the required license notice. Reference-only; not on the live request path.
 - `backend/privacy_rules.py` — defense-in-depth: server re-rejects any unredacted pattern that slipped through.
-- Config: `backend/config.py`, providers: `docs/model-providers.md`.
+- Config: `backend/config.py`, providers: `docs/model-providers.md`, vendoring record: `backend/agentic/VENDORING.md`.
 
 ---
 
@@ -158,14 +178,14 @@ Governed by `extension/background/agent-controller.js`. Every step records per-s
 | **1. Visual context** | 25% | Run a task on `/page-c-visual-ui.html`: Side Panel shows VLM `spatial_layout` + `visual_state` with `model_trace` (provider/model). DOM controls remain grounded by element ID. Optional IoU: `npm run evaluate:vision -- annotations.jsonl --iou 0.5` (needs human-labeled JSONL). |
 | **2. PII recall/precision** | 20% | Open `/government-aadhaar.html` + `/page-b-sensitive-form.html`: Aadhaar/PAN/cards/OTP blacked out in pixels and `LOCAL_*` in DOM. Unit proof: `npm run test:privacy`. |
 | **3. Redaction precision** | 20% | Same pages: every sensitive box is opaque black + labeled; uncertain pages send placeholder (check `screenshotStatus: withheld/masked/checked` in transparency panel). E2E proof: `python3 tests/e2e_master_hardening_suite.py`. |
-| **4. Client resources** | 20% | Diagnostics show `model_q4.onnx` (~28 MB), `client_heap_bytes`, `client_asset_bytes`, `backend: wasm/webgpu`. `dist/` builds ~46 MB unpacked, 0-byte runtime fetch. |
+| **4. Client resources** | 20% | Diagnostics show `model_q4.onnx` (~7.5 MB quantized), `client_heap_bytes`, `client_asset_bytes`, `backend: wasm/webgpu`. `dist/` builds ~48 MB unpacked each (of which ~37 MB is the bundled `vendor/` runtime: ONNX Runtime Web 28 MB, PDF.js 4.4 MB, Tesseract 3.9 MB), 0-byte runtime fetch. |
 | **5. Latency** | 15% | Diagnostics show `dom_capture_ms`, `local_vision_ms`, `screenshot_redaction_ms`, `vlm_request_ms`, `reasoning_request_ms` per step. Detection + OCR overlap; one action per call keeps planning bounded. |
 
 Full privacy matrix:
 
 | Category | Detector | Check | Token sent to server |
 |---|---|---|---|
-| Aadhaar | 12-digit UIDAI regex | range + context | `LOCAL_AADHAAR` |
+| Aadhaar | 12-digit UIDAI regex (leading `[2-9]`) | **Verhoeff checksum** boosts confidence 0.85 → 0.99 | `LOCAL_AADHAAR` |
 | PAN | `[A-Z]{5}[0-9]{4}[A-Z]` | format | `LOCAL_PAN` |
 | Cards | 13–19 digits | **Luhn Mod-10** | `LOCAL_CREDIT_CARD` |
 | SSN / SIN / NIN / NHS / IBAN / IFSC | region regexes | area / Luhn / Mod-11 / Mod-97 / format | `LOCAL_SSN` etc. |
@@ -204,35 +224,56 @@ The PDF and extracted rows stay in side-panel memory; they are not sent to the a
 ## 🚀 5-Minute Quickstart
 
 ```bash
-cp .env.example .env        # add OPENROUTER/HF/GROQ keys, AI_BASE_URL, REASONING_MODEL
+cp .env.example .env
+
+# In .env, set at minimum:
+#   BACKEND_SHARED_SECRET=<random 32+ byte value>   REQUIRED by /vision, /reason, /interpret
+#   AI_BASE_URL + AI_API_KEY + REASONING_MODEL      reasoning engine
+#   OPENROUTER_API_KEYS / HUGGINGFACE_API_KEYS / GROQ_API_KEYS   VLM rotation (comma-separated lists)
+# Generate the secret with:
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+
 npm install && npm run prepare:local-vision-assets   # SHA-checks model_q4.onnx, bundles vendor/
 npm run build:extensions    # → dist/chrome/ + dist/firefox/
 python3 -m uvicorn server:app --app-dir backend --port 8000   # curl 127.0.0.1:8000/health
 python3 test-server/app.py  # :5000 benchmark portals
 # Chrome: chrome://extensions → Load unpacked → dist/chrome/
+#   then Side Panel → Settings → Backend URL http://localhost:8000 + paste BACKEND_SHARED_SECRET
 # Firefox: about:debugging → Load Temporary Add-on → dist/firefox/manifest.json
 python3 launch_test_browser.py /government-aadhaar.html   # optional auto-launcher
 ```
+
+**The backend token step is mandatory, not optional.** `/vision`, `/reason`, and `/interpret` reject requests without `BACKEND_SHARED_SECRET`, and the extension must present the same value in Settings → backend token. A demo with no token fails at the first request even though `/health` returns 200.
+
+VLM keys are optional as a group but at least one provider must be reachable or `/vision` falls back to the DOM heuristic (provenance `DOM_PLUS_HEURISTIC` / `DOM_ONLY`). Bedrock is an alternative to the `AI_BASE_URL` path — see `.env.example`.
 
 `dist/` is the loadable build (`extension/` is source — `package-extension.mjs` copies, strips tests, validates parsers/secrets/size).
 
 ## 🧪 Testing & Verification
 
 ```bash
-npm test                    # 545 tests across 40 JS files
+npm test                    # 566 tests across 42 JS files
 npm run test:privacy        # sanitization, vault, PII, policy
 npm run test:executor       # validator, risk gate, resolver
 npm run test:reasoning      # understanding, forms, prompts
 npm run test:perception     # fusion, grounding, state model
 npm run test:agent          # FSM, circuit breakers
+npm run test:navigation     # capability-aware navigation helpers
+npm run test:grounding      # task grounding, semantic capability
 npm run test:schemas        # IPC contracts
+npm run test:all            # every JS suite, quoted globs
 python3 -m unittest discover -s tests/security -p 'test_*.py'  # 73 backend security tests
 python3 tests/e2e_master_hardening_suite.py                     # Playwright hardening suite
+python3 tests/e2e_full_suite.py                                  # broader Playwright E2E
+python3 tests/privacy_and_latency_suite.py                       # redaction + timing
 npm run evaluate:vision -- annotations.jsonl --iou 0.5          # needs human-labeled JSONL
 npm run evaluate:agent && npm run evaluate:task-runs            # agent / task-run reports
+python3 tests/visual_qa_sidepanel.py                            # side panel visual QA
 ```
 
-Logs are JSONL and redacted: `backend/logs/backend.jsonl` + Side Panel *Settings → Developer → Download error log*. Packaging fails on version mismatch, shipped tests, leaked keys, unparsable scripts, or oversize bundles.
+`npm test` globs `tests/**/*.test.js` unquoted; `npm run test:all` quotes the globs so Node expands them itself and is the more portable entry point on shells that do not glob `**`.
+
+Logs are JSONL and redacted: `backend/logs/backend.jsonl` (rotating, 8 MiB × 5) + Side Panel *Settings → Developer → Download error log*. Packaging fails on version mismatch, shipped tests, leaked keys, unparsable scripts, or oversize bundles.
 
 ## 🎯 Benchmark Portals (`:5000`)
 
@@ -252,20 +293,56 @@ Logs are JSONL and redacted: `backend/logs/backend.jsonl` + Side Panel *Settings
 - **Guarantees:** no unredacted payloads (`OutboundPolicyViolationError`), fail-closed images, high-risk approval cards, symbolic-only secrets to the cloud.
 - **Prototype limits:** vault in `chrome.storage.local` (encrypted at rest, no OS keychain or user passphrase); regex heuristics cover standard IDs, not arbitrary secrets; arbitrary file picking stays user-directed while named vault documents require HIGH-risk approval; screenshot-box IoU eval needs human-labeled annotations.
 
-Details: `docs/threat-model.md`, `docs/privacy-model.md`, `docs/architecture.md`.
+Details: `docs/threat-model.md`, `docs/privacy-model.md`, `docs/architecture.md`, design rationale in `docs/ARCHITECTURE_DECISIONS.md`.
 
 ## 📂 Repository Layout
 
 ```
-extension/           MV3 source (background, content, privacy, perception, reasoning, executor, sidepanel, shared)
+extension/
+  background/      service worker, agent controller, message router, task manager
+  agent/           step state machine + post-action verifier
+  content/         bounded extractor, synthetic-event executor, log forwarder
+  privacy/         DOM + screenshot sanitizers, PII registry, policy engine, vault + vault crypto
+  perception/      local vision, OCR worker, fusion, provenance, grounding, page modeler, PDF extractor
+  reasoning/       understanding, form reasoning, prompts
+  executor/        validator, risk gate, local value resolver, action executor
+  navigation/      capability-aware navigation helpers
+  runtime/         packaged-model runtime boundary
+  shared/          constants, schemas, message contracts, logger
+  sidepanel/       Side Panel UI (app.js, index.html, styles.css)
+  models/          generated: pinned model_q4.onnx + lang data (do not hand-edit)
+  vendor/          generated: ONNX Runtime Web, PDF.js, Tesseract, transformers
+  manifest.json, manifest.firefox.json
 dist/chrome|firefox  Loadable builds (generated — load these, not extension/)
-backend/             FastAPI VLM + GPT-OSS reasoning + agentic prompt
-test-server/         :5000 benchmark portals (11 pages)
-tests/               JS unit + py security + Playwright E2E + visual QA
-scripts/             prepare-local-vision-assets, package-extension, evaluate_*
-docs/                architecture, privacy-model, threat-model, model-providers, REUSE_AND_ATTRIBUTION
+backend/
+  server.py, config.py, privacy_rules.py, logging_config.py
+  vlm_service.py, gpt_oss_service.py
+  agentic/         fused Planner+Critique call, prompts, schemas, compacted context
+    _upstream/     byte-identical pinned TheAgenticBrowser reference copies
+test-server/       :5000 benchmark portals (11 pages)
+tests/
+  privacy/ executor/ reasoning/ perception/ agent/ navigation/ grounding/ shared/ content/
+  security/        Python backend security tests (73)
+  e2e_master_hardening_suite.py, e2e_full_suite.py, privacy_and_latency_suite.py,
+  visual_qa_sidepanel.py, e2e_support.py, qa_screenshots/
+scripts/           prepare-local-vision-assets.mjs, package-extension.mjs,
+                  evaluate_{vision,agent_models,task_runs}.py, launch_test_browser.py
+                  (note: two launchers — the root launch_test_browser.py opens a benchmark
+                   portal; scripts/launch_test_browser.py opens a general web page)
+docs/
+  architecture.md, privacy-model.md, threat-model.md, model-providers.md
+  ARCHITECTURE_DECISIONS.md, architecture-audit-runanywhere.md, agent-model-evaluation.md
+  REUSE_AND_ATTRIBUTION.md
 ```
 
 ## 📜 Attribution
 
-Clean-room build with audited patterns from **Magnitude Browser Agent** (Apache-2.0: Observe→Act→Verify, minimal a11y tree, stability detection) and **AI Browser Agent** (MIT: intent + progress), plus `transformers` (Apache-2.0), `onnxruntime-web` (MIT), `yolos-tiny` (Apache-2.0), `tesseract.js` (Apache-2.0), and PDF.js 4.10.38 (Apache-2.0). Full notices in `docs/REUSE_AND_ATTRIBUTION.md`.
+Audited sources, patterns, and clean-room implementations are detailed in `docs/REUSE_AND_ATTRIBUTION.md`.
+
+- **Magnitude Browser Agent** (Apache-2.0) — `Observe→Act→Verify` cycle, minimal a11y tree, stability detection. Clean-room reimplementation.
+- **AI Browser Agent** (MIT) — intent parsing and progress reporting. Clean-room reimplementation.
+- **TheAgenticBrowser** (TheAgentic Community License 1.0, pinned commit `71daa28`) — Planner plan/next-step structure, Critique feedback/termination structure, and the Planner → executor → Critique workflow, adapted in `backend/agentic/`. Upstream copies are vendored reference-only under `backend/agentic/_upstream/`; hashes and the required license notice are in `backend/agentic/VENDORING.md`. **That license is not Apache-2.0/MIT:** it restricts Excluded Purposes (competing SaaS/PaaS/IaaS) and grants no sublicensing right, so every recipient must agree to its terms directly.
+- **RunAnywhere on-device browser agent** (Apache-2.0) — studied as a reference; no code, assets, or models taken. Only the WebGPU-with-WASM-fallback execution idea was adopted, reusing the already-packaged `jsep` runtime.
+- **Packaged third-party assets:** `transformers` (Apache-2.0), `onnxruntime-web` (MIT), `yolos-tiny` (see upstream model card), `tesseract.js` + `@tesseract.js-data/eng` (Apache-2.0), PDF.js 4.10.38 (Apache-2.0). `extension/vendor/` and `extension/models/` are generated distributable assets.
+
+Full notices: `docs/REUSE_AND_ATTRIBUTION.md`.

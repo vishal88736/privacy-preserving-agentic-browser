@@ -2043,6 +2043,13 @@ summary:focus-visible {
   font-weight: 600;
 }
 
+.llm-screenshot-preview-note {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
 .llm-screenshot-preview-image {
   display: block;
   width: 100%;

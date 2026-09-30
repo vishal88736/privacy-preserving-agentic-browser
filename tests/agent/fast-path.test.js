@@ -273,3 +273,57 @@ test('controller sends no-change verification into the next planning call', asyn
     else globalThis.chrome = previousChrome;
   }
 });
+
+test('every step reports what was sent to the VLM, including when nothing was', async () => {
+  const previousChrome = globalThis.chrome;
+  const previousTask = taskManager.currentTask;
+  const previousSettings = taskManager.settings;
+  const restore = [];
+  const events = [];
+
+  globalThis.chrome = { tabs: { get: async () => ({ id: 11, url: 'https://example.test/form', windowId: 1 }) } };
+  taskManager.settings = { ...DEFAULT_SETTINGS, alwaysConfirm: false };
+  const task = taskManager.createTask('Read the page', 11);
+  task.taskState = new TaskState(task.prompt);
+  task.taskState.updateFromModel(localInterpretTask(task.prompt));
+
+  restore.push(replaceMethod(defaultActionExecutor, 'execute', async () => ({ success: true })));
+  restore.push(replaceMethod(defaultGPTOSSClient, 'planNextStep', async () => ({
+    thought: 'Nothing to do.', action: { action: 'DONE' }, final_response: 'Read.'
+  })));
+
+  const controller = new AgentController();
+  controller.notify = (event, data) => events.push({ event, data });
+  controller.clearOverlays = () => {};
+  controller._waitForPageStability = async () => {};
+  controller._maybeHandleNavigationBootstrap = async () => ({ handled: false });
+  controller._extractDOM = async () => ({
+    success: true,
+    data: {
+      snapshot_id: 'snap_vlm', mutation_revision: 0,
+      url: 'https://example.test/form', title: 'Form',
+      viewport: { width: 1280, height: 800 },
+      elements: [{ id: 'el_1', tag: 'p', label: 'Body text', value: '', bbox: [0, 0, 200, 40] }],
+      headings: [], result_items: [], visible_text: 'Body text', scroll: { x: 0, y: 0 }
+    }
+  });
+
+  try {
+    await controller.runSingleStep(task);
+    const vlmEvents = events.filter((e) => e.event === 'VLM_SCREENSHOT_DISPATCHED');
+    assert.equal(vlmEvents.length, 1,
+      'the panel must be told about the step even when no image was sent');
+    const { data } = vlmEvents[0];
+    assert.equal(data.sent, false, 'no image left the device, so sent must be false');
+    assert.equal(data.sanitized_screenshot, null);
+    assert.equal(data.task_id, task.id);
+    assert.ok(['skipped', 'unavailable', 'withheld'].includes(data.redaction_status),
+      `unexpected redaction_status: ${data.redaction_status}`);
+  } finally {
+    for (const undo of restore.reverse()) undo();
+    taskManager.currentTask = previousTask;
+    taskManager.settings = previousSettings;
+    if (previousChrome === undefined) delete globalThis.chrome;
+    else globalThis.chrome = previousChrome;
+  }
+});

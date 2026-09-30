@@ -52,7 +52,7 @@ _PROVIDER_ERROR_TEXT = re.compile(
 )
 
 
-def _looks_like_provider_error(text: str) -> bool:
+def looks_like_provider_error(text: str) -> bool:
     """True when model 'content' is actually a gateway/provider error string.
 
     Some gateways return HTTP 200 with the provider's error text as the
@@ -64,6 +64,9 @@ def _looks_like_provider_error(text: str) -> bool:
         return False
     head = text.strip()[:400]
     return bool(_PROVIDER_ERROR_TEXT.search(head))
+
+
+_looks_like_provider_error = looks_like_provider_error
 
 
 def _truncate_image_data_url(url: str, limit: int) -> Optional[str]:
@@ -279,7 +282,7 @@ class VLMService:
                 # provider error text ("ERROR: Cannot read 'clipboard' ...").
                 # That text must never become visual grounding — reject and
                 # rotate like any other provider failure.
-                if _looks_like_provider_error(content):
+                if looks_like_provider_error(content):
                     logger.warning("Provider returned provider error text as content; rotating provider/key",
                                    extra={"provider": candidate["provider"], "model": candidate["model"]})
                     continue
@@ -296,7 +299,7 @@ class VLMService:
                 # The same gateway errors can arrive JSON-wrapped inside the
                 # layout fields — reject those too.
                 if any(
-                    _looks_like_provider_error(str(v))
+                    looks_like_provider_error(str(v))
                     for v in (parsed.get("spatial_layout"), parsed.get("visual_state"), parsed.get("page_type"))
                     if isinstance(v, str)
                 ):

@@ -191,6 +191,12 @@ class RequestGuardMiddleware:
         return await self.app(scope, receive, send)
 
 
+# Middleware execution order:
+# In Starlette / FastAPI, middleware added later executes first (LIFO order).
+# 1. CORSMiddleware (added second) executes FIRST, handling CORS preflight (OPTIONS)
+#    requests without requiring extension auth headers.
+# 2. RequestGuardMiddleware (added first) executes SECOND, enforcing loopback origin,
+#    secret token auth, rate limits, and request body size caps.
 app.add_middleware(RequestGuardMiddleware)
 app.add_middleware(
     CORSMiddleware,

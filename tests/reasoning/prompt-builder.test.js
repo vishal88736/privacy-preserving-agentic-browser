@@ -146,3 +146,45 @@ test('PromptBuilder - compactObservation truncates visible_text to 1200 chars', 
   const result = b.compactObservation(obs, {});
   assert.ok(result.visible_text.length <= 1200, 'visible_text must be truncated to 1200 chars');
 });
+
+// ── Select options must reach the planner ──────────────────────────────────
+//
+// The regression: the planner's contract is "SELECT uses a value that matches a
+// known option for the observed element; if options are missing, do not guess".
+// The option list never reached the payload, so no dropdown on any page could be
+// planned and the model had to ask the user to choose instead.
+
+const selectElement = (options) => ({
+  id: 'el_5',
+  role: 'select',
+  dom: { tag: 'select', type: 'select-one', label: 'Country', value: '', has_value: false, options },
+  interaction: { typeable: false, clickable: true }
+});
+
+test('PromptBuilder - a select carries its options so a value can be chosen', () => {
+  const b = makeBuilder();
+  const obs = makeObs(makeElements([selectElement([
+    { text: 'Choose...', value: '', selected: true },
+    { text: 'India', value: 'IN', selected: false },
+    { text: 'United States', value: 'US', selected: false }
+  ])]));
+  const compact = b.compactElements(obs, makePageState());
+  const select = compact.find((e) => e.id === 'el_5');
+  assert.ok(select, 'the select must be included');
+  assert.ok(Array.isArray(select.options), 'the options must be present');
+  assert.deepEqual(select.options.map((o) => o.value), ['', 'IN', 'US']);
+});
+
+test('PromptBuilder - a long option list is capped', () => {
+  const b = makeBuilder();
+  const many = Array.from({ length: 500 }, (_, i) => ({ text: `Option ${i}`, value: `v${i}` }));
+  const obs = makeObs(makeElements([selectElement(many)]));
+  const compact = b.compactElements(obs, makePageState());
+  assert.equal(compact.find((e) => e.id === 'el_5').options.length, 40);
+});
+
+test('PromptBuilder - a plain input gets no options field', () => {
+  const b = makeBuilder();
+  const compact = b.compactElements(makeObs(), makePageState());
+  assert.equal(compact.find((e) => e.id === 'el_1').options, undefined);
+});
