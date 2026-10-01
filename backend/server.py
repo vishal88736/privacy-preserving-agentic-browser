@@ -207,10 +207,45 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+class RedactionRegion(BaseModel):
+    # These coordinates are REPORTED, never consumed: the server does not use
+    # them to mask anything, it only checks that a coherent audit exists. So
+    # they must accept the geometry real pages actually produce, not the happy
+    # path. content.js bboxOf() returns raw getBoundingClientRect() values with
+    # no clamping, which means negative x/y for a field scrolled out of view or
+    # inside a horizontally-scrolled container, and 0x0 for an element that is
+    # kept despite not being rendered (a display:none file input is retained
+    # deliberately). Rejecting those made /vision return 400 for nearly every
+    # login/upload page, silently degrading the client to DOM_ONLY.
+    category: str = Field(min_length=1, max_length=64)
+    x: float = Field(ge=-100_000)
+    y: float = Field(ge=-100_000)
+    width: float = Field(ge=0)
+    height: float = Field(ge=0)
+    method: str = Field(min_length=1, max_length=32)
+
+class RedactionAudit(BaseModel):
+    status: str
+    coverage: str
+    withheld: bool
+    local_model_completed: bool
+    ocr_completed: bool
+    # A dense page can legitimately mask more than 256 regions (DOM elements
+    # are already capped at 120, plus OCR spans and person boxes). The count is
+    # not a privacy control -- coverage and withheld are -- so cap generously
+    # rather than 400-ing a real screenshot.
+    regions: List[RedactionRegion] = Field(max_length=1024)
+    detected_categories: List[str] = Field(max_length=64)
+
 class VisionRequest(BaseModel):
     task_id: str = Field(min_length=1, max_length=128)
     sanitized_screenshot: str = Field(min_length=1, max_length=1_600_000)
     sanitized_dom: Dict[str, Any] = Field(max_length=128)
+    # Keep the attestation beside the image as well as inside metadata. The
+    # extension currently sends both; modelling the top-level copy prevents a
+    # future client from accidentally sending an image with only an ignored
+    # (extra) field while the server believes the audit was present.
+    redaction_audit: Optional[RedactionAudit] = None
     metadata: Optional[Dict[str, Any]] = Field(default_factory=dict, max_length=64)
 
 class ReasonRequest(BaseModel):
@@ -230,18 +265,52 @@ class InterpretRequest(BaseModel):
 
 @app.get("/health")
 def health_check():
+    # Report the vision model that will ACTUALLY be tried first, not the
+    # provider-agnostic default. With VLM_PROVIDER_ORDER=groq the old response
+    # advertised an OpenRouter model id that is never used and that the
+    # operator may have no key for — which reads as "vision is configured"
+    # while every request 401s or 404s.
+    effective_vlm = settings.VLM_MODEL
+    try:
+        candidates = vlm_service.provider_rotator.ordered_candidates()
+        if candidates:
+            effective_vlm = candidates[0].get("model") or effective_vlm
+    except Exception:
+        # Diagnostics must never fail because the rotator cannot be read.
+        pass
     return {
         "status": "healthy",
         "service": "PrivAgent-Backend",
         "models": {
-            "vlm": settings.VLM_MODEL,
+            "vlm": effective_vlm,
             "reasoning": settings.REASONING_MODEL
-        }
+        },
+        "vlm_providers": [str(name) for name in settings.VLM_PROVIDER_ORDER.split(",") if str(name).strip()],
     }
 
 @app.post("/vision")
 def process_vision(req: VisionRequest):
     try:
+        metadata_audit_data = (req.metadata or {}).get("redaction_audit")
+        if not req.redaction_audit and not metadata_audit_data:
+            raise ValueError("redaction status is missing")
+        try:
+            metadata_audit = RedactionAudit(**metadata_audit_data) if metadata_audit_data else None
+        except Exception as e:
+            raise ValueError(f"redaction audit invalid: {e}")
+        if req.redaction_audit and metadata_audit and req.redaction_audit.model_dump() != metadata_audit.model_dump():
+            raise ValueError("top-level and metadata redaction audits disagree")
+        audit = req.redaction_audit or metadata_audit
+
+        if audit.withheld or audit.status not in {"masked", "checked"}:
+            raise ValueError("screenshot was not confirmed safe to transmit")
+        if audit.coverage != "complete":
+            raise ValueError("redaction coverage is not complete")
+        if not audit.local_model_completed or not audit.ocr_completed:
+            raise ValueError("local model and OCR must both complete")
+        if audit.detected_categories and not audit.regions:
+            raise ValueError("detected sensitive categories have no masked regions")
+
         result = vlm_service.process_visuals(
             task_id=req.task_id,
             sanitized_screenshot=req.sanitized_screenshot,

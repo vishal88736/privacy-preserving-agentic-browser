@@ -140,10 +140,6 @@ export class ScreenshotSanitizer {
     });
   }
 
-  _mockRedactionDataUrl(originalUrl, count) {
-    // Used in unit-test/Node runner environment where Canvas/ImageBitmap is mocked
-    return `${originalUrl}#redacted_${count}_regions`;
-  }
 }
 
 export const defaultScreenshotSanitizer = new ScreenshotSanitizer();

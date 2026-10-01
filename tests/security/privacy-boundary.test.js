@@ -8,6 +8,11 @@ import { LocalVault } from '../../extension/privacy/local-vault.js';
 import { VLMClient } from '../../extension/perception/vlm-client.js';
 import { PolicyEngine } from '../../extension/privacy/policy-engine.js';
 
+// Declared at the top: the tests below read the shipped content script's source
+// text, and a `const` used before its declaration is a ReferenceError, not a
+// compile error.
+const CONTENT_SCRIPT_PATH = fileURLToPath(new URL('../../extension/content/content.js', import.meta.url));
+
 test('screenshot sanitizer masks known DOM region and never returns original bytes in non-canvas runtime', async () => {
   const raw = 'data:image/png;base64,U0VDUkVU';
   const sanitizer = new ScreenshotSanitizer();
@@ -261,7 +266,6 @@ test('the shipped form plan resolves every target before awaiting', () => {
 // it. These helpers read the file that the manifest actually registers and
 // pull out a named method's body, so assertions target production code.
 
-const CONTENT_SCRIPT_PATH = fileURLToPath(new URL('../../extension/content/content.js', import.meta.url));
 
 /** Extract a `name(...) { ... }` method body by brace matching. */
 function extractMethod(source, name) {

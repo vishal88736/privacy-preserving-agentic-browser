@@ -7,8 +7,6 @@
  * L21: Added symbolic token reference guide in prompt
  */
 
-import { ActionType, SymbolicSecretSource } from '../shared/constants.js';
-
 export class PromptBuilder {
   selectRelevantVisibleText(text, task, maxChars = 1200) {
     const source = String(text || '').replace(/\s+/g, ' ').trim();
@@ -88,7 +86,20 @@ export class PromptBuilder {
       }
     }
 
-    return picked.slice(0, 40).map((el) => ({
+    // A file input is the ONLY way to attach a stored document, and UPLOAD cannot
+    // be emitted without a grounded file input. On a long form with more than
+    // 40 typeable controls ahead of it, a flat truncation dropped the file
+    // input from the payload, so the model had nothing to aim UPLOAD at and the
+    // feature became unreachable. Reserve slots for uploadables before
+    // truncating the rest.
+    const MAX_COMPACT_ELEMENTS = 40;
+    const uploadables = picked.filter((el) => el.interaction?.uploadable);
+    const others = picked.filter((el) => !el.interaction?.uploadable);
+    const reserved = Math.min(uploadables.length, MAX_COMPACT_ELEMENTS);
+    const budget = Math.max(0, MAX_COMPACT_ELEMENTS - reserved);
+    const selected = [...others.slice(0, budget), ...uploadables.slice(0, reserved)];
+
+    return selected.map((el) => ({
       id: el.id,
       el_id: el.el_id || el.id,
       role: el.role,

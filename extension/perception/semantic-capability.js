@@ -49,14 +49,6 @@ const MEDIA_CONTROLS = new Set([
   SemanticType.NEXT, SemanticType.PREVIOUS, SemanticType.DOWNLOAD
 ]);
 
-/** Action -> element semantics that contradict it outright (state permitting). */
-const ACTION_CONFLICTS = Object.freeze({
-  TYPE: new Set([SemanticType.VOICE_INPUT, SemanticType.PLAY, SemanticType.PAUSE, SemanticType.NEXT, SemanticType.PREVIOUS, SemanticType.DOWNLOAD, SemanticType.LINK]),
-  SELECT: new Set([SemanticType.VOICE_INPUT, SemanticType.PLAY, SemanticType.PAUSE, SemanticType.NEXT, SemanticType.PREVIOUS, SemanticType.LINK]),
-  CLICK: new Set([]),
-  SUBMIT: new Set([SemanticType.LINK, SemanticType.VOICE_INPUT, SemanticType.NEXT, SemanticType.PREVIOUS, SemanticType.DOWNLOAD])
-});
-
 const SEARCH_HINT = /(?:\b|^)(?:search|query|find|look\s*up)(?:\b|$)/i;
 const VOICE_HINT = /voice|microphone|\bmic\b|speak|dictat|speech/i;
 const UPLOAD_HINT = /upload|attach|\bfile\b|\bimage\b/i;
@@ -95,7 +87,6 @@ function typeable(el, dom) {
  */
 export function classifyElement(el) {
   const dom = (el && typeof el === 'object' && el.dom && typeof el.dom === 'object') ? el.dom : (el || {});
-  const interaction = (el && typeof el === 'object' && el.interaction) || {};
   const tag = String(dom.tag || '').toLowerCase();
   const type = String(dom.type || '').toLowerCase();
   const role = String(dom.role || el?.role || '').toLowerCase();
@@ -298,6 +289,20 @@ const NOISE_HINT = /cookie|privacy policy|terms(?:\s+of\s+use)?|copyright|footer
  * @param {Array<Object>} elements - fused elements (or DOM-ish objects)
  * @param {Object} options - { required: Set<SemanticType>, taskText, excludeIds: Set, capabilityFilter, geometryRef: [x,y] }
  * @returns {Array<Object>} ranked candidates with scores, evidence, conflicts
+ */
+/**
+ * Candidate scoring.
+ *
+ * NOT ON THE LIVE PATH. The ranking the agent actually uses is implemented
+ * independently in `task-grounding.js` (`ground()`), which is what
+ * `page-state-modeler.js` calls to produce `ranked_candidates`. This pair is
+ * exercised only by `tests/grounding/semantic-grounding.test.js`.
+ *
+ * Two divergent implementations of one capability is a trap: reading this file
+ * suggests ranking flows through here, and it does not. Kept because the tests
+ * pin real behaviour (tie detection, order independence, required-capability
+ * filtering) that the live path should eventually be held to as well. If you
+ * change ranking semantics, change task-grounding.js and reconcile this.
  */
 export function rankCandidates(elements, { required = new Set(), taskText = '', excludeIds = new Set(), capabilityFilter = null, geometryRef = null } = {}) {
   const isConflict = conflictsFor(required);

@@ -240,7 +240,7 @@ export function parseTaskSemantics(rawPrompt) {
 
   // search_query is only meaningful for search/select flows. For form, auth,
   // upload, and booking tasks the "query" would just echo the whole request.
-  let search_query = intent === 'search_and_select' ? search_query_init : null;
+  const search_query = intent === 'search_and_select' ? search_query_init : null;
   if (intent === 'search_and_select' && !search_query) ambiguities.push('search query is unclear');
   const asks_to_select_result = Boolean(ranking_constraint || explicitMediaAction ||
     /\b(open|click|select|choose|pick)\b.{0,50}\b(first|second|third|cheapest|latest|matching|result|item|product|video|song|listing|option|one|it|them|this|that)\b/i.test(positiveText));
@@ -445,7 +445,7 @@ export class TaskState {
   // Backward-compatible alias: advance(action, observation, result).
   // Advances one subgoal on successful non-WAIT actions; syncs when the
   // observation shows we reached a new stage (e.g. results page).
-  advance(action = null, observation = null, result = null) {
+  advance(action = null, _observation = null, result = null) {
     const ok = !result || result.success !== false;
     const verb = action?.action || action;
     if (!ok) return false;

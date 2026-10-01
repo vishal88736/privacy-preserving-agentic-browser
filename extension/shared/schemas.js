@@ -114,14 +114,23 @@ export function validateAction(action) {
     if (action.value_source !== undefined && !isDocumentToken(action.value_source)) {
       throw new ValidationError('UPLOAD may only reference a stored document (LOCAL_DOCUMENT_<NAME>)');
     }
-    if (action.value) {
+    // `!= null`, not truthiness: the planner sends "value": null beside a
+    // value_source token, and this must agree with action-executor's UPLOAD
+    // guard rather than letting the two layers disagree about "absent".
+    if (action.value != null) {
       throw new ValidationError('UPLOAD takes no inline value; the document is selected by value_source only');
     }
   }
 
   if (action.action === ActionType.FILL_FORM_PLAN) {
-    if (!action.value || !Array.isArray(action.value.fields) || action.value.fields.length === 0 || action.value.fields.length > 100) {
-      throw new ValidationError('FILL_FORM_PLAN requires a bounded, non-empty fields array');
+    // Cap matches the planner prompt (12) and, more importantly, the executor's
+    // own time budget: each field costs a settle wait of 150-500ms plus fixed
+    // sleeps, so a 100-field plan cannot finish inside
+    // CHROME_API_TIMEOUT_MS. The background would time out at 10s while the
+    // content script kept writing fields, and its in-flight guard would then
+    // reject the next EXTRACT_DOM with "Another page action is still running".
+    if (!action.value || !Array.isArray(action.value.fields) || action.value.fields.length === 0 || action.value.fields.length > 12) {
+      throw new ValidationError('FILL_FORM_PLAN requires a bounded (1-12) non-empty fields array');
     }
     const seen = new Set();
     const allowedControls = new Set(['TEXT', 'EMAIL', 'PHONE', 'NUMBER', 'DATE', 'TEXTAREA', 'SELECT', 'CHECKBOX', 'RADIO']);

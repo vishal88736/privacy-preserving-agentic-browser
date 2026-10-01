@@ -177,3 +177,87 @@ test('friendlyError explains when a successful action could not be confirmed', (
   assert.match(result.error, /could not confirm/i);
   assert.match(result.hint, /may still have succeeded/i);
 });
+
+test('friendlyError explains local privacy categories without showing matched values', () => {
+  const result = friendlyError('Outbound policy blocked payload: Unredacted Aadhaar pattern found in request body');
+  assert.match(result.error, /possible Aadhaar number/i);
+  assert.match(result.hint, /request was not sent/i);
+  assert.doesNotMatch(JSON.stringify(result), /1234\s?5678\s?9012/);
+});
+
+test('friendlyError keeps the planner-unavailable cause instead of the generic default', () => {
+  // The controller hands friendlyError a message that already contains the
+  // remedy. It must not collapse "nothing is listening" and "the backend hung"
+  // into one indistinguishable sentence.
+  const unreachable = friendlyError(
+    'Planner unavailable: the reasoning backend could not be reached (fetch failed).'
+  );
+  assert.match(unreachable.error, /could not reach the reasoning backend/i);
+  assert.match(unreachable.hint, /fetch failed/,
+    'the underlying cause must survive into the hint');
+
+  const timeout = friendlyError(
+    'Planner unavailable: the reasoning backend could not be reached (The operation was aborted).'
+  );
+  assert.match(timeout.hint, /aborted/);
+  assert.doesNotMatch(JSON.stringify(timeout), /undefined/);
+});
+
+test('friendlyError on a planner-unavailable message never leaks page content', () => {
+  // The detail is interpolated into the hint, so it must come from the error
+  // object only -- never from page text that reached the planner.
+  const result = friendlyError(
+    'Planner unavailable: the reasoning backend could not be reached (TypeError: Failed to fetch).'
+  );
+  assert.doesNotMatch(result.error, /TypeError|Failed to fetch/,
+    'the raw exception type belongs in logs, not the user-facing headline');
+});
+
+// ── Every wait on the side panel is bounded ───────────────────────────────
+//
+// Three waits in the loop resolve only when the side panel answers: the
+// approval card, the ASK_USER modal, and resume-after-pause. The first two
+// already had deadlines; the pause wait did not, so a closed or crashed panel
+// left the task parked in PAUSED forever with nothing logged and no way to
+// reach a terminal state. This asserts all three carry a bound.
+
+test('all three panel-dependent waits are bounded', async () => {
+  const { readFileSync } = await import('node:fs');
+  const source = readFileSync(
+    new URL('../../extension/background/agent-controller.js', import.meta.url),
+    'utf8'
+  );
+  for (const constant of ['CONFIRMATION_TIMEOUT_MS', 'USER_INPUT_TIMEOUT_MS', 'PAUSE_TIMEOUT_MS']) {
+    assert.match(source, new RegExp(`const ${constant} = \\d+;`),
+      `${constant} must be a declared, finite bound`);
+  }
+  // Each of the three waits must race against a timer, not await bare.
+  const races = source.match(/Promise\.race\(\[/g) || [];
+  assert.ok(races.length >= 3,
+    `expected at least three Promise.race waits, found ${races.length}`);
+  // The pause wait specifically: it must RACE a timer. A bare await here is the
+  // exact shape of the bug -- a promise that only the side panel can resolve, so
+  // a closed panel parks the task forever. Checked by body, not by counting
+  // Promise.race occurrences, so an unrelated race elsewhere cannot mask it.
+  const waitBody = source.slice(source.indexOf('async _waitWhilePaused('));
+  const waitEnd = waitBody.indexOf('\n  }\n');
+  const pauseWait = waitBody.slice(0, waitEnd === -1 ? undefined : waitEnd);
+  assert.match(pauseWait, /Promise\.race\(/,
+    'the pause wait must race a timeout');
+  assert.match(pauseWait, /PAUSE_TIMEOUT_MS/,
+    'the pause wait must use its declared bound');
+  assert.doesNotMatch(pauseWait, /^\s*await this\._awaitOwned\(task, token, new Promise\(\(resolve\) => \{ this\.pauseResolver = resolve; \}\)\);$/m,
+    'a bare await on the pause resolver is the unbounded-wait bug');
+});
+
+test('resumeTask clears the pause expiry timer', async () => {
+  const { readFileSync } = await import('node:fs');
+  const source = readFileSync(
+    new URL('../../extension/background/agent-controller.js', import.meta.url),
+    'utf8'
+  );
+  const body = source.slice(source.indexOf('  resumeTask() {'));
+  const end = body.indexOf('\n  }\n');
+  assert.match(body.slice(0, end === -1 ? undefined : end), /_pauseExpiryTimer/,
+    'resuming must clear the timer, or it outlives the pause it watches');
+});

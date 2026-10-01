@@ -65,10 +65,88 @@ export class RiskGate {
           reason: `Security Block: the target element for local secret (${value_source || nestedSources.join(', ')}) could not be verified, so the value was not written.`
         };
       }
-      const targetTexts = candidateDoms.map((dom) => [
-        dom?.label, dom?.ariaLabel, dom?.accessible_name, dom?.text, dom?.name, dom?.placeholder, dom?.type
-      ].filter((part) => typeof part === 'string').join(' ').toLowerCase());
-      if (targetTexts.some((text) => /search|query|find|google|bing|duckduckgo/i.test(text))) {
+      // Exfiltration guard: a protected value must never reach something that would
+      // publish it.
+      //
+      // Two failure modes to avoid at once. Matching /search|find|query/ against
+      // free label text blocked legitimate fields that merely mentioned those
+      // words ("Search patient records", "Findings", "Query filters"). But
+      // anchoring the regex to the whole field name was too narrow in the other
+      // direction: the content script never emits a page `id` (registry ids are
+      // synthetic el_N) and normalises `name` through
+      // sanitizeFieldIdentifier, so name="search_query" arrives as the string
+      // "search query" -- two words, which an anchored ^…$ test misses. So the
+      // search vocabulary is matched as a SET OF TOKENS on the fields that
+      // actually exist, and a field qualifies when its identity is search-shaped
+      // rather than when its sentence happens to contain the word.
+      const SEARCH_TOKENS = new Set([
+        'search', 'q', 'query', 'querytext', 'searchbox', 'keyword', 'keywords',
+        'find', 'finder', 'site', 'term', 'terms'
+      ]);
+      const identityTokens = (raw) => String(raw || '')
+        .toLowerCase()
+        .split(/[^a-z0-9]+/)
+        .filter(Boolean);
+      // "search_query" -> {search, query}; "research" -> {research}; "" -> {}
+      const looksLikeSearchIdentity = (fieldValue) => {
+        const tokens = identityTokens(fieldValue);
+        if (!tokens.length) return false;
+        return tokens.some((token) => SEARCH_TOKENS.has(token));
+      };
+      const isPublicSearchTarget = (dom) => {
+        if (!dom) return false;
+        const tag = String(dom.tag || '').toLowerCase();
+        const type = String(dom.type || '').toLowerCase();
+        // Only a text-like control can leak a typed secret into a query string.
+        // A password/select/checkbox destination is not a search box; it is
+        // handled by the ordinary value-write rules instead.
+        if (tag !== 'input' && tag !== 'textarea') return false;
+        if (type && !['text', 'search', 'email', 'tel', 'url', ''].includes(type)) return false;
+        if (type === 'search') return true;
+        // name is the strongest signal, and it is tokenised above.
+        if (looksLikeSearchIdentity(dom.name)) return true;
+        // A placeholder or accessible name that IS the search affordance.
+        //
+        // Only the placeholder is trusted for this, because a placeholder is
+        // written to invite input into this control, whereas a resolved label is
+        // a sentence about the field ("Search patient records", "Query
+        // filters") that can easily mention the word without being a search box.
+        // An exact-or-near-exact match is used rather than a length heuristic:
+        // "Search", "Search site", "Search filters" are affordances; "Search
+        // patient records" is a description.
+        const placeholder = String(dom.placeholder || '').trim();
+        if (placeholder && /^(?:search|find|query|filter|keywords?)\b/i.test(placeholder)
+            && identityTokens(placeholder).length <= 3) {
+          return true;
+        }
+        // accessible_name is the resolved label (the extractor sets both to the same
+        // value), so `label` must be read too or a labelled search box slips
+        // through. It qualifies only when it is essentially nothing BUT the
+        // search word, which is how a compact search box presents itself --
+        // "Search" or "Search YouTube" are affordances, whereas "Search patient
+        // records" is a sentence describing some other field.
+        const accessible = String(dom.accessible_name || dom.ariaLabel || dom.label || '').trim();
+        if (accessible) {
+          const tokens = identityTokens(accessible);
+          const keywordCount = tokens.filter((token) => SEARCH_TOKENS.has(token)).length;
+          // A STRONG keyword (search/find) is enough on its own. A weak one
+          // (query/term/filter/keyword) only counts when it stands alone,
+          // because "Query filters" is a description of a filter control while
+          // a field named just "Query" is a query box.
+          const strong = /^(?:search|find)\b/i.test(accessible);
+          const weakOnly = !strong && tokens.every((token) => SEARCH_TOKENS.has(token));
+          if (keywordCount > 0 && (strong ? tokens.length <= keywordCount + 1 : weakOnly)) {
+            return true;
+          }
+        }
+        // A form whose action points at a search endpoint. The extractor emits
+        // form_id (not a form object), so the URL itself has to come from the
+        // observation when it is present.
+        const formAction = String(dom.form_action || dom.formAction || '').toLowerCase();
+        if (formAction && /[?&](?:q|query|search|keywords)=/.test(formAction)) return true;
+        return false;
+      };
+      if (candidateDoms.some(isPublicSearchTarget)) {
         return {
           allowed: false,
           risk: RiskLevel.CRITICAL,

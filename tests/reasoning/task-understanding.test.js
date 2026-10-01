@@ -237,4 +237,55 @@ test('interpretTask privacy failure stays unknown and reports a blocked unsent c
   assert.equal(result.intent, 'unknown');
   assert.equal(result.remoteCallAttempted, false);
   assert.equal(result.privacyBlocked, true);
+  assert.equal(result.privacyBlockMessage, 'synthetic outbound block');
+});
+
+// ── Planner-unavailable reporting ──────────────────────────────────────────
+//
+// The controller fails the task the moment the planner reports unavailable,
+// so whatever this returns is the ONLY thing the user sees. A single generic
+// "check the backend configuration" line was useless: the remedy differs
+// completely between nothing listening on the port, a backend that hung after
+// accepting the connection, and a backend that answered 5xx.
+
+test('planner-unavailable distinguishes unreachable from timeout and server error', async () => {
+  const client = new GPTOSSClient('http://backend.test');
+
+  const unreachable = client._plannerUnavailable(new TypeError('fetch failed'));
+  assert.equal(unreachable.plannerUnavailable, true);
+  assert.equal(unreachable.unavailableKind, 'unreachable');
+  assert.match(unreachable.unavailableAdvice, /uvicorn/,
+    'an unreachable backend must name the command that starts it');
+
+  const timeout = client._plannerUnavailable(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+  assert.equal(timeout.unavailableKind, 'timeout');
+  assert.match(timeout.unavailableAdvice, /25s|did not answer/,
+    'a timeout must say the backend accepted the request but went quiet');
+
+  const serverError = client._plannerUnavailable(new Error('reason returned 503'));
+  assert.equal(serverError.unavailableKind, 'server_error');
+  assert.match(serverError.unavailableAdvice, /server error/i);
+
+  const rejected = client._plannerUnavailable(new Error('reason returned 404'));
+  assert.equal(rejected.unavailableKind, 'rejected');
+});
+
+test('planner-unavailable never claims a backend that merely hung is missing', async () => {
+  const client = new GPTOSSClient('http://backend.test');
+  // The distinction matters because the two remedies are opposite: start the
+  // backend, versus investigate the backend log.
+  const timeout = client._plannerUnavailable(Object.assign(new Error('x'), { name: 'AbortError' }));
+  assert.doesNotMatch(timeout.unavailableAdvice, /Start the backend/);
+  const unreachable = client._plannerUnavailable(new TypeError('fetch failed'));
+  assert.match(unreachable.unavailableAdvice, /Start the backend/);
+});
+
+test('the planner-unavailable trace reports a kind, not a raw error name', async () => {
+  const client = new GPTOSSClient('http://backend.test');
+  const result = client._plannerUnavailable(new TypeError('fetch failed'));
+  // The trace is surfaced in the side panel diagnostics, so it must be one of
+  // the known kinds rather than an exception class name.
+  assert.match(result.model_trace.reason, /^(?:unreachable|timeout|server_error|rejected)$/);
+  assert.equal(result.remoteCallAttempted, true);
+  assert.equal(result.isTerminal, false);
 });

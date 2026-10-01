@@ -1326,7 +1326,7 @@ class SidePanelApp {
       : 'No documents stored yet.');
   }
 
-  vaultDocumentRow(existingName = '', existingFile = '', existingMime = '', existingBytes = null) {
+  vaultDocumentRow(existingName = '', existingFile = '', _existingMime = '', existingBytes = null) {
     const field = document.createElement('div');
     field.className = 'vault-field vault-doc-field';
 
@@ -1689,16 +1689,31 @@ class SidePanelApp {
       return;
     }
 
-    image.src = latest.screenshot;
-    frame.hidden = false;
-    empty.hidden = true;
-    const label = latest.redactionStatus === 'masked'
-      ? 'Masked before sending'
-      : latest.redactionStatus === 'checked'
-        ? 'Sent, no known regions to mask'
-        : 'Privacy status unavailable';
-    status.textContent = latest.step ? `Step ${latest.step} · ${label}` : label;
-    status.dataset.state = latest.redactionStatus;
+    // A preview is pushed with screenshot === null whenever the image was
+    // withheld or skipped, so the empty-list check above is not enough:
+    // assigning img.src = null requests chrome-extension://<id>/sidepanel/null,
+    // 404s, and fires an uncaught window error on every re-render.
+    const latestSrc = latest.screenshot;
+    if (!latestSrc) {
+      image.removeAttribute('src');
+      frame.hidden = true;
+      empty.hidden = false;
+      status.textContent = latest.redactionStatus === 'withheld' || latest.redactionStatus === 'skipped'
+        ? 'No image sent for this step'
+        : 'No image available for this step';
+      status.dataset.state = 'idle';
+    } else {
+      image.src = latestSrc;
+      frame.hidden = false;
+      empty.hidden = true;
+      const label = latest.redactionStatus === 'masked'
+        ? 'Masked before sending'
+        : latest.redactionStatus === 'checked'
+          ? 'Sent, no known regions to mask'
+          : 'Privacy status unavailable';
+      status.textContent = latest.step ? `Step ${latest.step} · ${label}` : label;
+      status.dataset.state = latest.redactionStatus;
+    }
 
     const older = this.vlmScreenshotPreviews.slice(1);
     if (count) count.textContent = String(older.length);

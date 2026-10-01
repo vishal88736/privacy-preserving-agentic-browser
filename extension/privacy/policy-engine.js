@@ -241,6 +241,7 @@ function collectImageDataUrls(payload) {
  */
 function collectRedactionAttestations(payload) {
   const attestations = new Map();
+  const unattachedAudits = [];
   const explicitFlag = (audit, snakeCase, camelCase, expected) => {
     const hasSnake = Object.prototype.hasOwnProperty.call(audit, snakeCase);
     const hasCamel = Object.prototype.hasOwnProperty.call(audit, camelCase);
@@ -249,6 +250,34 @@ function collectRedactionAttestations(payload) {
         (hasCamel && typeof audit[camelCase] !== 'boolean')) return false;
     if (hasSnake && hasCamel && audit[snakeCase] !== audit[camelCase]) return false;
     return (hasSnake ? audit[snakeCase] : audit[camelCase]) === expected;
+  };
+
+  // The controller sends the structured audit (status/coverage/etc.); older
+  // callers use the boolean fields. Accept either complete format, but if both
+  // appear they must agree rather than letting one override the other's
+  // failure. A partial structured audit is never sufficient.
+  //
+  // This was previously written out twice -- once for an audit sitting beside
+  // its image and once for an image-less copy found in metadata -- and the two
+  // copies had already begun to differ. One definition, both call sites.
+  const deriveAttestation = (audit) => {
+    const has = (key) => Object.prototype.hasOwnProperty.call(audit, key);
+    const modern = ['status', 'coverage', 'withheld', 'local_model_completed',
+      'ocr_completed', 'regions', 'detected_categories'].some(has);
+    const legacy = ['screenshot_withheld', 'coverage_established',
+      'coverageEstablished', 'local_vision_completed', 'localVisionCompleted'].some(has);
+    return {
+      withheld: audit.screenshot_withheld === true || audit.withheld === true || audit.status === 'withheld',
+      withheldStatusPresent: (!modern || (audit.withheld === false &&
+        ['masked', 'checked'].includes(audit.status))) &&
+        (!legacy || explicitFlag(audit, 'screenshot_withheld', 'withheld', false)),
+      coverageEstablished: (!modern || audit.coverage === 'complete') &&
+        (!legacy || explicitFlag(audit, 'coverage_established', 'coverageEstablished', true)),
+      localVisionCompleted: (!modern || (audit.local_model_completed === true &&
+        audit.ocr_completed === true && Array.isArray(audit.regions) &&
+        Array.isArray(audit.detected_categories))) &&
+        (!legacy || explicitFlag(audit, 'local_vision_completed', 'localVisionCompleted', true))
+    };
   };
   const walk = (value) => {
     if (Array.isArray(value)) {
@@ -259,17 +288,14 @@ function collectRedactionAttestations(payload) {
     const audit = value.redaction_audit || value.privacy_redaction_summary;
     if (audit && typeof audit === 'object') {
       const image = value.image || value.sanitized_screenshot || value.screenshot;
-      if (typeof image === 'string' && /^data:image\/[^;]+;base64,/i.test(image)) {
-        const current = {
-          // An explicit `screenshot_withheld` flag means the sanitizer replaced
-          // the image with a placeholder; those bytes must never be sent.
-          withheld: audit.screenshot_withheld === true || audit.withheld === true,
-          // Missing or malformed properties are unproven. Only explicit
-          // booleans from the local audit can authorize image transmission.
-          withheldStatusPresent: explicitFlag(audit, 'screenshot_withheld', 'withheld', false),
-          coverageEstablished: explicitFlag(audit, 'coverage_established', 'coverageEstablished', true),
-          localVisionCompleted: explicitFlag(audit, 'local_vision_completed', 'localVisionCompleted', true)
-        };
+      const hasImage = typeof image === 'string' && /^data:image\/[^;]+;base64,/i.test(image);
+      if (!hasImage) {
+        // VLMClient places the same audit both beside the image and inside
+        // metadata. Keep image-less copies so a contradictory nested copy
+        // cannot silently bypass the stricter top-level audit.
+        unattachedAudits.push(audit);
+      } else {
+        const current = deriveAttestation(audit);
         const previous = attestations.get(image);
         // The client places an audit both beside the image and in metadata.
         // Merge duplicate records conservatively: one missing, false, or
@@ -286,6 +312,22 @@ function collectRedactionAttestations(payload) {
     Object.values(value).forEach(walk);
   };
   walk(payload);
+
+  // An audit nested in metadata has no image property of its own, but the
+  // VLM client intentionally duplicates the audit there. Apply those copies
+  // to every image in this payload; merging conservatively means any missing,
+  // false, or conflicting duplicate still blocks transmission.
+  for (const audit of unattachedAudits) {
+    const current = deriveAttestation(audit);
+    for (const [image, previous] of attestations) {
+      attestations.set(image, {
+        withheld: previous.withheld || current.withheld,
+        withheldStatusPresent: previous.withheldStatusPresent && current.withheldStatusPresent,
+        coverageEstablished: previous.coverageEstablished && current.coverageEstablished,
+        localVisionCompleted: previous.localVisionCompleted && current.localVisionCompleted
+      });
+    }
+  }
   return attestations;
 }
 

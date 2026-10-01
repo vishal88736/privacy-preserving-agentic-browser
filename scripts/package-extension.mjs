@@ -66,9 +66,9 @@ try {
     const isContentScript = relative.startsWith(`content${path.sep}`);
     for (const asModule of isContentScript ? [true, false] : [true]) {
       const grammar = asModule ? 'esm' : 'classic';
-      const target = path.join(scratch, `check-${grammar}.${asModule ? 'mjs' : 'cjs'}`);
-      await writeFile(target, await readFile(file));
-      const result = await run(process.execPath, ['--check', target]);
+      const checkTarget = path.join(scratch, `check-${grammar}.${asModule ? 'mjs' : 'cjs'}`);
+      await writeFile(checkTarget, await readFile(file));
+      const result = await run(process.execPath, ['--check', checkTarget]);
       if (result.code !== 0) {
         parseFailures.push(`${relative} (${grammar}): ${result.stderr.split('\n').find((l) => l.includes('Error')) ?? 'parse failed'}`);
       }

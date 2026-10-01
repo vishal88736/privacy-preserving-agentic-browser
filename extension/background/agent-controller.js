@@ -21,6 +21,7 @@ import { taskManager } from './task-manager.js';
 import { defaultDOMSanitizer } from '../privacy/dom-sanitizer.js';
 import { defaultPolicyEngine } from '../privacy/policy-engine.js';
 import { defaultLocalVault } from '../privacy/local-vault.js';
+import { sanitizeTelemetry } from '../privacy/telemetry-sanitizer.js';
 import { defaultScreenshotSanitizer } from '../privacy/screenshot-sanitizer.js';
 import { defaultScreenshotService } from '../perception/screenshot.js';
 import { defaultVLMClient } from '../perception/vlm-client.js';
@@ -29,6 +30,7 @@ import { defaultGPTOSSClient } from '../reasoning/gpt-oss-client.js';
 import { defaultRiskGate } from '../executor/risk-gate.js';
 import { defaultActionValidator } from '../executor/action-validator.js';
 import { defaultActionExecutor } from '../executor/action-executor.js';
+import { defaultLocalValueResolver } from '../executor/local-value-resolver.js';
 import { AgentLoopState, AgentLoopStateMachine } from '../agent/state-machine.js';
 import { actionVerificationSummary, defaultActionVerifier } from '../agent/verifier/action-verifier.js';
 import { createDefaultPlannerChain } from '../reasoning/providers/planner-provider.js';
@@ -51,8 +53,21 @@ const MAX_VERIFICATION_NO_PROGRESS = 3;
 const ACTIONS_EXPECTING_VISIBLE_CHANGE = new Set([
   ActionType.CLICK, ActionType.TYPE, ActionType.SELECT, ActionType.CHECK,
   ActionType.UNCHECK, ActionType.SUBMIT, ActionType.NAVIGATE,
-  ActionType.GO_BACK, ActionType.GO_FORWARD
+  ActionType.GO_BACK, ActionType.GO_FORWARD,
+  // UPLOAD and FILL_FORM_PLAN both report success while changing the page.
+  // Excluded, a no-op upload looked like progress and the loop spun instead
+  // of counting it toward MAX_VERIFICATION_NO_PROGRESS.
+  ActionType.UPLOAD, ActionType.FILL_FORM_PLAN
 ]);
+// Upper bound on how long a step may sit in WAITING_FOR_USER. Long enough for
+// a human to read the approval card, short enough that a dead side panel
+// surfaces as a failure instead of an indefinite stall.
+const CONFIRMATION_TIMEOUT_MS = 120000;
+// The same bound for an ASK_USER round trip. Both waits resolve only when the
+// side panel answers, so both need a deadline or a dead panel parks the loop.
+const USER_INPUT_TIMEOUT_MS = 180000;
+// A pause is user-initiated, so this is longer: the user may simply be away.
+const PAUSE_TIMEOUT_MS = 600000;
 const NAV_VERIFY_TIMEOUT_MS = 12000;
 const NAV_VERIFY_POLL_MS = 500;
 const CHROME_API_TIMEOUT_MS = 10000;
@@ -220,6 +235,28 @@ export function observedControlType(tag, type, role = '', isContentEditable = fa
   return null;
 }
 
+function clarificationFieldMetadata(fields, observation) {
+  return (Array.isArray(fields) ? fields : []).map((field) => {
+    const observed = (observation?.elements || []).find((element) =>
+      (element?.id || element?.element_id || element?.el_id) === field?.field_id
+    );
+    const dom = observed?.dom || observed || {};
+    const tag = dom.tag || dom.element_type || '';
+    const type = dom.type || dom.input_type || '';
+    const metadata = {
+      field_id: field.field_id,
+      label: String(dom.label || observed?.label || field.field_id || 'Protected field').slice(0, 120),
+      semantic_type: field.semantic_type || dom.semantic_type || 'SENSITIVE',
+      input_type: String(type || 'text').slice(0, 40),
+      element_type: String(tag || 'input').slice(0, 40),
+      placeholder: String(dom.placeholder || '').slice(0, 120),
+      control_type: field.control_type || observedControlType(tag, type, dom.role, dom.is_contenteditable === true) || 'TEXT'
+    };
+    if (Array.isArray(dom.options)) metadata.options = dom.options.slice(0, 40);
+    return metadata;
+  });
+}
+
 function formGroupForAction(action, observation) {
   const groups = new Set();
   for (const elementId of actionTargetIds(action)) {
@@ -310,6 +347,10 @@ function isFormMutationAction(action) {
     .includes(String(action || '').toUpperCase());
 }
 
+function taskExplicitlyAvoidsSubmission(prompt) {
+  return /\b(?:do\s+not|don't|never|without)\s+(?:ever\s+)?(?:submit|send|apply|post)\b/i.test(String(prompt || ''));
+}
+
 function formTouchedByVerifiedStep(task, observation, verificationContext) {
   const verified = verifiedStep(task, observation, verificationContext);
   if (!verified || verified.verification.visible_state_changed !== true ||
@@ -359,7 +400,7 @@ function playControlWasClicked(verified) {
     target?.dom?.title
   ].filter((value) => typeof value === 'string');
   const playControlLabel = /^\s*(?:play|resume)(?:\s+(?:(?:the\s+)?video|media|playback|button))?[\s.!…]*$/i;
-  if (Boolean(targetId && labels.some((label) => playControlLabel.test(label)))) return true;
+  if (targetId && labels.some((label) => playControlLabel.test(label))) return true;
   // Also treat clicking a video link, thumbnail, or media item on a video site as a play trigger
   const tag = String(target?.tag || target?.dom?.tag || '').toLowerCase();
   const role = String(target?.role || target?.dom?.role || '').toLowerCase();
@@ -480,17 +521,46 @@ export function unmetRequiredFields(task, fusedObservation, verificationContext 
     fieldLabelInObservation(fusedObservation, field.id).slice(0, 60)
   ]));
   return fields
-    .filter((field) => field?.state === 'EMPTY' && (
-      field?.required === true || fieldExplicitlyRequested(task, labels.get(field.id))
-    ))
+    .filter((field) => field?.state === 'EMPTY' && isUnmetField(task, field, labels.get(field.id)))
     .map((field) => labels.get(field.id) || field.semantic_type || field.id)
     .slice(0, 8);
 }
 
-// Backward-compatible alias (PLAY-only entry point used by earlier revision).
-export function isPlayTaskSatisfied(task, fusedObservation, verificationContext = null) {
-  const status = taskGoalStatus(task, fusedObservation, verificationContext);
-  return status?.satisfied === true && /playing/i.test(status.message);
+/**
+ * Whether an empty field blocks a claimed completion.
+ *
+ * `required` is authoritative when the page states it, in BOTH directions: a
+ * field the page marks optional is optional, and the recognised-name heuristic
+ * must not override that. The heuristic exists only for the common case where
+ * the page states nothing at all -- most real forms, and every page in
+ * test-server/pages, declare no `required` attribute, so required_empty was
+ * permanently 0, this guard never fired, and the agent would submit a
+ * half-filled form and report DONE.
+ */
+function isUnmetField(task, field, label) {
+  if (field?.state !== 'EMPTY') return false;
+  if (field?.required === true) return true;
+  if (field?.required === false) return false;
+  return fieldExplicitlyRequested(task, label) || isRecognisedProfileField(label, field);
+}
+
+/**
+ * Field labels that are unambiguously part of an identity/contact form.
+ *
+ * Used only to decide whether an EMPTY field blocks completion, so the list is
+ * deliberately narrow: it names the fields a user asking to "fill this form"
+ * always means, and nothing that could plausibly be optional.
+ */
+const RECOGNISED_PROFILE_FIELD = /^(?:full[\s_-]?name|first[\s_-]?name|last[\s_-]?name|surname|middle[\s_-]?name|full[\s_-]?name[\s_-]?\(.*\)|email[\s_-]?address|e[\s_-]?mail|phone[\s_-]?number|mobile[\s_-]?number|telephone|contact[\s_-]?number|date[\s_-]?of[\s_-]?birth|dob|birth[\s_-]?date|address|street[\s_-]?address|house[\s_-]?no|flat[\s_-]?no|city|town|state|district|pin[\s_-]?code|zip[\s_-]?code|postal[\s_-]?code|country|nationality|aadhaar|aadhar|uid[\s_-]?(?:ai)?|pan|passport[\s_-]?no|voter[\s_-]?id|dl[\s_-]?no|licence[\s_-]?no|gender|username|user[\s_-]?name|password|date[\s_-]?of[\s_-]?issue|expiry(?:[\s_-]?date)?)$/i;
+
+function isRecognisedProfileField(label, field) {
+  const text = String(label || '').trim();
+  if (text) {
+    // Strip any parenthetical qualifier the page added, e.g. "First Name (React-like)".
+    const base = text.replace(/\([^)]*\)/g, ' ').replace(/\s+/g, ' ').trim();
+    if (RECOGNISED_PROFILE_FIELD.test(base)) return true;
+  }
+  return RECOGNISED_PROFILE_FIELD.test(String(field?.semantic_type || '').trim());
 }
 
 export class AgentController {
@@ -503,6 +573,7 @@ export class AgentController {
     this.pendingUserInputResolver = null;
     this.runToken = 0;
     this.pauseResolver = null;
+    if (this._pauseExpiryTimer) { clearTimeout(this._pauseExpiryTimer); this._pauseExpiryTimer = null; }
     this.pausedFromState = null;
     this.plannerProvider = plannerProvider;
     this.loopMachines = new WeakMap();
@@ -533,9 +604,13 @@ export class AgentController {
 
   notify(event, data) {
     taskManager.persist();
+    // UI events are another storage/display boundary. Do not expose raw model
+    // thoughts, inline action values, page errors, or extracted text merely
+    // because they arrived through a notification instead of task history.
+    const safeData = sanitizeTelemetry(data);
     for (const listener of this.listeners) {
       try {
-        listener(event, data);
+        listener(event, safeData);
       } catch (err) {
         log.exception('Listener notification threw', err);
       }
@@ -558,6 +633,7 @@ export class AgentController {
     if (this.pauseResolver) {
       this.pauseResolver();
       this.pauseResolver = null;
+    if (this._pauseExpiryTimer) { clearTimeout(this._pauseExpiryTimer); this._pauseExpiryTimer = null; }
     }
     this.pausedFromState = null;
     if (previousTask && ![AgentState.COMPLETED, AgentState.FAILED, AgentState.CANCELLED].includes(previousTask.state)) {
@@ -623,7 +699,11 @@ export class AgentController {
 
     if (interpretation.privacyBlocked) {
       taskManager.updatePrivacyMetrics({ privacyBlocks: 1 }, task);
-      taskManager.failTask('Privacy protection blocked this AI request. Remove or rephrase the sensitive content, then try again.', task);
+      const blockMessage = typeof interpretation.privacyBlockMessage === 'string' &&
+        interpretation.privacyBlockMessage.startsWith('Outbound policy blocked payload:')
+        ? interpretation.privacyBlockMessage
+        : 'Privacy protection blocked this AI request. Remove or rephrase the sensitive content, then try again.';
+      taskManager.failTask(blockMessage, task);
       this.clearOverlays(task.tabId);
       this.notify('PRIVACY_UPDATED', task.privacyMetrics);
       this.notify('TASK_FAILED', { error: task.error, hint: task.hint });
@@ -658,7 +738,22 @@ export class AgentController {
 
   async _waitWhilePaused(task, token) {
     while (this.isPaused) {
-      await new Promise((resolve) => { this.pauseResolver = resolve; });
+      // Bounded, for the same reason the confirmation and ASK_USER waits are.
+      // A pause is resumed by the panel, but a closed or crashed panel leaves
+      // this promise pending forever and the task never reaches a terminal
+      // state. Expiring reports an honest failure instead of parking.
+      const resumed = await Promise.race([
+        this._awaitOwned(task, token, new Promise((resolve) => { this.pauseResolver = resolve; })),
+        new Promise((resolve) => {
+          const timer = setTimeout(() => resolve('__timeout__'), PAUSE_TIMEOUT_MS);
+          // Do not let the timer itself pin the MV3 worker for the full window.
+          this._pauseExpiryTimer = timer;
+        })
+      ]);
+      this._pauseExpiryTimer = null;
+      if (resumed === '__timeout__') {
+        throw new Error('The task stayed paused with no response from the side panel.');
+      }
       this._assertTaskOwner(task, token);
     }
   }
@@ -666,15 +761,16 @@ export class AgentController {
   async _analyzeScreenshotLocally(screenshot, viewport, expectedSensitiveCounts) {
     return new Promise((resolve, reject) => {
       let settled = false;
+      let timeout = null;
       const finish = (callback, value) => {
         if (settled) return;
         settled = true;
-        clearTimeout(timeout);
+        if (timeout !== null) clearTimeout(timeout);
         callback(value);
       };
       // Keep this below Chrome's single-event five-minute ceiling and short
       // enough that a local model cannot leave a task waiting indefinitely.
-      const timeout = setTimeout(() => finish(reject, new LocalVisionRequiredError('Local visual analysis timed out.')), 20000);
+      timeout = setTimeout(() => finish(reject, new LocalVisionRequiredError('Local visual analysis timed out.')), 20000);
       try {
         chrome.runtime.sendMessage({
           type: MessageType.LOCAL_VISION_ANALYZE,
@@ -745,8 +841,17 @@ export class AgentController {
       // single document upload repeated twelve times in a row on an unchanged
       // page instead of being stopped after three.
       const lastStep = (task.steps || [])[task.steps.length - 1];
-      const lastStepWasVerified = Boolean(lastStep?.diagnostic?.post_action_verification);
-      if (lastStepWasVerified && this._isStuckInLoop(task)) {
+      // `post_action_verification` is attached to a step during the observation
+      // of the NEXT iteration, so at the top of iteration K the last step is
+      // K-1 and is not yet verified. Gating on it therefore made this branch
+      // unreachable on every iteration -- the only live breakers were
+      // MAX_CONSECUTIVE_FAILURES and the no-progress counter, and a repeating
+      // SUCCESSFUL action was never stopped. Break on repetition directly; the
+      // success requirement keeps a legitimately retried failing action alive
+      // for MAX_CONSECUTIVE_FAILURES to handle with a better message.
+      const repeatedSuccessfulStep = (task.steps || []).length >= MAX_IDENTICAL_ACTIONS
+        && (task.steps || []).slice(-MAX_IDENTICAL_ACTIONS).every((step) => step.success === true);
+      if ((repeatedSuccessfulStep || lastStep?.diagnostic?.post_action_verification) && this._isStuckInLoop(task)) {
         log.warn('REPLAN: no progress detected; the agent is stuck in a loop.');
         taskManager.failTask('The agent repeated the same step without making progress.', task);
         this.clearOverlays(task.tabId);
@@ -977,10 +1082,10 @@ export class AgentController {
     };
 
     const localMaskElements = localVision ? [
-      ...sanitizedElements,
-      ...localVision.piiRegions.map((region) => ({ bbox: region.bbox, sensitive: true, semantic_type: region.category })),
-      ...localVision.people.map((person) => ({ bbox: person.bbox, sensitive: true, semantic_type: 'PERSON' }))
-    ] : sanitizedElements;
+      ...sanitizedElements.map(e => ({ ...e, method: 'dom' })),
+      ...localVision.piiRegions.map((region) => ({ bbox: [region.box.x, region.box.y, region.box.width, region.box.height], sensitive: true, semantic_type: region.textCategory, method: 'ocr' })),
+      ...localVision.people.map((person) => ({ bbox: person.bbox, sensitive: true, semantic_type: 'PERSON', method: 'local_vision' }))
+    ] : sanitizedElements.map(e => ({ ...e, method: 'dom' }));
 
     // A screenshot is captured only for visual tasks or when the live DOM is
     // insufficient. It must pass local redaction before any remote VLM call.
@@ -1007,7 +1112,7 @@ export class AgentController {
       task.visionSamples.push({
         step: task.currentStep + 1,
         objects: localVision.objectDetections,
-        pii: localVision.piiRegions.map(({ bbox, category }) => ({ bbox, category })),
+        pii: localVision.piiRegions.map(({ box, textCategory }) => ({ bbox: [box.x, box.y, box.width, box.height], category: textCategory })),
         redactions: localMaskElements.filter((region) => region.sensitive && Array.isArray(region.bbox)).map((region) => ({
           bbox: region.bbox,
           category: region.semantic_type || 'SENSITIVE'
@@ -1107,11 +1212,24 @@ export class AgentController {
             // redaction covered it and local visual analysis audited it, so a
             // silent upstream redaction failure cannot reach the wire.
             redaction_audit: {
-              screenshot_withheld: defaultScreenshotSanitizer.lastRedactionStatus === 'withheld',
-              coverage_established: screenshotPrivacyAudit.coverageEstablished === true,
-              local_vision_completed: screenshotPrivacyAudit.localVisionCompleted === true,
-              unlocated_sensitive_text: screenshotPrivacyAudit.unlocatedSensitiveText === true,
-              masked_regions: screenshotPrivacyAudit.maskedCount || 0
+              status: defaultScreenshotSanitizer.lastRedactionStatus || 'unknown',
+              coverage: screenshotPrivacyAudit.coverageEstablished ? 'complete' : 'unknown',
+              withheld: defaultScreenshotSanitizer.lastRedactionStatus === 'withheld',
+              local_model_completed: screenshotPrivacyAudit.localVisionCompleted === true,
+              ocr_completed: localVision ? true : false,
+              regions: localMaskElements.filter(r => r.sensitive && Array.isArray(r.bbox)).map(r => ({
+                category: r.semantic_type || 'SENSITIVE',
+                x: Number((r.bbox[0]).toFixed(3)),
+                y: Number((r.bbox[1]).toFixed(3)),
+                width: Number((r.bbox[2]).toFixed(3)),
+                height: Number((r.bbox[3]).toFixed(3)),
+                method: r.method || 'dom'
+              })),
+              detected_categories: [...new Set([
+                ...detectedCategories,
+                ...(localVision?.piiCategories || []),
+                ...(localVision?.people.length ? ['PERSON'] : [])
+              ])]
             }
           },
           {
@@ -1179,8 +1297,11 @@ export class AgentController {
     visualObservation.visual_state = [visualObservation.visual_state, localVisionNote, remoteVisionNote].filter(Boolean).join(' ');
 
     // STEP 4: OBSERVATION FUSION + injection quarantine
+    // Named `fused` inside the callback rather than `fusedObservation`: the
+    // destructured binding below is hoisted into this scope, so shadowing it
+    // meant the outer one was a TDZ read for anything that reached it.
     const { fusedObservation, pageState } = await this._awaitOwned(task, token, measureStage(task, 'fusion_and_page_state_ms', async () => {
-      const fusedObservation = defaultObservationFusion.fuse(
+      const fused = defaultObservationFusion.fuse(
         sanitizedElements,
         visualObservation,
         {
@@ -1199,10 +1320,10 @@ export class AgentController {
           mutation_revision: rawDOM.mutation_revision
         }
       );
-      this.quarantineInjectedElements(fusedObservation);
+      this.quarantineInjectedElements(fused);
 
       if (!task.taskState) task.taskState = new TaskState(task.prompt);
-      return { fusedObservation, pageState: defaultPageStateModeler.modelPageState(fusedObservation, task.taskState) };
+      return { fusedObservation: fused, pageState: defaultPageStateModeler.modelPageState(fused, task.taskState) };
     }));
 
     // STEP 4.5: TASK-CONDITIONAL PAGE STATE MODELING
@@ -1262,14 +1383,23 @@ export class AgentController {
         };
       }
       delete task.pendingVerification;
-    for (const step of task.steps || []) {
-      if (!step.diagnostic || !('post_action_verification' in step.diagnostic)) delete step.diagnostic;
-    }
+    // NOTE: a loop used to sit here that deleted `step.diagnostic` from every
+    // step lacking `post_action_verification`. Every FAILED step is recorded
+    // with a diagnostic containing model_trace/task_state/page_state but no
+    // verification key, so it erased the forensics for exactly the steps worth
+    // debugging. It also collapsed every failed step's state fingerprint to
+    // "undefined::undefined::undefined::0::", which made the alternating-pattern
+    // breaker fire on any fail/other/fail/other sequence. Step size is bounded
+    // elsewhere (MAX_STEPS); there is no need to destroy evidence here.
     taskManager.persist();
-    this.notify('STEP_VERIFIED', {
-        stepNumber: pendingVerification.stepNumber,
-        verification
-      });
+    // No STEP_VERIFIED notify here. The side panel has no case for it and no
+    // renderer for a verification summary, so emitting it only added a message
+    // the panel discarded. Verification is still recorded on
+    // step.diagnostic.post_action_verification and persisted with the task.
+    log.debug('STEP_VERIFIED', {
+      stepNumber: pendingVerification.stepNumber,
+      visibleStateChanged: verification?.visible_state_changed ?? null
+    });
       this._transitionLoop(task, loop, AgentLoopState.VERIFY);
       this._transitionLoop(task, loop, AgentLoopState.REPLAN);
       if ((task.verificationNoProgress || 0) >= MAX_VERIFICATION_NO_PROGRESS) {
@@ -1460,6 +1590,46 @@ export class AgentController {
       return true;
     }
 
+    // Resolve only the plan's availability status before confirmation. This
+    // keeps an empty Local Vault from first presenting a high-risk approval
+    // and then waiting forever for the user-input prompt that can only be
+    // discovered after execution. The resolver returns a private clone; no
+    // plaintext value is copied into the action, task history, or notification.
+    if (proposedAction.action === ActionType.FILL_FORM_PLAN &&
+        Array.isArray(proposedAction.value?.fields) &&
+        proposedAction.value.fields.some((field) =>
+          typeof field?.value_source === 'string' &&
+          /^LOCAL_/.test(field.value_source) &&
+          !/^LOCAL_DOCUMENT_/.test(field.value_source)
+        )) {
+      try {
+        await this._awaitOwned(task, token, defaultLocalValueResolver.vault?.ready || Promise.resolve());
+        const resolvedPlan = defaultLocalValueResolver.resolve(proposedAction);
+        const unavailable = (resolvedPlan?.fields || []).filter((field) =>
+          typeof field?.value_source === 'string' &&
+          /^LOCAL_/.test(field.value_source) &&
+          !/^LOCAL_DOCUMENT_/.test(field.value_source) &&
+          field.status !== 'AVAILABLE'
+        );
+        if (unavailable.length) {
+          proposedAction = {
+            action: ActionType.ASK_USER,
+            value: {
+              prompt: 'Some protected profile values are not configured in the Local Vault. Enter them below; the answers stay local and are used only on this page.',
+              ambiguousFields: clarificationFieldMetadata(unavailable, fusedObservation)
+            },
+            risk: RiskLevel.LOW,
+            requires_confirmation: false
+          };
+        }
+      } catch (preflightError) {
+        // Execution still performs the authoritative local resolution. A
+        // preflight failure must not turn a resolvable action into a guessed
+        // value or leak the resolver error into remote/task telemetry.
+        log.warn('Local value availability preflight unavailable; deferring to executor.');
+      }
+    }
+
     const fusedTarget = (fusedObservation.elements || [])
       .find((el) => el.id === proposedAction.target?.element_id) || null;
     const riskAssessment = defaultRiskGate.evaluate(proposedAction, {
@@ -1506,9 +1676,30 @@ export class AgentController {
       });
 
       const confirmationWaitStarted = clockNow();
-      const userApproved = await this._awaitOwned(task, token, new Promise((resolve) => {
-        this.pendingUserConfirmationResolver = resolve;
-      }));
+      // Bound the wait. Without this the loop parks forever when the side panel
+      // is closed, crashed, or fails to render the modal: the task shows
+      // WAITING_FOR_USER, no further step ever runs, and nothing is logged.
+      // Expiring turns that silent hang into an explicit failure.
+      const approval = await (async () => {
+        // The timer must be cleared, not left armed: in MV3 a pending timer
+        // holds the service worker alive, so an uncleared 120s timer would tax
+        // every confirmation with up to two minutes of worker residency. The
+        // codebase already clears its timers this way (vlm-client.js, and
+        // action-executor's finally(clearTimeout)).
+        let expiryTimer = null;
+        try {
+          return await Promise.race([
+            this._awaitOwned(task, token, new Promise((resolve) => {
+              this.pendingUserConfirmationResolver = resolve;
+            })),
+            new Promise((resolve) => {
+              expiryTimer = setTimeout(() => resolve('__expired__'), CONFIRMATION_TIMEOUT_MS);
+            })
+          ]);
+        } finally {
+          if (expiryTimer !== null) clearTimeout(expiryTimer);
+        }
+      })();
       task.activeStepTimings.confirmation_wait_ms = Math.max(0, Math.round(clockNow() - confirmationWaitStarted));
 
       // Superseded by a newer task: the new loop owns the task state now.
@@ -1517,7 +1708,28 @@ export class AgentController {
 
       taskManager.clearPendingConfirmation(task);
 
-      if (!userApproved) {
+      if (approval === '__expired__') {
+        // The wait is over, so a late click on a stale panel must not reach a
+        // resolver whose promise has already lost the race.
+        this.pendingUserConfirmationResolver = null;
+        // Second argument is the OWNERSHIP token, not a hint. Passing a string
+        // made _isCurrent() compare a string against the task object, fail, and
+        // return without transitioning anything -- the task stayed
+        // WAITING_FOR_USER forever while the UI showed a failure.
+        taskManager.failTask(
+          `Approval for ${String(proposedAction.action).toUpperCase()} was not received in time. Nothing was submitted or attached.`,
+          task
+        );
+        this.clearOverlays(task.tabId);
+        this.notify('TASK_FAILED', {
+          error: 'Approval timed out — nothing was submitted or attached.',
+          hint: 'Re-run the task and approve the prompt when it appears.'
+        });
+        this._transitionLoop(task, loop, AgentLoopState.BLOCKED);
+        return false;
+      }
+
+      if (!approval) {
         taskManager.cancelTask(task);
         this.clearOverlays(task.tabId);
         this.notify('TASK_CANCELLED', { reason: 'User declined action confirmation' });
@@ -1558,6 +1770,32 @@ export class AgentController {
       if (execResult.title) execResult.title = defaultDOMSanitizer.sanitizeUserPrompt(execResult.title);
     }
 
+    // A plan can be structurally valid while one or more LOCAL_* sources are
+    // not configured in the vault. The content script reports those fields as
+    // missing, but treating that as an ordinary failed execution caused the
+    // planner to repeat the same FILL_FORM_PLAN three times. Convert only this
+    // narrow, value-free failure into the existing user-input flow: the user
+    // can supply the value locally, and the answer is never sent back to the
+    // model unless the outbound policy approves its sanitized clarification.
+    if (proposedAction.action === ActionType.FILL_FORM_PLAN &&
+        execResult?.success === false && Array.isArray(execResult.details)) {
+      const plannedFields = Array.isArray(proposedAction.value?.fields) ? proposedAction.value.fields : [];
+      const missingFields = execResult.details
+        .filter((detail) => detail?.success === false && /Missing value for/i.test(String(detail.reason || '')))
+        .map((detail) => plannedFields.find((field) => field?.field_id === detail.field))
+        .filter(Boolean);
+      if (missingFields.length) {
+        const missingIds = new Set(missingFields.map((field) => field.field_id));
+        execResult = {
+          ...execResult,
+          needs_user_input: true,
+          prompt: 'Some protected profile values are not configured in the Local Vault. Enter them below; the answers stay local and are used only on this page.',
+          ambiguousFields: clarificationFieldMetadata(missingFields, fusedObservation),
+          details: execResult.details.filter((detail) => missingIds.has(detail.field) || detail.success === true)
+        };
+      }
+    }
+
     // Intercept ASK_USER / needs_user_input to pause and await user clarification
     if (proposedAction.action === ActionType.ASK_USER || execResult?.needs_user_input) {
       const askData = {
@@ -1573,10 +1811,43 @@ export class AgentController {
       this.notify('USER_INPUT_REQUIRED', askData);
 
       const userWaitStarted = clockNow();
-      const userInput = await this._awaitOwned(task, token, new Promise((resolve) => {
-        this.pendingUserInputResolver = resolve;
-      }));
+      // Bounded, for the same reason the confirmation wait 100 lines earlier is:
+      // an unbounded wait on a promise resolved only by the side panel parks the
+      // loop forever if that panel is closed, crashed, or fails to render the
+      // modal. Without this the task sits in WAITING_FOR_USER indefinitely and
+      // nothing is logged. Expiring turns that into an explicit failure.
+      const userInput = await (async () => {
+        let expiryTimer = null;
+        try {
+          return await Promise.race([
+            this._awaitOwned(task, token, new Promise((resolve) => {
+              this.pendingUserInputResolver = resolve;
+            })),
+            new Promise((resolve) => {
+              expiryTimer = setTimeout(() => resolve({ timedOut: true }), USER_INPUT_TIMEOUT_MS);
+            })
+          ]);
+        } finally {
+          // Clear it: an armed timer holds the MV3 service worker alive.
+          if (expiryTimer !== null) clearTimeout(expiryTimer);
+        }
+      })();
       task.activeStepTimings.user_wait_ms = Math.max(0, Math.round(clockNow() - userWaitStarted));
+
+      if (userInput?.timedOut) {
+        this.pendingUserInputResolver = null;
+        taskManager.failTask(
+          'No answer was received in time. Nothing was entered or submitted.',
+          task
+        );
+        this.clearOverlays(task.tabId);
+        this.notify('TASK_FAILED', {
+          error: 'No answer received — nothing was entered or submitted.',
+          hint: 'Re-run the task and answer the prompt in the side panel.'
+        });
+        this._transitionLoop(task, loop, AgentLoopState.BLOCKED);
+        return false;
+      }
 
       // Superseded by a newer task: the new loop owns the task state now.
       this._assertTaskOwner(task, token);
@@ -1588,6 +1859,36 @@ export class AgentController {
         this.clearOverlays(task.tabId);
         this.notify('TASK_CANCELLED', { reason: 'User cancelled input request' });
         this._transitionLoop(task, loop, AgentLoopState.BLOCKED);
+        return false;
+      }
+
+      // Skip is an explicit decision, not an answer that should be sent back
+      // to the planner. Replanning an unchanged empty form made the agent ask
+      // the same question repeatedly. For a no-submit task, completing with a
+      // clear "left unchanged" result is honest; for a task that still asks
+      // for submission, fail closed instead of claiming success.
+      if (userInput?.skipped === true) {
+        const leftUnchanged = taskExplicitlyAvoidsSubmission(task.prompt);
+        taskManager.recordStep({
+          thought: leftUnchanged
+            ? 'User skipped the clarification; leaving the unresolved fields unchanged.'
+            : 'User skipped required clarification; no further page action is safe.',
+          action: proposedAction,
+          result: { needs_user_input: true, skipped: true },
+          success: leftUnchanged,
+          ...(leftUnchanged ? {} : { error: 'Required clarification was skipped.' }),
+          ...plannerStepMetadata(planResult)
+        }, task);
+        this.clearOverlays(task.tabId);
+        if (leftUnchanged) {
+          taskManager.completeTask('Clarification skipped; the unresolved fields were left unchanged.', task);
+          this.notify('TASK_COMPLETED', { result: task.result });
+          this._transitionLoop(task, loop, AgentLoopState.DONE);
+        } else {
+          taskManager.failTask('Required clarification was skipped. Nothing was submitted or attached.', task);
+          this.notify('TASK_FAILED', { error: task.error, hint: task.hint });
+          this._transitionLoop(task, loop, AgentLoopState.BLOCKED);
+        }
         return false;
       }
 
@@ -1669,7 +1970,7 @@ export class AgentController {
             // answer was silently discarded. Derive the control type from the
             // element this observation actually saw.
             const observed = (task.lastFusedObservation?.elements || [])
-              .find((element) => element?.id === fieldId);
+              .find((element) => (element?.id || element?.element_id || element?.el_id) === fieldId);
             const dom = observed?.dom || observed || {};
             const observedTag = String(dom.tag || '').toLowerCase();
             const observedType = String(dom.type || '').toLowerCase();
@@ -1762,7 +2063,18 @@ export class AgentController {
     this.notify('STATE_CHANGED', { state: AgentState.VERIFYING });
 
     if (!execResult || execResult.success === false) {
-      const errMsg = execResult?.error || 'Action did not complete';
+      // A FILL_FORM_PLAN reports per-field outcomes in `details` but no
+      // top-level `error`. Without surfacing the first failing field the
+      // planner is told only "Action did not complete", with no field and no
+      // reason, so it re-plans the identical batch and the failure counter
+      // eventually kills a task where 11 of 12 fields actually succeeded.
+      const firstFailedField = Array.isArray(execResult?.details)
+        ? execResult.details.find((detail) => detail && detail.success !== true)
+        : null;
+      const errMsg = execResult?.error
+        || (firstFailedField
+          ? `Field ${firstFailedField.field || firstFailedField.field_id || '(unknown)'} did not fill: ${firstFailedField.reason || firstFailedField.error || 'no reason given'}`
+          : 'Action did not complete');
       await this._awaitOwned(task, token, measureStage(task, 'failed_action_recovery_wait_ms', () => this.sleep(600)));
       taskManager.recordStep({
         thought: planResult.thought,
@@ -1886,8 +2198,20 @@ export class AgentController {
       return null;
     }
 
+    // `is_clickable` is NOT on ranked_candidates. task-grounding.js builds that
+    // list and never emits the flag; page-state-modeler.js computes it, but onto
+    // pageState.elements -- a different array. Filtering on it here therefore
+    // matched nothing, so this whole 45-line resolver was unreachable and every
+    // "please click the first result" still deferred to the user. Read the flag
+    // from the element list, indexed by id.
+    const clickableIds = new Set(
+      (task.pageState?.elements || [])
+        .filter((el) => el && el.is_clickable === true)
+        .map((el) => el.id)
+        .filter(Boolean)
+    );
     const candidates = (task.pageState?.ranked_candidates || [])
-      .filter((c) => c && typeof c.element_id === 'string' && c.element_id && c.is_clickable === true);
+      .filter((c) => c && typeof c.element_id === 'string' && c.element_id && clickableIds.has(c.element_id));
     if (!candidates.length) return null;
 
     const [best, runnerUp] = candidates;
@@ -1953,14 +2277,31 @@ export class AgentController {
       return false;
     }
     if (planResult?.plannerUnavailable) {
-      taskManager.failTask('The AI planner is unavailable. Check the backend configuration and try again.', task);
+      // The client classifies the failure (unreachable / timeout / server error
+      // / rejected) and supplies the matching remedy. Show that instead of one
+      // generic "check the configuration" line, which is useless when the real
+      // problem is that nothing is listening on the port.
+      taskManager.failTask(
+        planResult.unavailableAdvice
+          || 'The AI planner is unavailable. Check the backend configuration and try again.',
+        task
+      );
       this.clearOverlays(task.tabId);
       this.notify('TASK_FAILED', { error: task.error, hint: task.hint });
       return false;
     }
     if (planResult?.privacyBlocked) {
       this.notify('PRIVACY_UPDATED', task.privacyMetrics);
-      taskManager.failTask('Privacy protection blocked this AI request. Remove or rephrase the sensitive content, then try again.', task);
+      // GPTOSSClient returns only PolicyEngine's value-free diagnostic here
+      // (category/reason, never the matched text). Preserve it so friendlyError
+      // can tell the user what kind of content triggered the local gate.
+      // Backend-side blocks still use the generic fallback because they do
+      // not include a locally verified category.
+      const blockMessage = typeof planResult.privacyBlocked === 'string' &&
+        planResult.privacyBlocked.startsWith('Outbound policy blocked payload:')
+        ? planResult.privacyBlocked
+        : 'Privacy protection blocked this AI request. Remove or rephrase the sensitive content, then try again.';
+      taskManager.failTask(blockMessage, task);
       this.clearOverlays(task.tabId);
       this.notify('TASK_FAILED', { error: task.error, hint: task.hint });
       return false;
@@ -2354,8 +2695,9 @@ export class AgentController {
     try {
       await new Promise((resolve) => {
         let settled = false;
-        const done = () => { if (!settled) { settled = true; clearTimeout(timer); resolve(); } };
-        const timer = setTimeout(done, 800);
+        let timer = null;
+        const done = () => { if (!settled) { settled = true; if (timer !== null) clearTimeout(timer); resolve(); } };
+        timer = setTimeout(done, 800);
         chrome.tabs.sendMessage(
           tabId,
           { type: MessageType.CHECK_PAGE_STABILITY, payload: { quietMs: 120 } },
@@ -2417,7 +2759,7 @@ export class AgentController {
    *
    * Returns true when the answer may be executed.
    */
-  async _gateUserAnswer(task, token, answerAction, fieldId, fieldMeta) {
+  async _gateUserAnswer(task, token, answerAction, fieldId, _fieldMeta) {
     const observation = task?.lastFusedObservation || {};
     const preValidation = defaultActionValidator.validatePreExecution(answerAction, observation, task?.taskState);
     if (!preValidation.valid) {
@@ -2550,6 +2892,13 @@ export class AgentController {
     this.pausedFromState = null;
     const resolve = this.pauseResolver;
     this.pauseResolver = null;
+    if (this._pauseExpiryTimer) { clearTimeout(this._pauseExpiryTimer); this._pauseExpiryTimer = null; }
+    // The wait arms a bounded timer; clear it on a real resume so the timer
+    // never outlives the pause it was watching.
+    if (this._pauseExpiryTimer !== null && this._pauseExpiryTimer !== undefined) {
+      clearTimeout(this._pauseExpiryTimer);
+      this._pauseExpiryTimer = null;
+    }
     if (resolve) resolve();
     this.notify('STATE_CHANGED', { state: task.state });
     return true;
@@ -2565,6 +2914,7 @@ export class AgentController {
     if (this.pauseResolver) {
       this.pauseResolver();
       this.pauseResolver = null;
+    if (this._pauseExpiryTimer) { clearTimeout(this._pauseExpiryTimer); this._pauseExpiryTimer = null; }
     }
     if (task) this.clearOverlays(task.tabId);
     if (this.pendingUserConfirmationResolver) {
@@ -2583,13 +2933,14 @@ export class AgentController {
   async _extractDOM(tabId) {
     const sendExtractionMessage = () => new Promise((resolve) => {
       let settled = false;
+      let timer = null;
       const finish = (value) => {
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
+        if (timer !== null) clearTimeout(timer);
         resolve(value);
       };
-      const timer = setTimeout(() => finish({ success: false, error: 'Page extraction timed out.' }), CHROME_API_TIMEOUT_MS);
+      timer = setTimeout(() => finish({ success: false, error: 'Page extraction timed out.' }), CHROME_API_TIMEOUT_MS);
       try {
         chrome.tabs.sendMessage(tabId, { type: MessageType.EXTRACT_DOM }, (response) => {
           const runtimeError = chrome.runtime.lastError;

@@ -11,6 +11,7 @@ import {
   readEncryptedSecret,
   writeEncryptedSecret
 } from '../privacy/vault-crypto.js';
+import { sanitizeTelemetry } from '../privacy/telemetry-sanitizer.js';
 
 const SETTINGS_STORAGE_KEY = 'privagent_settings';
 
@@ -146,6 +147,21 @@ export function friendlyError(rawMessage) {
     return {
       error: 'A required value is missing from the local vault.',
       hint: 'Open the vault and add the missing value, then retry.'
+    };
+  }
+  // The planner-unavailable message from the controller is already the exact
+  // remedy (start uvicorn / check the backend log / etc). It is checked BEFORE
+  // the generic network branch below, because "fetch failed" appears in both
+  // and the generic branch would otherwise swallow the specific cause.
+  if (low.includes('planner unavailable: the reasoning backend could not be reached')) {
+    // The controller's message is "...could not be reached (<detail>)." Strip the
+    // trailing sentence period as well as the parenthesis, or it survives into
+    // the hint as "fetch failed)."
+    const detail = String(rawMessage).split('(').slice(1).join('(')
+      .replace(/\)\s*\.?\s*$/, '').trim();
+    return {
+      error: 'The AI planner could not reach the reasoning backend.',
+      hint: `${detail ? `${detail} ` : ''}Check the backend is running on the configured URL, then start the task again.`
     };
   }
   if (low.includes('fetch failed') || low.includes('networkerror') || low.includes('load failed') || low.includes('status: 500') || low.includes('status: 503')) {
@@ -285,7 +301,15 @@ export class TaskManager {
   }
 
   _isCurrent(expectedTask) {
-    return !expectedTask || this.currentTask === expectedTask;
+    // Accept only an omitted/omittable token or an actual task object. A
+    // truthy non-object (a hint string passed by mistake, say) compared against
+    // currentTask can never be equal, which silently turns a state transition
+    // into a no-op. Fail loudly instead of quietly doing nothing.
+    if (expectedTask === undefined || expectedTask === null) return true;
+    if (typeof expectedTask !== 'object') {
+      throw new TypeError('expectedTask must be a task object; a non-object ownership token can never match.');
+    }
+    return this.currentTask === expectedTask;
   }
 
   _isTerminal(task) {
@@ -296,7 +320,7 @@ export class TaskManager {
     const task = this.currentTask;
     if (this._isCurrent(expectedTask) && task && !this._isTerminal(task)) {
       task.state = newState;
-      if (detail) task.stateDetail = detail;
+      if (detail) task.stateDetail = sanitizeTelemetry(detail);
       this.persist();
       return true;
     }
@@ -306,6 +330,10 @@ export class TaskManager {
   recordStep(stepData, expectedTask = null) {
     const task = this.currentTask;
     if (this._isCurrent(expectedTask) && task && !this._isTerminal(task)) {
+      // Keep the original action in the executor, but never persist raw model
+      // thoughts, inline values, page errors, or extraction text in session
+      // history. This is a telemetry boundary, not an execution transform.
+      stepData = sanitizeTelemetry(stepData || {});
       const timingMs = this.captureStepTiming(task);
       if (timingMs) {
         stepData = {
@@ -369,7 +397,13 @@ export class TaskManager {
       // that cannot be correlated is an approval that can never be delivered.
       const taskId = correlation.taskId || task.id;
       task.state = AgentState.WAITING_FOR_USER;
-      task.pendingConfirmation = { action, reason, ...correlation, taskId, timestamp: Date.now() };
+      task.pendingConfirmation = {
+        action: sanitizeTelemetry(action),
+        reason: sanitizeTelemetry(reason),
+        ...sanitizeTelemetry(correlation),
+        taskId,
+        timestamp: Date.now()
+      };
       this.persist();
       return true;
     }
@@ -393,7 +427,7 @@ export class TaskManager {
       // handleUserInput fails closed on a taskId mismatch.
       const taskId = correlation.taskId || task.id;
       task.state = AgentState.WAITING_FOR_USER;
-      task.pendingUserInput = { ...inputData, ...correlation, taskId, timestamp: Date.now() };
+      task.pendingUserInput = sanitizeTelemetry({ ...inputData, ...correlation, taskId, timestamp: Date.now() });
       this.persist();
       return true;
     }

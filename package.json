@@ -20,7 +20,10 @@
     "build:extensions": "npm run build:chrome && npm run build:firefox",
     "evaluate:vision": "python3 scripts/evaluate_vision.py",
     "evaluate:agent": "python3 scripts/evaluate_agent_models.py",
-    "evaluate:task-runs": "python3 scripts/evaluate_task_runs.py"
+    "evaluate:task-runs": "python3 scripts/evaluate_task_runs.py",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "verify": "npm run lint && npm run test:all && npm run build:extensions"
   },
   "keywords": [
     "browser-extension",
@@ -35,6 +38,8 @@
     "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
-    "esbuild": "^0.28.2"
+    "@eslint/js": "^9.39.5",
+    "esbuild": "^0.28.2",
+    "eslint": "^9.39.5"
   }
 }

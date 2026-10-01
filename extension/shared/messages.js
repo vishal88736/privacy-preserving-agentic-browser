@@ -9,11 +9,14 @@ export const MessageType = Object.freeze({
   RESUME_TASK: 'RESUME_TASK',
   CANCEL_TASK: 'CANCEL_TASK',
   USER_CONFIRM_ACTION: 'USER_CONFIRM_ACTION',
+  // OUTBOUND EVENT, not a request: the background emits this on its notify()
+  // envelope and the side panel switches on the string, so neither side
+  // references MessageType.USER_INPUT_REQUIRED. Kept here so the event name has
+  // one definition, but do not expect a sendMessage/handler pair for it.
   USER_INPUT_REQUIRED: 'USER_INPUT_REQUIRED',
   USER_PROVIDE_INPUT: 'USER_PROVIDE_INPUT',
   GET_AGENT_STATUS: 'GET_AGENT_STATUS',
   AGENT_STATUS_UPDATE: 'AGENT_STATUS_UPDATE',
-  PRIVACY_EVENT: 'PRIVACY_EVENT',
   UPDATE_VAULT: 'UPDATE_VAULT',
   GET_VAULT: 'GET_VAULT',
   CONFIRM_VAULT_REVIEW: 'CONFIRM_VAULT_REVIEW',
@@ -34,11 +37,7 @@ export const MessageType = Object.freeze({
 
   // Background <-> Content Script
   EXTRACT_DOM: 'EXTRACT_DOM',
-  EXTRACT_DOM_RESPONSE: 'EXTRACT_DOM_RESPONSE',
   EXECUTE_ACTION: 'EXECUTE_ACTION',
-  EXECUTE_ACTION_RESPONSE: 'EXECUTE_ACTION_RESPONSE',
-  HIGHLIGHT_ELEMENT: 'HIGHLIGHT_ELEMENT',
-  SHOW_VISUAL_CURSOR: 'SHOW_VISUAL_CURSOR',
   CLEAR_OVERLAYS: 'CLEAR_OVERLAYS',
   CHECK_PAGE_STABILITY: 'CHECK_PAGE_STABILITY'
 });

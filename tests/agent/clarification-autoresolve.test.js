@@ -21,19 +21,34 @@ const ask = (prompt) => ({
   value: { prompt }
 });
 
+// `is_clickable` lives on pageState.elements, NOT on a ranked candidate.
+// task-grounding.js never emits it on ranked_candidates; page-state-modeler.js
+// computes it onto the element list. The resolver reads it from there, so the
+// fixture has to mirror that split -- which is exactly the mismatch that made
+// this whole resolver unreachable in production.
 const candidate = (elementId, score, extra = {}) => ({
   element_id: elementId,
   label: `Result ${elementId}`,
   accessible_name: `Result ${elementId}`,
   score,
-  is_clickable: true,
   ...extra
 });
 
-const taskWith = (candidates) => ({ pageState: { ranked_candidates: candidates } });
+const taskWith = (candidates) => ({
+  pageState: {
+    ranked_candidates: candidates,
+    // Tolerate null the way the production shape does.
+    elements: (candidates || []).map((c) => ({ id: c.element_id, is_clickable: true }))
+  }
+});
 
-const resolve = (prompt, candidates) =>
-  controller._resolveAgentDoableClarification(ask(prompt), {}, taskWith(candidates));
+const resolve = (prompt, candidates, { clickable = true } = {}) => {
+  const task = taskWith(candidates);
+  if (clickable === false) {
+    task.pageState.elements = (candidates || []).map((c) => ({ id: c.element_id, is_clickable: false }));
+  }
+  return controller._resolveAgentDoableClarification(ask(prompt), {}, task);
+};
 
 test('a clarification describing a click on a grounded result is acted on instead', () => {
   const action = resolve(
@@ -98,7 +113,26 @@ test('a request to attach a file still asks the user', () => {
 test('nothing is invented when the page grounds no clickable candidate', () => {
   assert.equal(resolve('Please click the first result.', []), null);
   assert.equal(resolve('Please click the first result.', null), null);
-  assert.equal(resolve('Please click the first result.', [candidate('el_3', 9, { is_clickable: null })]), null);
+  // A candidate whose element is NOT marked clickable must not be clicked, even
+  // though the candidate itself looks perfect. The flag lives on the element.
+  assert.equal(resolve('Please click the first result.', [candidate('el_3', 9)], {
+    clickable: false
+  }), null);
+});
+
+test('a ranked candidate with no matching clickable element is not clicked', () => {
+  // Defends the join itself: a candidate id absent from the element list has no
+  // clickability evidence, so it must be filtered out rather than assumed.
+  const task = {
+    pageState: {
+      ranked_candidates: [candidate('el_3', 9)],
+      elements: [{ id: 'el_other', is_clickable: true }]
+    }
+  };
+  assert.equal(
+    controller._resolveAgentDoableClarification(ask('Please click the first result.'), {}, task),
+    null
+  );
 });
 
 test('a candidate that matched nothing is not clicked', () => {

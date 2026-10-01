@@ -132,6 +132,25 @@ def test_2_page_a_normal_form_loop():
             done_visible = sp.is_visible("#done-state")
             confirm_visible = sp.is_visible("#confirmation-modal")
             
+            # Missing profile values are deliberately collected in the side
+            # panel, never sent through the planner. Answer this synthetic
+            # fixture locally so the test exercises the clarification path as
+            # well as the later high-risk approval.
+            if sp.is_visible("#user-input-modal"):
+                answers = ["Jane Doe", "jane@example.com", "9123456780", "Flat 4 MG Road", "IN"]
+                fields = sp.locator(".user-input-field-input-box")
+                for index, answer in enumerate(answers):
+                    if index >= fields.count():
+                        break
+                    field = fields.nth(index)
+                    if field.get_attribute("type") == "checkbox":
+                        continue
+                    if field.evaluate("el => el.tagName.toLowerCase()") == "select":
+                        field.select_option(answer)
+                    else:
+                        field.fill(answer)
+                sp.click("#user-input-submit-btn")
+
             # If confirmation requested, approve it
             if confirm_visible:
                 print("  [Approval] High risk action triggered confirmation modal. Approving...")

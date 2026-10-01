@@ -74,7 +74,11 @@ test('agent skips screenshot work when the sanitized DOM is sufficient', async (
     unlocatedSensitiveCategories: [],
     objectDetections: [],
     people: [],
-    piiRegions: [{ bbox: [10, 90, 200, 30], category: 'PASSWORD' }],
+    // Region shape must match local-vision.js boxesForSpans():
+    // { box: { x, y, width, height }, textCategory, confidence }. The old
+    // { bbox, category } mock looked fine only because this test never
+    // reaches the vision path -- any run that did would throw on region.box.x.
+    piiRegions: [{ box: { x: 10, y: 90, width: 200, height: 30 }, textCategory: 'PASSWORD', confidence: 0.9 }],
     piiCategories: ['PASSWORD'],
     unableToLocateSensitiveText: false,
     imageWidth: 1280,

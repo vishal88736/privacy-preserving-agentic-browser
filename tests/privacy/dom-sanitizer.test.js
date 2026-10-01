@@ -257,8 +257,8 @@ test('DOMSanitizer - Handles elements with null attributes gracefully without to
 
 
 test('DOMSanitizer - vault substrings must not corrupt labels (Female vs male)', async () => {
-  const { DOMSanitizer } = await import('../../extension/privacy/dom-sanitizer.js');
-  const sanitizer = new DOMSanitizer();
+  const { DOMSanitizer: Sanitizer } = await import('../../extension/privacy/dom-sanitizer.js');
+  const sanitizer = new Sanitizer();
   assert.equal(sanitizer.scrubPlaceholderText('Female'), 'Female');
   assert.equal(sanitizer.sanitizeUserPrompt('Gender Female Other'), 'Gender Female Other');
 });

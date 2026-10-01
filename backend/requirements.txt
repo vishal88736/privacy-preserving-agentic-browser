@@ -1,6 +1,10 @@
-fastapi>=0.110.0
-uvicorn>=0.28.0
-pydantic>=2.6.0
-requests>=2.31.0
+# Server runtime. Pinned to exact versions rather than >= floors: CI installs
+# this file directly, so open ranges made every build non-reproducible and let a
+# breaking upstream release turn a green pipeline red with no code change here.
+# Bump deliberately, in its own commit.
+fastapi==0.141.1
+uvicorn==0.40.0
+pydantic==2.13.4
+requests==2.33.1
 # Used by the Playwright-based e2e suites in tests/, not by the server itself.
-playwright>=1.40.0
+playwright==1.63.0

@@ -18,6 +18,21 @@
     exception: (scope, message, error) => console.error(`[${scope}] ${message}:`, error)
   };
 
+  // Attributes whose mutation can change what an element IS or what it is
+  // worth. Anything outside this list (hover classes, framework data-*
+  // bookkeeping, SVG churn) cannot affect extraction, so it never needs to
+  // wake the page-stability observer.
+  const OBSERVED_ATTRIBUTES = Object.freeze([
+    'value', 'checked', 'disabled', 'readonly', 'required', 'type', 'name',
+    'href', 'placeholder', 'aria-label', 'aria-labelledby', 'aria-hidden',
+    'aria-expanded', 'aria-selected', 'aria-disabled', 'role', 'hidden',
+    'style', 'class'
+  ]);
+  // Coalesce mutation bursts into one revision bump. The revision is a
+  // monotonic counter, so a single bump per burst is equivalent for every
+  // staleness comparison that reads it.
+  const MUTATION_COALESCE_MS = 50;
+
   // Prevent duplicate injections, but recover after an extension
   // reload/update: this flag persists in the isolated world while the
   // previous injection's runtime is invalidated (its listeners stop
@@ -51,8 +66,6 @@
   const MessageType = {
     EXTRACT_DOM: 'EXTRACT_DOM',
     EXECUTE_ACTION: 'EXECUTE_ACTION',
-    HIGHLIGHT_ELEMENT: 'HIGHLIGHT_ELEMENT',
-    SHOW_VISUAL_CURSOR: 'SHOW_VISUAL_CURSOR',
     CLEAR_OVERLAYS: 'CLEAR_OVERLAYS',
     CHECK_PAGE_STABILITY: 'CHECK_PAGE_STABILITY'
   };
@@ -210,6 +223,13 @@
 
   // 2. DOM Extractor — interactive controls PLUS page evidence (cards, prices, headings, text)
   class DOMExtractor {
+    // Per-extraction caches, keyed by registry.snapshotId. A new snapshot id
+    // means a new extraction, so the DOM may have changed and these are stale.
+    _shadowRootsCache = null;
+    _shadowRootsCacheKey = null;
+    _headingIndexCache = null;
+    _headingIndexCacheKey = null;
+
     getAccessibleLabel(element) {
       const labelledBy = element.getAttribute('aria-labelledby');
       if (labelledBy) {
@@ -287,13 +307,19 @@
         if (own && !isUninformativeLabel(own)) return own;
       }
 
-      // Nearest preceding heading in document order (covers forms that wrap
-      // each question in a plain <div> with no ARIA role at all).
-      const heading = this.queryAllDeep('h1, h2, h3, h4, h5, h6, legend, [role="heading"]')
-        .find((node) => {
-          const rect = node.getBoundingClientRect();
-          return rect.top <= element.getBoundingClientRect().top + 1;
-        });
+      // Nearest preceding heading (covers forms that wrap each question in a plain
+      // <div> with no ARIA role at all). Reads the per-extraction heading index
+      // instead of re-querying every heading and re-reading its rect per
+      // candidate, which forced a synchronous layout per heading per element.
+      // Document order is preserved and the first qualifying heading wins, so
+      // this is behaviourally identical to the previous .find().
+      let heading = null;
+      try {
+        const targetTop = element.getBoundingClientRect().top + 1;
+        for (const entry of this._headingIndex()) {
+          if (entry.top <= targetTop) { heading = entry.node; break; }
+        }
+      } catch {}
       const headingText = heading?.innerText?.replace(/\s+/g, ' ').trim();
       if (headingText && !isUninformativeLabel(headingText)) return firstMeaningfulLine(headingText) || headingText.slice(0, 160);
       return null;
@@ -394,6 +420,45 @@
     }
 
     /**
+     * Shadow roots reachable from the document, discovered once per extraction.
+     *
+     * queryAllDeep used to run `root.querySelectorAll('*')` on EVERY call just to
+     * find shadow hosts, and getQuestionLabel calls it once per interactive
+     * element. With MAX_ELEMENTS=120 that was up to 120 full-document walks per
+     * extraction -- on a page with thousands of elements, millions of NodeList
+     * entries materialised, which is what made heavy pages stall the main thread.
+     *
+     * Cached against the registry snapshot id, so a new extraction (or any
+     * mutation that invalidates it) re-discovers. Callers that pass an explicit
+     * non-document root still get a fresh walk of that root.
+     */
+    _shadowRootsFor(root) {
+      const isDocumentRoot = !root || root === document;
+      if (!isDocumentRoot) return this._walkShadowRoots(root);
+
+      if (this._shadowRootsCache && this._shadowRootsCacheKey === registry.snapshotId) {
+        return this._shadowRootsCache;
+      }
+      const roots = this._walkShadowRoots(document);
+      this._shadowRootsCache = roots;
+      this._shadowRootsCacheKey = registry.snapshotId;
+      return roots;
+    }
+
+    _walkShadowRoots(root) {
+      const roots = [];
+      if (!root || !root.querySelectorAll) return roots;
+      try {
+        const allElements = root.querySelectorAll('*');
+        for (let i = 0; i < allElements.length; i++) {
+          const shadow = allElements[i]?.shadowRoot;
+          if (shadow) roots.push(shadow);
+        }
+      } catch {}
+      return roots;
+    }
+
+    /**
      * Recursively queries elements piercing open Shadow DOM roots.
      */
     queryAllDeep(selector, root = (typeof document !== 'undefined' ? document : null)) {
@@ -405,17 +470,33 @@
         matches = [];
       }
 
-      try {
-        const allElements = root.querySelectorAll('*');
-        for (let i = 0; i < allElements.length; i++) {
-          const shadow = allElements[i]?.shadowRoot;
-          if (shadow) {
-            matches = matches.concat(this.queryAllDeep(selector, shadow));
-          }
-        }
-      } catch {}
+      for (const shadowRoot of this._shadowRootsFor(root)) {
+        matches = matches.concat(this.queryAllDeep(selector, shadowRoot));
+      }
 
       return matches;
+    }
+
+    /**
+     * Document-order heading list with cached rects, for nearest-preceding lookup.
+     *
+     * Also cached per extraction: previously each getQuestionLabel call re-queried
+     * every heading AND re-read getBoundingClientRect() on each one, forcing a
+     * synchronous layout per read while the page's style was dirty.
+     */
+    _headingIndex() {
+      if (this._headingIndexCache && this._headingIndexCacheKey === registry.snapshotId) {
+        return this._headingIndexCache;
+      }
+      const index = [];
+      for (const node of this.queryAllDeep('h1, h2, h3, h4, h5, h6, legend, [role="heading"]')) {
+        let rect = null;
+        try { rect = node.getBoundingClientRect(); } catch { continue; }
+        index.push({ node, top: rect.top });
+      }
+      this._headingIndexCache = index;
+      this._headingIndexCacheKey = registry.snapshotId;
+      return index;
     }
 
     extractHeadings() {
@@ -531,8 +612,20 @@
       const MAX_ELEMENTS = 120;
       const extracted = [];
       let elementLimitReached = false;
+      // Bound the WORK, not just the output. A `continue` for a non-rendered
+      // node never increments `extracted`, so on a page whose third pass
+      // matches thousands of mostly-hidden links the loop ran to completion,
+      // doing two getComputedStyle reads and a layout read per node. Cap the
+      // candidates examined so a pathological page degrades instead of hanging.
+      const MAX_CANDIDATES_EXAMINED = MAX_ELEMENTS * 12;
+      let candidatesExamined = 0;
 
       for (const node of rawNodes) {
+        if (candidatesExamined >= MAX_CANDIDATES_EXAMINED) {
+          elementLimitReached = true;
+          break;
+        }
+        candidatesExamined++;
         const rect = node.getBoundingClientRect();
         const isVisible = this.isElementVisible(node, rect);
         // Off-screen but rendered controls are still real, typeable fields on
@@ -561,8 +654,8 @@
         const context = this.getContextText(node);
         const price_value = this.parsePrice(`${label} ${context}`);
         const describedBy = String(node.getAttribute('aria-describedby') || '').split(/\s+/)
-          .map((id) => {
-            const described = document.getElementById(id);
+          .map((describedById) => {
+            const described = document.getElementById(describedById);
             return described ? this.getVisiblePageText(described) : '';
           })
           .filter(Boolean).join(' ').slice(0, 500);
@@ -744,9 +837,22 @@
     }
 
     _hasOpaqueVisualSurface() {
+      // Size gate first. A 1x1 tracking pixel, a hidden preload canvas or a
+      // collapsed ad placeholder is technically a canvas/video/iframe but covers
+      // no meaningful area, and treating it as an opaque surface withheld the
+      // screenshot on virtually every modern page (every page has an analytics
+      // pixel), which silently removed all visual grounding.
+      const MIN_OPAQUE_AREA_PX = 4000; // ~63x63
+      const MIN_OPAQUE_FRACTION = 0.02; // ...or 2% of the viewport
+      const viewportArea = Math.max(1, window.innerWidth * window.innerHeight);
       for (const el of document.querySelectorAll('canvas, video, iframe')) {
         const rect = el.getBoundingClientRect();
-        if (rect.width > 0 && rect.height > 0 && this.isElementVisible(el, rect)) return true;
+        if (!(rect.width > 0 && rect.height > 0)) continue;
+        if (!this.isElementVisible(el, rect)) continue;
+        const area = rect.width * rect.height;
+        if (area >= MIN_OPAQUE_AREA_PX || area / viewportArea >= MIN_OPAQUE_FRACTION) {
+          return true;
+        }
       }
       return false;
     }
@@ -909,6 +1015,7 @@
       this.revision = 0;
       this.observer = null;
       this.ignoredNodes = new WeakSet();
+      this._mutationFlushTimer = null;
       this._startObserving();
     }
 
@@ -931,14 +1038,40 @@
           const nodes = [...Array.from(record.addedNodes || []), ...Array.from(record.removedNodes || [])];
           return nodes.some((node) => !this.ignoredNodes.has(node));
         });
-        if (changed) {
+        if (!changed) return;
+        // Coalesce bursts. A page like YouTube writes attributes and text on
+        // every animation frame, so this callback can fire hundreds of times a
+        // second; each call is cheap but the volume is real main-thread cost.
+        // Revision is a monotonic counter, so bumping it once per burst is
+        // equivalent for the staleness comparisons that read it.
+        if (this._mutationFlushTimer !== null) return;
+        this._mutationFlushTimer = setTimeout(() => {
+          this._mutationFlushTimer = null;
           this.lastMutationTime = Date.now();
           this.revision += 1;
-        }
+        }, MUTATION_COALESCE_MS);
       });
       try {
-        this.observer.observe(target, { childList: true, subtree: true, attributes: true, characterData: true });
-      } catch {}
+        // attributeFilter is the important half: without it Blink must build a
+        // MutationRecord for EVERY attribute write anywhere in the document.
+        // These are the attributes that can change what an element IS or what
+        // it is worth; everything else (a CSS class for a hover style, a data
+        // attribute for a framework's internal bookkeeping) cannot affect
+        // extraction and no longer wakes the observer at all.
+        this.observer.observe(target, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeFilter: OBSERVED_ATTRIBUTES,
+          characterData: true
+        });
+      } catch {
+        // attributeFilter is widely supported but must not be load-bearing:
+        // if it is rejected, fall back to the unfiltered observation.
+        try {
+          this.observer.observe(target, { childList: true, subtree: true, attributes: true, characterData: true });
+        } catch {}
+      }
     }
 
     markAction() {
@@ -1228,10 +1361,25 @@
     async _executeClick(element, coords) {
       if (element) {
         element.focus();
-        element.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, cancelable: true }));
-        element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-        element.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+        // .click() ALONE. HTMLElement.click() synthesises the whole
+        // pointerdown -> mousedown -> pointerup -> mouseup -> click sequence
+        // itself, so dispatching the first three by hand and then calling
+        // .click() delivered every handler in that sequence twice. Anything
+        // that toggles on mousedown (custom role=checkbox/radio widgets, which
+        // are extremely common) saw two toggles and netted out to no change at
+        // all, which looks exactly like a dead page.
         element.click();
+        // Report BEFORE waiting. A click that navigates commits within a few
+        // milliseconds, which tears down this document along with every pending
+        // timer in it -- so an await here means sendResponse() never runs and
+        // the background sees "The message port closed before a response was
+        // received". That turned every link click, form submit and SPA route
+        // change into a phantom failure, and it is why playback could never be
+        // certified from a link click. Only wait when the click demonstrably
+        // did NOT tear the page down.
+        if (!this._clickMayNavigate(element)) {
+          await this._waitForFieldSettle(element);
+        }
         return { success: true };
       }
 
@@ -1239,11 +1387,50 @@
         const el = document.elementFromPoint(coords[0], coords[1]);
         if (el) {
           el.click();
+          if (!this._clickMayNavigate(el)) {
+            await this._waitForFieldSettle(el);
+          }
           return { success: true };
         }
       }
 
       throw new Error('Target click element not found');
+    }
+
+    /**
+     * True when clicking this element can unload the document or swap the view.
+     *
+     * The tell is that the click has somewhere to GO: a real href, a form
+     * owner, or a submit button. Those must be answered synchronously. Clicks
+     * on plain controls stay in the page, so settling after them is safe and
+     * gives the verifier a chance to observe the reaction.
+     */
+    _clickMayNavigate(element) {
+      if (!element || typeof element !== 'object') return true;
+      try {
+        if (element.isConnected === false) return true;
+        const tag = String(element.tagName || '').toUpperCase();
+        if (tag === 'A' && element.getAttribute('href')) return true;
+        if (tag === 'AREA' && element.getAttribute('href')) return true;
+        if (tag === 'FORM') return true;
+        if (tag === 'BUTTON') {
+          const type = String(element.getAttribute('type') || 'submit').toLowerCase();
+          if (type === 'submit' && (element.form || element.closest?.('form'))) return true;
+        }
+        if (tag === 'INPUT') {
+          const type = String(element.getAttribute('type') || '').toLowerCase();
+          if (['submit', 'image', 'reset'].includes(type)) return true;
+        }
+        // A link-ish or button-ish custom control: role and tabindex are the
+        // only signals available, and both appear on SPA route handlers.
+        const role = String(element.getAttribute?.('role') || '').toLowerCase();
+        if (role === 'link' || role === 'button' || role === 'menuitem') return true;
+        if (element.closest?.('a[href], form')) return true;
+        return false;
+      } catch {
+        // If we cannot tell, assume the worst and answer synchronously.
+        return true;
+      }
     }
 
     async _executeType(element, text) {
@@ -1529,7 +1716,12 @@
 
       // The result carries the file NAME only. The document name is the token
       // the model already knows; the bytes are never echoed back anywhere.
-      return { success: true, uploadedFile: fileName, document: doc.name };
+      // Deliberately NOT returning the file name. This result object is stored on the
+      // task and feeds `task_history`, which the planner sees on the next step,
+      // and the local vault's whole premise is that file names never leave the
+      // device. `doc.name` is the sanitized LOCAL_DOCUMENT_<NAME> token the user
+      // chose in the side panel, which is already safe to display.
+      return { success: true, document: doc.name, byteLength: doc.byteLength };
     }
 
     async _executeSubmit(element) {
@@ -1729,6 +1921,31 @@
       return null;
     }
 
+    /**
+     * Best-effort semantic type for a control, read from the DOM.
+     *
+     * The planner does not supply `semantic_type`, so anything that depends on
+     * it (the country alias table in _normalizeFormOption) had to infer it from
+     * the element. Name, id and the associated label text are the only signals
+     * available in a sanitized observation.
+     */
+    _inferSemanticType(el, field = {}) {
+      const declared = String(field.semantic_type || '').trim().toLowerCase();
+      if (declared) return declared;
+      const hints = [
+        el?.getAttribute?.('name'),
+        el?.getAttribute?.('id'),
+        el?.getAttribute?.('aria-label'),
+        el?.getAttribute?.('placeholder'),
+        field.field_label
+      ].filter((part) => typeof part === 'string' && part).join(' ');
+      const haystack = hints.toLowerCase();
+      if (/\b(country|nation)\b/.test(haystack)) return 'country';
+      if (/\b(state|province|region)\b/.test(haystack)) return 'state';
+      if (/\bgender|sex\b/.test(haystack)) return 'gender';
+      return '';
+    }
+
     _normalizeFormOption(value, semanticType = '') {
       let normalized = String(value ?? '').trim().toLowerCase().replace(/[._-]+/g, ' ').replace(/\s+/g, ' ');
       if (semanticType === 'country') {
@@ -1753,11 +1970,29 @@
       const type = String(el.type || '').toLowerCase();
       const role = String(el.getAttribute?.('role') || '').toLowerCase();
       if (tag === 'SELECT') {
-        const semanticType = field.semantic_type || '';
+        // Infer the semantic type from the ELEMENT, not from the planner.
+        // `field.semantic_type` is never populated on the planner path (the
+        // documented field shape is {field_id, control_type, value|value_source}),
+        // so reading it only meant the country alias map below was dead code and
+        // `<option value="us">United States of America</option>` could never be
+        // matched by a vault value of "United States".
+        const semanticType = this._inferSemanticType(el, field);
         const normalize = candidate => this._normalizeFormOption(candidate, semanticType);
         const want = normalize(value);
-        const opt = Array.from(el.options || []).find(option => normalize(option.value) === want)
-          || Array.from(el.options || []).find(option => normalize(option.text) === want);
+        const options = Array.from(el.options || []);
+        let opt = options.find(option => normalize(option.value) === want)
+          || options.find(option => normalize(option.text) === want);
+        if (!opt) {
+          // Guarded substring fallback, mirroring _executeSelect: a stored
+          // "United States" must resolve against "United States of America",
+          // but only when the candidate unambiguously contains the wanted text.
+          opt = options.find((option) => {
+            const text = normalize(option.text);
+            const val = normalize(option.value);
+            return (text.length >= 4 && (text.includes(want) || val.includes(want)))
+              || (want.length >= 4 && (want.includes(text) || want.includes(val)));
+          });
+        }
         if (!opt) throw new Error('No select option matches the configured profile value.');
         if (el.selectedIndex !== Array.from(el.options).indexOf(opt)) {
           const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value')?.set;
@@ -1973,7 +2208,20 @@
      * 150ms of quiet, hard-capped at 500ms — before the next field.
      */
     async _waitForFieldSettle(el) {
-      const scope = el?.form || el?.closest('form') || el?.parentElement || document.body;
+      // A non-form control (a clicked button, a menu item) is not waiting on a
+      // dependent dropdown, and observing it was actively harmful: with no form
+      // the scope collapsed to parentElement, and when the click had already
+      // removed the element that was null, so the scope became document.body
+      // -- an unfiltered subtree observer over the whole page that never goes
+      // quiet on an SPA. That cost the full 500ms cap on every such click and
+      // multiplied Blink's per-mutation cost page-wide.
+      const tag = String(el?.tagName || '').toUpperCase();
+      const isField = tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || el?.isContentEditable === true;
+      if (!isField) {
+        await this.sleep(120);
+        return;
+      }
+      const scope = el?.form || el?.closest?.('form') || el?.parentElement || null;
       if (typeof MutationObserver === 'undefined' || !scope) {
         await this.sleep(300);
         return;
@@ -1993,7 +2241,14 @@
           quietTimer = setTimeout(finish, 150); // settled after a quiet window
         });
         try {
-          observer.observe(scope, { childList: true, subtree: true, attributes: true });
+          // Same attribute filter as the page-stability observer, so the two
+          // notions of "settled" cannot disagree.
+          observer.observe(scope, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: OBSERVED_ATTRIBUTES
+          });
         } catch {
           finish();
           return;
@@ -2067,14 +2322,6 @@
           sendResponse({ success: false, error: err.message });
         });
         return true;
-
-      case MessageType.HIGHLIGHT_ELEMENT:
-        if (payload?.element_id) {
-          const el = registry.getElement(payload.element_id);
-          if (el) visualOverlay.highlightElement(el);
-        }
-        sendResponse({ success: true });
-        break;
 
       case MessageType.CLEAR_OVERLAYS:
         visualOverlay.clear();

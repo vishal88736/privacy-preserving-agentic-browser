@@ -40,7 +40,7 @@ export class ObservationFusion {
       href: domEl.href || '',
       bounding_box: domEl.bbox || null,
       visible,
-      enabled: visible && !Boolean(domEl.disabled),
+      enabled: visible && !domEl.disabled,
       disabled: Boolean(domEl.disabled),
       checked: Boolean(domEl.checked),
       selected: Boolean(domEl.selected || selectedOption),
@@ -114,7 +114,11 @@ export class ObservationFusion {
             (domEl.tag !== 'input' && domEl.tag !== 'textarea' && domEl.tag !== 'select')
           )
         ),
-        typeable: (domEl.tag === 'input' && domEl.type !== 'checkbox' && domEl.type !== 'radio' && domEl.type !== 'button' && domEl.type !== 'submit') ||
+        // Must match semantic-capability.js typeable(), which is authoritative and
+        // also excludes file/image. A file input advertised as typeable:true
+        // let a mis-grounded TYPE pass pre-validation and then fail inside the
+        // content script, where the model cannot see why.
+        typeable: (domEl.tag === 'input' && !['checkbox', 'radio', 'button', 'submit', 'file', 'image'].includes(String(domEl.type || ''))) ||
           domEl.tag === 'textarea' || domEl.is_contenteditable === true || String(domEl.role || '').toLowerCase() === 'textbox',
         uploadable: domEl.type === 'file'
       },
@@ -191,10 +195,15 @@ export class ObservationFusion {
       }];
     });
     const formGroups = new Map();
+    // Fields not inside a <form> (role="group" wrappers, bare divs, SPAs) have
+    // no form_group_id. They were dropped here, which emptied form_state.forms
+    // and disabled the entire completion guard for exactly those pages. Group
+    // them under one synthetic id so they are still accounted for.
+    const UNWRAPPED_FORM_ID = '__unwrapped_fields__';
     for (const field of formFields) {
-      if (!field.form_group_id) continue;
-      if (!formGroups.has(field.form_group_id)) formGroups.set(field.form_group_id, []);
-      formGroups.get(field.form_group_id).push(field);
+      const groupId = field.form_group_id || UNWRAPPED_FORM_ID;
+      if (!formGroups.has(groupId)) formGroups.set(groupId, []);
+      formGroups.get(groupId).push(field);
     }
     const forms = [...formGroups.entries()].map(([form_group_id, fields]) => {
       const filled = fields.filter((field) => field.state === 'FILLED').length;

@@ -18,6 +18,10 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # Lint before tests: the extension has no typechecker, so eslint is the
+      # only static gate. eqeqeq in particular is what catches the
+      # `!== undefined` vs truthiness drift that silently broke UPLOAD.
+      - run: npm run lint
       - run: npm run test:all
       - run: npm run build:extensions
 

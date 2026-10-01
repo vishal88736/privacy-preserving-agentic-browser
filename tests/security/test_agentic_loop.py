@@ -42,8 +42,18 @@ class AgenticLoopTests(unittest.TestCase):
             self.assertIn(field, UNIVERSAL_TASK_PROMPT)
         self.assertIn("Never emit UPLOAD", UNIVERSAL_TASK_PROMPT)
         self.assertNotIn("SUBMIT | UPLOAD |", UNIVERSAL_TASK_PROMPT)
-        self.assertIn("Never emit FILL_FORM_PLAN", UNIVERSAL_TASK_PROMPT)
-        self.assertIn("Never emit\nSWITCH_TAB", UNIVERSAL_TASK_PROMPT)
+        # FILL_FORM_PLAN is now the documented way to fill several fields in one
+        # step: one TYPE per field cost a full round-trip and a fresh observation
+        # each time. Assert the batch contract instead of the old prohibition,
+        # including the rule that makes a partial write impossible -- a single
+        # unknown field_id voids the whole plan, which is what the backend's
+        # grounding repair now enforces.
+        self.assertNotIn("Never emit FILL_FORM_PLAN", UNIVERSAL_TASK_PROMPT)
+        self.assertIn("FILL_FORM_PLAN is how you fill more than one field", UNIVERSAL_TASK_PROMPT)
+        self.assertIn("Every field_id MUST appear in ALLOWED_ELEMENT_IDS", UNIVERSAL_TASK_PROMPT)
+        self.assertIn("A file input is never part of a plan", UNIVERSAL_TASK_PROMPT)
+        self.assertIn("Never emit SWITCH_TAB; it is not supported by the page executor.",
+                        UNIVERSAL_TASK_PROMPT)
         self.assertIn("runtime confirmation is\nstill required for SUBMIT", UNIVERSAL_TASK_PROMPT)
         self.assertIn("three consecutive failed steps", UNIVERSAL_TASK_PROMPT)
         for playbook in (
@@ -490,6 +500,67 @@ class UploadGroundingTests(unittest.TestCase):
             ["LOCAL_DOCUMENT_AADHAAR", "../../etc/passwd", "LOCAL_AADHAAR", "LOCAL_DOCUMENT_aadhar"],
         )
         self.assertEqual(evidence["STORED_DOCUMENTS"], ["LOCAL_DOCUMENT_AADHAAR"])
+
+
+class FormPlanGroundingRepairTests(unittest.TestCase):
+    """FILL_FORM_PLAN carries its targets in value.fields[].field_id.
+
+    The generic repair only inspects a top-level target.element_id, so without
+    a dedicated guard every hallucinated or stale field id in a batch sailed
+    through. The executor then skipped that field and the plan still reported
+    success, so the agent believed it had filled the form when it had not.
+    """
+
+    def _repair(self, action, allowed):
+        sys.path.insert(0, str(ROOT / "backend"))
+        from gpt_oss_service import _repair_action
+        return _repair_action({"action": action}, set(allowed), None, {"elements": []}, [])
+
+    def test_a_fully_grounded_plan_is_forwarded_unchanged(self):
+        action = {
+            "action": "FILL_FORM_PLAN",
+            "value": {"fields": [
+                {"field_id": "el_1", "control_type": "TEXT", "value": "Ada"},
+                {"field_id": "el_2", "control_type": "EMAIL", "value": "ada@example.test"},
+                {"field_id": "el_3", "control_type": "SELECT", "value": "India"},
+            ]},
+        }
+        result = self._repair(action, ["el_1", "el_2", "el_3", "el_9"])
+        self.assertEqual(result["action"]["action"], "FILL_FORM_PLAN")
+        self.assertEqual(len(result["action"]["value"]["fields"]), 3)
+
+    def test_one_ungrounded_field_id_voids_the_whole_plan(self):
+        for bad in ("el_missing", "el_1' OR 1=1", "", None, 12345):
+            with self.subTest(field_id=bad):
+                action = {
+                    "action": "FILL_FORM_PLAN",
+                    "value": {"fields": [
+                        {"field_id": "el_1", "value": "Ada"},
+                        {"field_id": bad, "value": "x"},
+                    ]},
+                }
+                result = self._repair(action, ["el_1"])
+                self.assertEqual(result["action"]["action"], "WAIT")
+                self.assertIn("not in the current observation", result["thought"])
+
+    def test_an_empty_or_missing_fields_array_is_downgraded(self):
+        for value in ({}, {"fields": []}, {"fields": None}, "not-an-object", None):
+            with self.subTest(value=value):
+                result = self._repair({"action": "FILL_FORM_PLAN", "value": value}, ["el_1"])
+                self.assertEqual(result["action"]["action"], "WAIT")
+                self.assertIn("no fields array", result["thought"])
+
+    def test_a_batch_containing_a_file_input_target_is_still_grounded_checked(self):
+        # A file input may legitimately appear in the observation, so the id
+        # check alone lets it through. It is rejected later, by the executor
+        # and the risk gate -- what matters here is that nothing about the
+        # grounding guard silently widens what a plan may touch.
+        action = {
+            "action": "FILL_FORM_PLAN",
+            "value": {"fields": [{"field_id": "el_file", "value": "/etc/passwd"}]},
+        }
+        result = self._repair(action, ["el_file"])
+        self.assertEqual(result["action"]["action"], "FILL_FORM_PLAN")
 
 
 if __name__ == "__main__":

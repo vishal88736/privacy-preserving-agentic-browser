@@ -10,6 +10,7 @@ import sys
 import time
 import json
 import re
+from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from e2e_support import (MissingPrerequisite, require_browser, require_backend,
                           require_playwright, resolve_extension_path, run_or_skip)
@@ -44,6 +45,17 @@ SENSITIVE_TEST_VALUES = [
     "9876543210",           # Phone
     "15/08/2002"            # DOB
 ]
+
+def configured_backend_token():
+    env_token = os.environ.get('BACKEND_SHARED_SECRET', '').strip()
+    if env_token:
+        return env_token
+    env_file = Path('.env')
+    if env_file.exists():
+        for line in env_file.read_text(encoding='utf-8').splitlines():
+            if line.startswith('BACKEND_SHARED_SECRET='):
+                return line.split('=', 1)[1].strip().strip('"').strip("'")
+    return ''
 
 def run_privacy_and_latency_audit():
     os.system(f"rm -rf {USER_DATA}")
@@ -117,6 +129,17 @@ def run_privacy_and_latency_audit():
         sp.wait_for_load_state("networkidle")
         time.sleep(1)
 
+        # Use the configured local backend when available. The token is entered
+        # only into the trusted side panel settings and is never part of the
+        # captured request assertions below.
+        backend_token = configured_backend_token()
+        if backend_token:
+            sp.locator('#settings-btn').click()
+            sp.locator('#settings-backend').fill('http://localhost:8000')
+            sp.locator('#settings-backend-token').fill(backend_token)
+            sp.locator('#save-settings-btn').click()
+            time.sleep(1)
+
         # Run SIH Demo Workflow:
         # Prompt: "Fill this application using my saved profile and ask before submitting"
         print("\n[SIH Demo] Starting Aadhaar Citizen Portal flow...")
@@ -129,11 +152,27 @@ def run_privacy_and_latency_audit():
         confirmation_handled = False
         completed = False
 
-        for sec in range(50):
+        for sec in range(90):
             time.sleep(1)
             state = sp.inner_text("#agent-state-text")
             confirm_visible = sp.is_visible("#confirmation-modal")
             done_visible = sp.is_visible("#done-state")
+
+            # The empty vault intentionally routes protected fields through the
+            # local clarification UI. Use synthetic sentinels here so the
+            # audit proves they can reach the page without reaching the
+            # backend. They are never saved to the vault.
+            if sp.is_visible("#user-input-modal"):
+                answers = ["Demo User", "4821 7392 0184", "ABCDE1234F", "15/08/2002", "9876543210"]
+                fields = sp.locator(".user-input-field-input-box")
+                for index, answer in enumerate(answers):
+                    if index >= fields.count():
+                        break
+                    field = fields.nth(index)
+                    if field.get_attribute("type") == "checkbox":
+                        continue
+                    field.fill(answer)
+                sp.click("#user-input-submit-btn")
 
             if confirm_visible and not confirmation_handled:
                 confirmation_handled = True

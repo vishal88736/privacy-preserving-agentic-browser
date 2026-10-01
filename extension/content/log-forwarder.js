@@ -36,7 +36,7 @@
 
   const consoleMethod = { debug: 'debug', info: 'log', warn: 'warn', error: 'error' };
 
-  function writeConsole(level, scope, message, fields) {
+  function writeConsole(level, scope, message, _fields) {
     try {
       const line = `${level.toUpperCase()} [${scope || 'Content'}] ${message}`;
       const fn = globalThis.console?.[consoleMethod[level] || 'log'];
@@ -64,12 +64,15 @@
     if (!queue.length) return;
     const batch = queue;
     queue = [];
-    const dropped = suppressed;
+    // Snapshot the drop count ONCE, then reset the counter. This was declared
+    // `const dropped` and still assigned below, which throws a TypeError on the
+    // first flush after any event was dropped -- i.e. exactly when the logger
+    // is under pressure and most needed to work.
+    const droppedEvents = suppressed;
     suppressed = 0;
     for (const event of batch) {
-      if (dropped > 0) {
-        event.suppressed = (event.suppressed || 0) + dropped;
-        dropped = 0;
+      if (droppedEvents > 0) {
+        event.suppressed = (event.suppressed || 0) + droppedEvents;
       }
       send(event);
     }

@@ -21,6 +21,13 @@ const LOCAL_VISION_MESSAGE = 'LOCAL_VISION_ANALYZE';
 // text the OCR simply could not read, which is exactly the case where a
 // canvas- or image-rendered secret is sitting in the pixels unmasked.
 const MIN_OCR_CHARACTERS = 24;
+// OCR confidence floor for a masked region. Tesseract word confidence routinely
+// sits in the 0.5-0.8 band for small, anti-aliased or coloured text, so a
+// higher floor withheld the screenshot on ordinary pages and silently removed
+// all remote vision. 0.45 still catches a region the OCR essentially could not
+// read, which is the case that actually matters: we must not claim to have
+// masked text we never actually saw.
+const MIN_REGION_CONFIDENCE = 0.45;
 
 function extensionApi() {
   return globalThis.browser || globalThis.chrome;
@@ -150,7 +157,14 @@ function boxesForSpans(lines, imageWidth, imageHeight, viewport) {
         x1: Math.max(box.x1, next.x1),
         y1: Math.max(box.y1, next.y1)
       }), { ...boxes[0] });
-      regions.push({ bbox: asBox(union.x0, union.y0, union.x1, union.y1, scaleX, scaleY), category: span.category });
+      const confidences = overlapping.map(({ word }) => word.confidence).filter(c => Number.isFinite(c));
+      const confidence = confidences.length ? confidences.reduce((a, b) => a + b) / confidences.length / 100 : 1.0;
+      const b = asBox(union.x0, union.y0, union.x1, union.y1, scaleX, scaleY);
+      regions.push({
+        box: { x: b[0], y: b[1], width: b[2], height: b[3] },
+        textCategory: span.category,
+        confidence: Number(confidence.toFixed(2))
+      });
     }
   }
   return { regions, unableToLocateSensitiveText };
@@ -265,11 +279,27 @@ export class LocalVisionEngine extends PerceptionProvider {
     // total OCR defeat without that false-positive risk. Partial OCR defeat on
     // a specific secret is caught by the category reconciliation instead.
     const ocrReadNothing = ocrWordCount < MIN_OCR_CHARACTERS;
+    const observedCounts = {};
+    for (const region of piiRegions) observedCounts[region.textCategory] = (observedCounts[region.textCategory] || 0) + 1;
+    // A region the OCR was not confident about is not a region we can claim to
+    // have masked. Before this, confidence was computed per region and then
+    // read by nobody, so a half-legible secret counted as covered. Requiring
+    // confidence on the masking path is the privacy-correct use of the number.
+    //
+    // Declared BEFORE unableToLocateSensitiveText, which reads it. With `const`
+    // these are in the temporal dead zone until initialised, so reading it
+    // first threw a ReferenceError on every step where OCR had located all its
+    // spans -- i.e. the happy path. That propagated up as a local-vision
+    // failure, which forced the screenshot to be withheld, which made the
+    // remote /vision endpoint permanently unreachable. Total, silent failure
+    // of both vision paths.
+    const lowConfidenceRegions = piiRegions.filter((region) =>
+      Number.isFinite(region.confidence) && region.confidence < MIN_REGION_CONFIDENCE);
+    const hasLowConfidenceCoverage = lowConfidenceRegions.length > 0;
     const unableToLocateSensitiveText = missingBoxes
+      || hasLowConfidenceCoverage
       || (ocrReadNothing && sensitiveSpans(ocrText).length > 0)
       || ocrReadNothing;
-    const observedCounts = {};
-    for (const region of piiRegions) observedCounts[region.category] = (observedCounts[region.category] || 0) + 1;
     const categoryAliases = { CREDENTIAL: ['CREDENTIAL', 'OTP', 'ACCOUNT'] };
     const uncoveredCategories = Object.entries(expectedSensitiveCounts || {}).flatMap(([category, expected]) => {
       const observed = (categoryAliases[category] || [category]).reduce((sum, name) => sum + (observedCounts[name] || 0), 0);
@@ -279,10 +309,14 @@ export class LocalVisionEngine extends PerceptionProvider {
       completed: true,
       safeToTransmitAfterRedaction: !unableToLocateSensitiveText && uncoveredCategories.length === 0,
       unlocatedSensitiveCategories: uncoveredCategories,
+      lowConfidenceRegions: lowConfidenceRegions.map((region) => ({
+        category: region.textCategory,
+        confidence: region.confidence
+      })),
       objectDetections,
       people,
       piiRegions,
-      piiCategories: [...new Set(piiRegions.map((region) => region.category))],
+      piiCategories: [...new Set(piiRegions.map((region) => region.textCategory))],
       unableToLocateSensitiveText,
       imageWidth,
       imageHeight,

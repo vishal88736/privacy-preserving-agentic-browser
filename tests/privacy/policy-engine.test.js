@@ -332,6 +332,31 @@ test('PolicyEngine - accepts a fully attested image', async () => {
   assert.equal(result, true);
 });
 
+test('PolicyEngine - accepts the controller redaction audit format and rejects contradictory fields', async () => {
+  const engine = makeEngine();
+  const audit = {
+    status: 'masked', coverage: 'complete', withheld: false,
+    local_model_completed: true, ocr_completed: true,
+    regions: [{ category: 'PASSWORD', x: 10, y: 10, width: 40, height: 20, method: 'dom' }],
+    detected_categories: ['PASSWORD']
+  };
+  const payload = { sanitized_screenshot: IMAGE, redaction_audit: audit, metadata: { redaction_audit: audit } };
+  await assert.doesNotReject(() => engine.enforceOutboundSafety(payload));
+  for (const override of [
+    { status: 'withheld' }, { status: 'unknown' }, { coverage: 'unknown' },
+    { ocr_completed: false }, { coverage_established: false }, { local_vision_completed: false }
+  ]) {
+    await assert.rejects(
+      engine.enforceOutboundSafety({ ...payload, redaction_audit: { ...audit, ...override } }),
+      OutboundPolicyViolationError
+    );
+  }
+  await assert.rejects(
+    engine.enforceOutboundSafety({ ...payload, metadata: { redaction_audit: { ...audit, coverage: 'unknown' } } }),
+    OutboundPolicyViolationError
+  );
+});
+
 test('PolicyEngine - base64 bytes still do not trip text patterns', async () => {
   // Stripping image bytes from the *text* scan is still correct: matching
   // PAN/card shapes inside base64 is meaningless and randomly fires.

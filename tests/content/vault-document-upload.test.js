@@ -71,18 +71,39 @@ test('a stored document is attached and both events reach the page', async () =>
     'input is dispatched before change, as a real selection does');
 });
 
-test('the result reports the file name and the token, never the bytes', async () => {
+test('the result carries the token and size, never the file name or the bytes', async () => {
   const { page, elementId } = await extractedFileInput();
   const result = await page.send('EXECUTE_ACTION', {
     action: 'UPLOAD',
     target: { element_id: elementId },
     resolvedValue: documentPayload()
   });
-  assert.equal(result.uploadedFile, 'aadhar.png');
   assert.equal(result.document, 'LOCAL_DOCUMENT_AADHAAR');
+  assert.equal(result.byteLength, 27);
   const serialized = JSON.stringify(result);
+  // The FILE NAME must not travel back. This result is stored on the task and
+  // feeds task_history, which the planner reads on the next step, and the whole
+  // premise of the local vault is that file names never leave the device --
+  // "Aadhaar_Scan_Final.pdf" would name the document to the server.
+  assert.ok(!serialized.includes('aadhar.png'),
+    'the stored file name must not appear in the action result');
+  assert.ok(!serialized.includes('uploadedFile'),
+    'no uploadedFile field may be returned to the background');
   assert.ok(!serialized.includes('SYNTHETIC-IDENTITY-DOCUMENT'), 'the body must not be echoed back');
   assert.ok(!serialized.includes(documentPayload().data), 'the encoded body must not be echoed back');
+});
+
+test('the file name reaches the page even though it never reaches the background', async () => {
+  // The page still needs the real name to display it, and only the page sees it.
+  const { page, fileInput, elementId } = await extractedFileInput();
+  await page.send('EXECUTE_ACTION', {
+    action: 'UPLOAD',
+    target: { element_id: elementId },
+    resolvedValue: documentPayload()
+  });
+  assert.equal(fileInput.files.length, 1);
+  assert.equal(fileInput.files[0].name, 'aadhar.png',
+    'the page must still receive the real file name');
 });
 
 test('a TYPE carrying a document token is refused; attachments require UPLOAD', async () => {

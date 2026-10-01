@@ -19,7 +19,6 @@ export class PageStateModeler {
     // inference); keep domain separately. Previously this returned only the
     // domain under the `url` key, losing /search, /login, ?q= signals.
     const fullUrl = page.url || domain || '';
-    const url = fullUrl;
 
     const candidateElements = [];
     let formInputs = 0;

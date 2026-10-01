@@ -11,7 +11,7 @@
  * other UPLOAD is still routed to ASK_USER.
  */
 
-import { ServerDefaults, ActionType, RiskLevel, SymbolicSecretSource, isDocumentToken } from '../shared/constants.js';
+import { ServerDefaults, ActionType, RiskLevel, isDocumentToken } from '../shared/constants.js';
 import { validateAction, validateReasonPayload } from '../shared/schemas.js';
 import { createLogger } from '../shared/logger.js';
 import { defaultPolicyEngine } from '../privacy/policy-engine.js';
@@ -19,7 +19,6 @@ import { defaultDOMSanitizer } from '../privacy/dom-sanitizer.js';
 import { defaultLocalVault } from '../privacy/local-vault.js';
 import { defaultActionParser } from './action-parser.js';
 import { defaultPromptBuilder } from './prompt-builder.js';
-import { defaultTaskGrounding } from '../perception/task-grounding.js';
 
 const log = createLogger({ scope: 'GPTOSSClient', surface: 'background' });
 
@@ -135,18 +134,52 @@ export class GPTOSSClient {
     };
   }
 
+  /**
+   * Dead-man result for an unreachable planner.
+   *
+   * The controller fails the task on `plannerUnavailable` rather than looping:
+   * without the backend there is no planner, and three WAITs would burn steps to
+   * reach the same conclusion.
+   *
+   * `kind` distinguishes a backend that is not LISTENING from one that answered
+   * and was unusable, because the user's fix is different in each case. This is
+   * derived from the error, never from anything the server returned, so it
+   * cannot be influenced by page content.
+   */
   _plannerUnavailable(cause) {
     const detail = cause?.message || cause || 'unknown error';
+    const low = String(detail).toLowerCase();
+    const name = String(cause?.name || '');
+    let kind = 'unreachable';
+    if (name === 'AbortError' || low.includes('abort')) {
+      // The 25s request budget expired. The backend accepted the connection
+      // and then went quiet -- a hung or overloaded server, not a missing one.
+      kind = 'timeout';
+    } else if (low.includes('http 5') || low.includes('returned 5')) {
+      kind = 'server_error';
+    } else if (low.includes('returned 4') && !low.includes('401') && !low.includes('403')) {
+      kind = 'rejected';
+    }
+    const advice = {
+      unreachable: 'Start the backend (python3 -m uvicorn server:app --app-dir backend --port 8000), then start the task again.',
+      timeout: 'The backend accepted the request but did not answer within 25s. Check the backend log for a stalled model call, then retry.',
+      server_error: 'The backend returned a server error. Check the backend log, then retry.',
+      rejected: 'The backend refused the request. Check the backend log for the reason.'
+    }[kind];
     return {
       task_understanding: { intent: 'unknown', constraints: [] },
       page_understanding: { page_type: 'unknown' },
-      thought: `Planner unavailable: the reasoning backend could not be reached (${detail}). Ensure the backend is running and configured, then start the task again.`,
+      thought: `Planner unavailable: the reasoning backend could not be reached (${detail}).`,
+      // The actionable instruction travels in the result so the side panel can
+      // show the actual fix rather than "service unavailable".
+      unavailableAdvice: advice,
+      unavailableKind: kind,
       action: { action: ActionType.WAIT, risk: RiskLevel.LOW, requires_confirmation: false },
       isTerminal: false,
       plannerUnavailable: true,
       remoteCallMade: false,
       remoteCallAttempted: true,
-      model_trace: { component: 'reasoning', source: 'unavailable', provider: null, model: null, planner: 'unavailable', reason: cause?.name || 'remote_error' }
+      model_trace: { component: 'reasoning', source: 'unavailable', provider: null, model: null, planner: 'unavailable', reason: kind }
     };
   }
 
@@ -198,7 +231,12 @@ export class GPTOSSClient {
       return {
         ...UNKNOWN_INTERPRETATION,
         remoteCallAttempted,
-        privacyBlocked: err?.name === 'OutboundPolicyViolationError'
+        privacyBlocked: err?.name === 'OutboundPolicyViolationError',
+        // PolicyEngine messages contain only a safe category/reason, never
+        // the matched value. Preserve that diagnostic for the task UI.
+        ...(err?.name === 'OutboundPolicyViolationError'
+          ? { privacyBlockMessage: String(err.message || 'Outbound policy blocked payload.').slice(0, 200) }
+          : {})
       };
     }
   }

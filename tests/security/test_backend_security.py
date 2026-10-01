@@ -65,6 +65,98 @@ class BackendBoundaryTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 service.process_visuals('t', 'data:image/png;base64,AA==', {'visible_text': value, 'elements': []}, {})
 
+    def test_vision_boundary_accepts_a_complete_audit_and_rejects_inconsistent_audits(self):
+        good = {
+            'status': 'masked', 'coverage': 'complete', 'withheld': False,
+            'local_model_completed': True, 'ocr_completed': True,
+            'regions': [{'category': 'PASSWORD', 'x': 1, 'y': 2,
+                         'width': 10, 'height': 12, 'method': 'dom'}],
+            'detected_categories': ['PASSWORD'],
+        }
+        def request(audit, *, top_level=False, conflicting=False):
+            metadata = {'redaction_audit': {**audit, **({'coverage': 'unknown'} if conflicting else {})}}
+            return server.VisionRequest(
+                task_id='t', sanitized_screenshot='data:image/png;base64,AA==',
+                sanitized_dom={'elements': []},
+                redaction_audit=(server.RedactionAudit(**audit) if top_level else None),
+                metadata=metadata)
+        with patch.object(server.vlm_service, 'process_visuals', return_value={'provenance': 'DOM_PLUS_HEURISTIC'}) as process:
+            self.assertEqual(server.process_vision(request(good))['status'], 'success')
+            self.assertEqual(server.process_vision(request(good, top_level=True))['status'], 'success')
+            with self.assertRaises(Exception) as raised:
+                server.process_vision(request(good, top_level=True, conflicting=True))
+            self.assertEqual(raised.exception.status_code, 400)
+            self.assertIn('disagree', raised.exception.detail)
+            for change in ({'status': 'withheld'}, {'status': 'unknown'}, {'coverage': 'partial'},
+                           {'ocr_completed': False}, {'regions': []}):
+                with self.subTest(change=change):
+                    with self.assertRaises(Exception) as raised:
+                        server.process_vision(request({**good, **change}))
+                    self.assertEqual(raised.exception.status_code, 400)
+            self.assertEqual(process.call_count, 2, 'a rejected screenshot must never reach a VLM')
+
+    def test_vision_boundary_accepts_the_geometry_real_pages_actually_produce(self):
+        """Regression: the audit schema must accept the regions the extension really sends.
+
+        content.js bboxOf() returns raw getBoundingClientRect() values with no
+        clamping, so a field scrolled above the viewport has a negative y, a
+        field inside a horizontally-scrolled container has a negative x, and a
+        display:none file input is deliberately retained despite not being
+        rendered -- giving a 0x0 box. An earlier ge=0 / gt=0 schema rejected
+        all three with HTTP 400, so /vision never ran for nearly every login or
+        upload page and the client silently degraded to DOM_ONLY.
+        """
+        real_world = {
+            'status': 'masked', 'coverage': 'complete', 'withheld': False,
+            'local_model_completed': True, 'ocr_completed': True,
+            'regions': [
+                # A sensitive field scrolled above the viewport.
+                {'category': 'EMAIL', 'x': 20, 'y': -480.0, 'width': 300.0, 'height': 24.0, 'method': 'dom'},
+                # A field inside a horizontally-scrolled container.
+                {'category': 'PAN', 'x': -30.0, 'y': 100.0, 'width': 200.0, 'height': 20.0, 'method': 'ocr'},
+                # A display:none file input, retained on purpose by content.js.
+                {'category': 'AADHAAR', 'x': 0.0, 'y': 0.0, 'width': 0.0, 'height': 0.0, 'method': 'dom'},
+            ],
+            'detected_categories': ['EMAIL', 'PAN', 'AADHAAR'],
+        }
+        request = server.VisionRequest(
+            task_id='t', sanitized_screenshot='data:image/png;base64,AA==',
+            sanitized_dom={'elements': []}, metadata={'redaction_audit': real_world})
+
+        with patch.object(server.vlm_service, 'process_visuals', return_value={'provenance': 'DOM_PLUS_REAL_VLM'}) as process:
+            result = server.process_vision(request)
+        self.assertEqual(result['status'], 'success')
+        self.assertEqual(process.call_count, 1, 'real page geometry must not cost us the VLM')
+
+        # A dense page may legitimately mask more regions than the old 256 cap.
+        dense = {**real_world, 'regions': [
+            {'category': 'OTP', 'x': 1.0, 'y': 2.0, 'width': 10.0, 'height': 10.0, 'method': 'ocr'}
+        ] * 400}
+        with patch.object(server.vlm_service, 'process_visuals', return_value={'provenance': 'DOM_PLUS_REAL_VLM'}) as process:
+            server.process_vision(server.VisionRequest(
+                task_id='t', sanitized_screenshot='data:image/png;base64,AA==',
+                sanitized_dom={'elements': []}, metadata={'redaction_audit': dense}))
+        self.assertEqual(process.call_count, 1, 'a dense page must not be rejected on region count alone')
+
+    def test_vision_provider_can_run_without_a_reasoning_key(self):
+        service = VLMService()
+        candidate = {'provider': 'OpenRouter', 'model': 'test/vision-model',
+                     'key': 'vision-key', 'url': 'https://example.test/chat/completions'}
+        response = type('Response', (), {
+            'status_code': 200,
+            'json': lambda self: {'choices': [{'message': {'content': '{"spatial_layout":"Visible form"}'}}]}
+        })()
+        with patch.object(settings, 'API_KEY', ''), \
+             patch.object(service.provider_rotator, 'ordered_candidates', return_value=[candidate]), \
+             patch('vlm_service.requests.post', return_value=response) as post:
+            result = service.process_visuals('t', 'data:image/png;base64,AA==', {'elements': []},
+                                             {'visual_query': 'What is shown?'})
+        self.assertEqual(result['provenance'], 'DOM_PLUS_REAL_VLM')
+        text = post.call_args.kwargs['json']['messages'][0]['content'][0]
+        self.assertEqual(text['type'], 'text')
+        self.assertIn('What is shown?', text['text'])
+        self.assertEqual(set(text), {'type', 'text'}, 'do not send nonstandard fields to the OpenAI-compatible API')
+
     def test_heuristic_provenance_is_explicit(self):
         service = VLMService()
         previous_key = settings.API_KEY
@@ -345,3 +437,204 @@ class BackendBoundaryTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestVisionFailureIsReported(unittest.TestCase):
+    """A dead vision provider must not look like a working one.
+
+    Falling back to the DOM heuristic is correct behaviour, but reporting it as
+    an ordinary DOM_PLUS_HEURISTIC result makes a wrong model id or an
+    exhausted rate limit indistinguishable from a page that simply had nothing
+    visual to say. The reason has to travel with the response.
+    """
+
+    def _dom(self):
+        return {
+            "url": "https://example.test/",
+            "title": "Example",
+            "elements": [],
+            "headings": [],
+            "visible_text": "hello",
+        }
+
+    def _screenshot(self):
+        # 1x1 transparent PNG.
+        return ("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+                "AAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
+
+    def test_total_provider_failure_is_reported_not_hidden(self):
+        from vlm_service import VLMService
+        from config import settings
+
+        service = VLMService()
+        original = service._try_real_vlm
+        # Every provider is unavailable.
+        service._try_real_vlm = lambda *a, **k: {
+            "failure": {
+                "attempts": [{"provider": "groq", "model": "qwen/qwen3.8-27b", "reason": "http_429"}],
+                "reason": "groq/qwen/qwen3.8-27b: http_429",
+                "provider": "groq",
+                "model": "qwen/qwen3.8-27b",
+            }
+        }
+        try:
+            out = service.process_visuals("t1", self._screenshot(), self._dom(), {})
+        finally:
+            service._try_real_vlm = original
+
+        self.assertEqual(out["provenance"], "DOM_PLUS_HEURISTIC")
+        self.assertNotEqual(
+            out.get("grounding_source"), "vision_model",
+            "a failed rotation must not claim vision grounding",
+        )
+        self.assertIn("vision_unavailable", out)
+        self.assertEqual(out["vision_unavailable"]["reason"], "groq/qwen/qwen3.8-27b: http_429")
+        self.assertEqual(out["model_trace"]["source"], "unavailable")
+        self.assertEqual(out["model_trace"]["model"], "qwen/qwen3.8-27b")
+
+    def test_health_reports_the_effective_first_vision_model(self):
+        import importlib
+        server = importlib.import_module("server")
+        # Patch the rotator instead of calling the real ordered_candidates().
+        # The previous version called the same function the endpoint calls and
+        # then asserted equality with its result, so it could only fail if
+        # health_check stopped consulting the rotator at all -- it could not
+        # catch the endpoint reporting the wrong model. Worse,
+        # ordered_candidates() ADVANCES the round-robin cursor, so the old test
+        # mutated shared rotator state and was order-dependent.
+        with patch.object(server.vlm_service.provider_rotator, 'ordered_candidates',
+                          return_value=[{'provider': 'Groq', 'model': 'qwen/effective-first'},
+                                        {'provider': 'Groq', 'model': 'qwen/second'}]):
+            body = server.health_check()
+        self.assertEqual(body['models']['vlm'], 'qwen/effective-first',
+                         'health must name the model actually tried first')
+
+        # And when the rotator raises, diagnostics must still answer.
+        with patch.object(server.vlm_service.provider_rotator, 'ordered_candidates',
+                          side_effect=RuntimeError('rotator unreadable')):
+            body = server.health_check()
+        self.assertEqual(body['status'], 'healthy')
+        self.assertIn('vlm', body['models'])
+        self.assertIn('vlm_providers', body)
+
+
+class TestVisionRotationAccumulatesRealFailures(unittest.TestCase):
+    """Drive the real rotation loop; do not mock the unit under test.
+
+    The companion test above replaces _try_real_vlm with a literal dict, so it
+    proves only that process_visuals propagates a failure it was handed. Delete
+    the whole failures/accumulation block in vlm_service and that test still
+    passes. These cases patch requests.post instead, so they fail if the
+    accumulation, the per-candidate attribution, or the final `if failures`
+    return ever regresses.
+    """
+
+    def _dom(self):
+        return {"url": "https://example.test/", "title": "Example",
+                "elements": [], "headings": [], "visible_text": "hello"}
+
+    def _screenshot(self):
+        return ("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+                "AAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
+
+    def _service_with_candidates(self, candidates):
+        from vlm_service import VLMService
+        service = VLMService()
+        service.provider_rotator.ordered_candidates = lambda: list(candidates)
+        return service
+
+    def _post_returning(self, response):
+        class _Resp:
+            status_code = response["status_code"]
+
+            @staticmethod
+            def json():
+                return response.get("json", {})
+        return _Resp()
+
+    def test_http_error_rotation_is_recorded_per_candidate(self):
+        import requests
+        service = self._service_with_candidates([
+            {"provider": "groq", "model": "qwen/vision-1", "key": "k1", "url": "https://a.test/v1/chat/completions"},
+            {"provider": "hf", "model": "qwen/vision-2", "key": "k2", "url": "https://b.test/v1/chat/completions"},
+        ])
+        calls = []
+
+        def fake_post(url, **kwargs):
+            calls.append(kwargs.get("headers", {}).get("Authorization"))
+            return self._post_returning({"status_code": 429})
+
+        with patch.object(requests, "post", side_effect=fake_post):
+            out = service.process_visuals("t", self._screenshot(), self._dom(), {})
+
+        self.assertIn("vision_unavailable", out, "a total rotation failure must be reported")
+        failure = out["vision_unavailable"]
+        self.assertEqual(len(failure["attempts"]), 2, "both candidates must be recorded")
+        self.assertEqual(failure["attempts"][0]["provider"], "groq")
+        self.assertEqual(failure["attempts"][0]["reason"], "http_429")
+        self.assertEqual(failure["attempts"][1]["provider"], "hf")
+        # Per-candidate attribution must be correct, not carried over.
+        self.assertNotEqual(failure["attempts"][0]["model"], failure["attempts"][1]["model"])
+        self.assertNotEqual(out.get("grounding_source"), "vision_model")
+        self.assertEqual(len(calls), 2, "both credentials must actually be tried")
+
+    def test_empty_content_and_non_json_are_distinguished(self):
+        import requests
+        service = self._service_with_candidates([
+            {"provider": "groq", "model": "qwen/vision-1", "key": "k1", "url": "https://a.test/v1/chat/completions"},
+            {"provider": "hf", "model": "qwen/vision-2", "key": "k2", "url": "https://b.test/v1/chat/completions"},
+        ])
+        responses = [
+            self._post_returning({"status_code": 200, "json": {"choices": [{"message": {"content": "  "}}]}}),
+            self._post_returning({"status_code": 200, "json": {"choices": [{"message": {"content": "not json at all"}}]}}),
+        ]
+        with patch.object(requests, "post", side_effect=responses):
+            out = service.process_visuals("t", self._screenshot(), self._dom(), {})
+
+        reasons = [a["reason"] for a in out["vision_unavailable"]["attempts"]]
+        self.assertEqual(reasons, ["empty_content", "non_json"])
+
+    def test_a_timeout_stops_the_rotation_but_still_reports(self):
+        import requests
+        service = self._service_with_candidates([
+            {"provider": "groq", "model": "qwen/vision-1", "key": "k1", "url": "https://a.test/v1/chat/completions"},
+            {"provider": "hf", "model": "qwen/vision-2", "key": "k2", "url": "https://b.test/v1/chat/completions"},
+        ])
+
+        def fake_post(*a, **k):
+            raise requests.exceptions.Timeout("upstream timed out")
+
+        with patch.object(requests, "post", side_effect=fake_post):
+            out = service.process_visuals("t", self._screenshot(), self._dom(), {})
+
+        reasons = [a["reason"] for a in out["vision_unavailable"]["attempts"]]
+        self.assertEqual(reasons, ["timeout"])
+        # A timeout is terminal for the request: do not keep burning credentials.
+        self.assertEqual(len(reasons), 1, "a timeout must not fan out to every remaining candidate")
+
+    def test_a_working_provider_still_wins_and_reports_no_failure(self):
+        import requests
+        service = self._service_with_candidates([
+            {"provider": "groq", "model": "qwen/vision-1", "key": "k1", "url": "https://a.test/v1/chat/completions"},
+            {"provider": "hf", "model": "qwen/vision-2", "key": "k2", "url": "https://b.test/v1/chat/completions"},
+        ])
+        good = {"choices": [{"message": {"content": (
+            '{"spatial_layout": "two columns", "visual_state": "idle", "page_type": "form"}'
+        )}}]}
+
+        def fake_post(*a, **k):
+            return self._post_returning({"status_code": 200, "json": good})
+
+        with patch.object(requests, "post", side_effect=fake_post):
+            out = service.process_visuals("t", self._screenshot(), self._dom(), {})
+
+        self.assertNotIn("vision_unavailable", out, "a success must not be reported as a failure")
+        self.assertEqual(out.get("grounding_source"), "vision_model")
+        self.assertEqual(out.get("provenance"), "DOM_PLUS_REAL_VLM")
+
+    def test_no_configured_provider_is_reported_not_silently_healthy(self):
+        service = self._service_with_candidates([])
+        out = service.process_visuals("t", self._screenshot(), self._dom(), {})
+        self.assertIn("vision_unavailable", out)
+        self.assertEqual(out["vision_unavailable"]["reason"], "no_provider_configured")
+        self.assertNotEqual(out.get("grounding_source"), "vision_model")

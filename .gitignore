@@ -14,7 +14,9 @@ references/
 scratch/
 scratch*.py
 run_test_*.py
-launch_test_browser.py
+# Anchored: a bare pattern matches at ANY depth, which was hiding the tracked
+# scripts/launch_test_browser.py dev tool from git entirely.
+/launch_test_browser.py
 
 # Test artifacts
 tests/qa_screenshots/

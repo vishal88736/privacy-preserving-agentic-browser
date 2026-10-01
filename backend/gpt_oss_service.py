@@ -263,6 +263,32 @@ def _repair_action(parsed: dict, allowed: set, page_state: Optional[Dict[str, An
         if not isinstance(nav_url, str) or not re.match(r"^https?://", nav_url.strip(), re.I):
             downgrade_reason = "NAVIGATE target is not a valid http(s) URL"
 
+    # Grounding guard for FILL_FORM_PLAN: its targets live in value.fields[].field_id,
+    # not in a top-level target.element_id, so the generic id check below never
+    # sees them. Without this a hallucinated or stale field id would be forwarded
+    # and the executor would silently skip that field, so the batch would report
+    # success having filled fewer fields than the planner believed. Any ungrounded
+    # field id downgrades the whole plan: a partial write the model cannot see is
+    # worse than one more observation.
+    if action_type == "FILL_FORM_PLAN" and not downgrade_reason:
+        plan_value = act.get("value")
+        fields = plan_value.get("fields") if isinstance(plan_value, dict) else None
+        if not isinstance(fields, list) or not fields:
+            downgrade_reason = "FILL_FORM_PLAN has no fields array"
+        else:
+            ungrounded = [
+                str(f.get("field_id"))[:40]
+                for f in fields
+                if not isinstance(f, dict)
+                or not isinstance(f.get("field_id"), str)
+                or f.get("field_id") not in allowed
+            ]
+            if ungrounded:
+                downgrade_reason = (
+                    "FILL_FORM_PLAN references fields that are not in the current "
+                    f"observation: {', '.join(ungrounded[:4])}"
+                )
+
     if downgrade_reason:
         act["action"] = "WAIT"
         act["target"] = None

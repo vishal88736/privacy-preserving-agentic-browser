@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { LocalVault } from '../../extension/privacy/local-vault.js';
 import { LocalValueResolver } from '../../extension/executor/local-value-resolver.js';
-import { ActionExecutor } from '../../extension/executor/action-executor.js';
+import { ActionExecutor, actionExecutionTimeoutMs } from '../../extension/executor/action-executor.js';
 import { ActionValidator } from '../../extension/executor/action-validator.js';
 import { RiskGate } from '../../extension/executor/risk-gate.js';
 import { validateAction } from '../../extension/shared/schemas.js';
@@ -27,6 +27,14 @@ async function vaultWithDocument(name = 'LOCAL_DOCUMENT_AADHAAR') {
 }
 
 // ── Resolution ─────────────────────────────────────────────────────────────
+
+test('form-plan execution budget is based on the original action fields', () => {
+  assert.equal(actionExecutionTimeoutMs({ action: ActionType.CLICK }), 10000);
+  assert.equal(actionExecutionTimeoutMs({
+    action: ActionType.FILL_FORM_PLAN,
+    value: { fields: Array.from({ length: 12 }, (_, index) => ({ field_id: `el_${index}` })) }
+  }), 20800);
+});
 
 test('a document token resolves to a descriptor carrying the bytes', async () => {
   const vault = await vaultWithDocument();
@@ -68,6 +76,70 @@ test('a document token is not a form value', async () => {
 });
 
 // ── Schema ─────────────────────────────────────────────────────────────────
+
+test('an explicit null value is treated as absent, not as a forbidden inline value', () => {
+  // The planner is told to send "value": null beside a value_source token
+  // (backend/agentic/prompts.py), and JSON null survives the wire. Both the
+  // schema and the executor must read that as "no inline value" — an earlier
+  // `!== undefined` / truthiness mismatch rejected every real upload before
+  // the vault was ever read, and it logged nothing.
+  assert.equal(validateAction({
+    action: ActionType.UPLOAD,
+    target: { element_id: 'el_1' },
+    value: null,
+    value_source: 'LOCAL_DOCUMENT_AADHAAR'
+  }), true);
+
+  // ...while a real inline value is still refused.
+  assert.throws(
+    () => validateAction({
+      action: ActionType.UPLOAD,
+      target: { element_id: 'el_1' },
+      value: 'C:/Users/me/passport.pdf',
+      value_source: 'LOCAL_DOCUMENT_AADHAAR'
+    }),
+    /UPLOAD takes no inline value/
+  );
+});
+
+test('the executor accepts an upload whose value is explicitly null', async () => {
+  const vault = await vaultWithDocument();
+  let sent = null;
+  globalThis.chrome = {
+    runtime: { lastError: undefined },
+    tabs: {
+      sendMessage: (_tabId, message, callback) => {
+        // Round-trip through JSON, exactly as the real message channel does.
+        sent = JSON.parse(JSON.stringify(message));
+        callback({ success: true });
+      }
+    }
+  };
+  try {
+    const executor = new ActionExecutor(new LocalValueResolver(vault));
+    const result = await executor.execute(7, {
+      action: ActionType.UPLOAD,
+      target: { element_id: 'el_1' },
+      value: null,
+      value_source: 'LOCAL_DOCUMENT_AADHAAR'
+    }, { snapshotId: 'snap_1', mutationRevision: 1 });
+
+    assert.equal(result.success, true, 'a null value must not block the upload');
+    assert.equal(sent.payload.resolvedValue.__vaultDocument, true,
+      'the document bytes must still reach the content script');
+
+    // An unresolvable token must still be refused loudly rather than silently.
+    const rejected = await executor.execute(7, {
+      action: ActionType.UPLOAD,
+      target: { element_id: 'el_1' },
+      value: null,
+      value_source: 'LOCAL_PAN'
+    }, { snapshotId: 'snap_1', mutationRevision: 1 });
+    assert.equal(rejected.success, false);
+  } finally {
+    delete globalThis.chrome;
+  }
+});
 
 test('the schema accepts a document token and refuses every other upload source', () => {
   assert.equal(validateAction({

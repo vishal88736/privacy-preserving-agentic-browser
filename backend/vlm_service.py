@@ -182,18 +182,54 @@ class VLMService:
         heuristic["grounding_source"] = "dom_heuristic"
         heuristic["provenance"] = "DOM_PLUS_HEURISTIC"
         vision = self._try_real_vlm(sanitized_screenshot, heuristic, metadata, sanitized_dom)
-        if vision:
+        if vision and "failure" not in vision:
             heuristic.update(vision)
             heuristic["grounding_source"] = "vision_model"
             heuristic["provenance"] = "DOM_PLUS_REAL_VLM"
+        elif vision and vision.get("failure"):
+            # Every provider failed. Falling back to the DOM heuristic is the
+            # right *behaviour*, but reporting it as an ordinary
+            # DOM_PLUS_HEURISTIC result is not: a wrong model id or an
+            # exhausted rate limit then looks exactly like a working system
+            # that simply had nothing visual to say. The reason travels with
+            # the response so the side panel diagnostics can say what broke.
+            failure = vision["failure"]
+            heuristic["vision_unavailable"] = failure
+            heuristic["model_trace"] = {
+                "component": "vision",
+                "source": "unavailable",
+                "provider": failure.get("provider") or None,
+                "model": failure.get("model") or None,
+            }
+            logger.warning(
+                "No vision provider answered; serving the DOM heuristic. Reason: %s",
+                failure.get("reason"),
+                extra={"provider": failure.get("provider"), "model": failure.get("model"),
+                       "attempts": failure.get("attempts")},
+            )
         return heuristic
 
     def _try_real_vlm(self, screenshot: str, heuristic: Dict[str, Any], metadata: Dict[str, Any], sanitized_dom: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        if not settings.API_KEY or not screenshot or not str(screenshot).startswith("data:image"):
+        if not screenshot or not str(screenshot).startswith("data:image"):
             return None
+        # Vision credentials are configured independently from the reasoning
+        # credential. Requiring settings.API_KEY here silently disabled VLM
+        # failover whenever only OPENROUTER_API_KEYS/HUGGINGFACE_API_KEYS/
+        # GROQ_API_KEYS were configured.
         candidates = self.provider_rotator.ordered_candidates()
         if not candidates:
-            return None
+            # "No provider configured" is a misconfiguration, not a page that
+            # simply had nothing visual to say. Reporting it as an ordinary
+            # DOM_PLUS_HEURISTIC result is exactly the silent-failure class this
+            # provenance exists to eliminate.
+            return {
+                "failure": {
+                    "attempts": [],
+                    "reason": "no_provider_configured",
+                    "provider": None,
+                    "model": None,
+                }
+            }
 
         # Fit the image ONCE for all candidates. An image that exceeds the
         # payload limit is skipped entirely — truncating base64 mid-payload
@@ -205,7 +241,7 @@ class VLMService:
             logger.warning("Screenshot payload exceeds %d chars; using the DOM heuristic instead of corrupting the image", 1200000)
             return None
 
-        prompt = (
+        base_prompt = (
             "Describe the webpage layout in JSON with keys: "
             "spatial_layout (one sentence), visual_state (one sentence), "
             "page_type, notable_visible_text (array of short strings). "
@@ -213,23 +249,16 @@ class VLMService:
             "Black regions in the screenshot are local privacy masks: do not infer, reconstruct, or describe masked contents. "
             f"Known DOM summary: {heuristic.get('spatial_layout')}"
         )
-        visual_query = metadata.get("visual_query")
-        if isinstance(visual_query, str) and visual_query.strip():
-            prompt += (
-                " The user's visual question is: " + visual_query.strip()[:500] +
-                ". Answer only with visual details directly observable in unmasked regions; "
-                "say when the image does not provide enough evidence."
-            )
         redactions = metadata.get("privacy_redaction_summary") or {}
         if redactions:
-            prompt += (
+            base_prompt += (
                 " Local privacy pass completed before upload; "
                 f"{int(redactions.get('dom_regions') or 0)} DOM regions, "
                 f"{int(redactions.get('ocr_regions') or 0)} OCR regions, and "
                 f"{int(redactions.get('people_regions') or 0)} person regions were masked."
             )
             if redactions.get("screenshot_withheld"):
-                prompt += " The full screenshot was withheld as a neutral placeholder; use sanitized DOM for page-specific facts."
+                base_prompt += " The full screenshot was withheld as a neutral placeholder; use sanitized DOM for page-specific facts."
         local_vision = sanitized_dom.get("local_vision_context") or {}
         object_labels = [
             str(item.get("label") or "")[:48]
@@ -237,23 +266,55 @@ class VLMService:
             if isinstance(item, dict) and item.get("label")
         ]
         if object_labels:
-            prompt += " Browser-local object labels (not text OCR and not verified UI controls): " + ", ".join(object_labels) + "."
+            base_prompt += " Browser-local object labels (not text OCR and not verified UI controls): " + ", ".join(object_labels) + "."
+
+        # Every rotation records why it moved on, so a total failure can explain
+        # itself instead of looking like a page with nothing to see.
+        #
+        # The provider/model are arguments rather than captured variables: an
+        # earlier version read them from the enclosing scope, which happened to
+        # be correct only because they were rebound before every call site. That
+        # reads like a late-binding bug and would become one the moment someone
+        # called _fail() outside the loop.
+        failures: List[Dict[str, Any]] = []
+
+        def _fail(reason: str, provider: str, model: str) -> None:
+            failures.append({"provider": provider, "model": model, "reason": reason})
+
         for candidate in candidates:
-            model = str(candidate["model"] or "").lower()
+            candidate_provider = str(candidate.get("provider") or "")
+            candidate_model = str(candidate.get("model") or "")
+            model = candidate_model.lower()
             text_only_markers = ("gpt-oss", "deepseek-chat", "llama-3.3-70b-versatile", "whisper", "tts-", "embed")
             if any(marker in model for marker in text_only_markers):
+                _fail("text_only_model", candidate_provider, candidate_model)
                 continue
 
             headers = {
                 "Authorization": f"Bearer {candidate['key']}",
                 "Content-Type": "application/json",
             }
+            visual_query = metadata.get("visual_query")
+            has_visual_query = isinstance(visual_query, str) and visual_query.strip()
+            final_prompt = base_prompt
+            if has_visual_query:
+                final_prompt += (
+                    " The user's visual question is: " + visual_query.strip()[:500] +
+                    ". Answer only with visual details directly observable in unmasked regions; "
+                    "say when the image does not provide enough evidence."
+                )
+            # Keep the content part a standard OpenAI-compatible text block.
+            # A previous OpenRouter-only branch added a custom `visual_query`
+            # member beside `type` and `text`; some gateways reject that shape
+            # instead of forwarding the request to the model.
+            text_block = {"type": "text", "text": final_prompt}
+
             payload = {
                 "model": candidate["model"],
                 "messages": [{
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": prompt},
+                        text_block,
                         {"type": "image_url", "image_url": {"url": fitted_screenshot}}
                     ]
                 }],
@@ -268,6 +329,7 @@ class VLMService:
                     timeout=settings.VLM_REQUEST_TIMEOUT_SECONDS,
                 )
                 if resp.status_code != 200:
+                    _fail(f"http_{resp.status_code}", candidate_provider, candidate_model)
                     logger.warning("Provider returned HTTP %s; rotating provider/key", resp.status_code,
                                    extra={"provider": candidate["provider"], "model": candidate["model"],
                                           "status_code": resp.status_code})
@@ -275,6 +337,7 @@ class VLMService:
 
                 content = (resp.json().get("choices") or [{}])[0].get("message", {}).get("content") or ""
                 if not isinstance(content, str) or not content.strip():
+                    _fail("empty_content", candidate_provider, candidate_model)
                     logger.warning("Provider returned empty content; rotating provider/key",
                                    extra={"provider": candidate["provider"], "model": candidate["model"]})
                     continue
@@ -283,6 +346,7 @@ class VLMService:
                 # That text must never become visual grounding — reject and
                 # rotate like any other provider failure.
                 if looks_like_provider_error(content):
+                    _fail("provider_error_text", candidate_provider, candidate_model)
                     logger.warning("Provider returned provider error text as content; rotating provider/key",
                                    extra={"provider": candidate["provider"], "model": candidate["model"]})
                     continue
@@ -293,6 +357,7 @@ class VLMService:
                 # is never returned as visual grounding.
                 parsed = _extract_json_object(content)
                 if parsed is None:
+                    _fail("non_json", candidate_provider, candidate_model)
                     logger.warning("Provider returned non-JSON text; rotating provider/key",
                                    extra={"provider": candidate["provider"], "model": candidate["model"]})
                     continue
@@ -303,6 +368,7 @@ class VLMService:
                     for v in (parsed.get("spatial_layout"), parsed.get("visual_state"), parsed.get("page_type"))
                     if isinstance(v, str)
                 ):
+                    _fail("provider_error_text_in_fields", candidate_provider, candidate_model)
                     logger.warning("Provider JSON fields contained provider error text; rotating provider/key",
                                    extra={"provider": candidate["provider"], "model": candidate["model"]})
                     continue
@@ -323,6 +389,7 @@ class VLMService:
                         r"\b(?:sk|pk|api)[-_][A-Za-z0-9_-]{16,}\b", json.dumps(out), re.I
                     )
                     if fabricated:
+                        _fail("fabricated_pii", candidate_provider, candidate_model)
                         logger.warning("Provider output contained fabricated sensitive content; rotating provider/key",
                                        extra={"provider": candidate["provider"], "model": candidate["model"],
                                               "category": "SYNTHETIC_PII"})
@@ -337,12 +404,14 @@ class VLMService:
                         "model": candidate["model"],
                     }
                     return out
+                _fail("missing_layout_keys", candidate_provider, candidate_model)
                 logger.warning("Provider response missing layout keys; rotating provider/key",
                                extra={"provider": candidate["provider"], "model": candidate["model"]})
             except Exception as exc:
                 # Exception messages may include request details. Log only
                 # provider and exception type, never tokens or payload text.
                 if isinstance(exc, requests.exceptions.Timeout):
+                    _fail("timeout", candidate_provider, candidate_model)
                     logger.warning("Provider timed out after %ss; using the DOM heuristic",
                                    settings.VLM_REQUEST_TIMEOUT_SECONDS,
                                    extra={"provider": candidate["provider"], "model": candidate["model"],
@@ -351,8 +420,19 @@ class VLMService:
                     # cursor advances, so the next vision request starts on
                     # the next configured credential/provider.
                     break
+                _fail(f"request_error:{type(exc).__name__}", candidate_provider, candidate_model)
                 logger.warning("Provider request failed (%s); rotating provider/key", type(exc).__name__,
                                extra={"provider": candidate["provider"], "model": candidate["model"]})
+        if failures:
+            return {
+                "failure": {
+                    "attempts": failures,
+                    "reason": "; ".join(f"{f['provider'] or 'unknown'}/{f['model'] or 'unknown'}: {f['reason']}"
+                                       for f in failures[:4]),
+                    "provider": failures[0].get("provider"),
+                    "model": failures[0].get("model"),
+                }
+            }
         return None
 
     def _from_dom(self, sanitized_dom: Dict[str, Any], metadata: Dict[str, Any]) -> Dict[str, Any]:
