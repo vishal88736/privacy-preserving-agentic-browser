@@ -231,6 +231,25 @@ export class ActionExecutor {
       } } : {})
     };
 
+    if (action.destination) {
+      payload.destination = action.destination;
+    }
+
+    let targetFrameId = 0;
+    if (payload.target?.element_id?.startsWith('f')) {
+      const match = payload.target.element_id.match(/^f(\d+)_(.*)$/);
+      if (match) {
+        targetFrameId = parseInt(match[1], 10);
+        payload.target.element_id = match[2];
+      }
+    }
+    if (payload.destination?.element_id?.startsWith('f')) {
+      const match = payload.destination.element_id.match(/^f(\d+)_(.*)$/);
+      if (match) {
+        payload.destination.element_id = match[2];
+      }
+    }
+
     // Dispatch execution command to Content Script in the tab
     const send = () => new Promise((resolve) => {
       let settled = false;
@@ -248,7 +267,7 @@ export class ActionExecutor {
       const timeoutMs = actionExecutionTimeoutMs(action);
       timer = setTimeout(() => finish({ success: false, error: 'Action execution timed out.' }), timeoutMs);
       try {
-        chrome.tabs.sendMessage(tabId, { type: MessageType.EXECUTE_ACTION, payload }, (response) => {
+        chrome.tabs.sendMessage(tabId, { type: MessageType.EXECUTE_ACTION, payload }, { frameId: targetFrameId }, (response) => {
           const runtimeError = chrome.runtime.lastError;
           const message = String(runtimeError?.message || '');
           // "The message port closed before a response was received" means the

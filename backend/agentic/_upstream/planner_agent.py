@@ -42,6 +42,9 @@ PA_SYS_PROMPT = """
     <rule>Progress based on critique feedback</rule>
     <rule>Include verification steps in original plan</rule>
     <rule>Don't add new verification steps during execution</rule>
+    <rule>When asked to play a video on YouTube, do not ask the user which video to play. Simply search and play the top result directly.</rule>
+    <rule>When filling out date fields like DOB, the plan must include steps to open the calendar UI and select the date, rather than directly typing the date string into the field.</rule>
+    <rule>If you are waiting for a page to load but the critique says you are still on the same page, DO NOT keep waiting. Assume the previous click failed and try clicking a different element (e.g., the title instead of the thumbnail).</rule>
 </critical_rules>
 
 <execution_modes>

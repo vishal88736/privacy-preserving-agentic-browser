@@ -61,6 +61,43 @@ if (chrome.alarms) {
   });
 }
 
+if (typeof chrome !== 'undefined' && chrome.downloads) {
+  chrome.downloads.onChanged.addListener((delta) => {
+    if (delta.state && delta.state.current === 'complete' && delta.id) {
+      chrome.downloads.search({ id: delta.id }, async (items) => {
+        if (items && items.length > 0 && items[0].filename) {
+          const item = items[0];
+          log.info(`File downloaded: ${item.filename}`);
+          if (taskManager.currentTask) {
+            try {
+              const backendUrl = taskManager.settings?.backendUrl || 'http://localhost:8000';
+              const response = await fetch(`${backendUrl}/parse_download`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ filepath: item.filename })
+              });
+              if (response.ok) {
+                const data = await response.json();
+                taskManager.recordStep({
+                  thought: `File downloaded automatically. Read ${data.text.length} characters from ${item.filename}.`,
+                  action: { action: 'EXTRACT', target: { label: item.filename } },
+                  result: { extractedText: data.text },
+                  success: true
+                }, taskManager.currentTask);
+                log.info('Parsed download text injected into task history.');
+              } else {
+                log.warn(`Failed to parse download, status ${response.status}`);
+              }
+            } catch (e) {
+              log.exception('Error parsing downloaded file', e);
+            }
+          }
+        }
+      });
+    }
+  });
+}
+
 chrome.runtime.onInstalled.addListener(() => {
   log.info('Extension successfully installed.');
 });

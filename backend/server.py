@@ -262,6 +262,9 @@ class ReasonRequest(BaseModel):
 class InterpretRequest(BaseModel):
     task: str = Field(min_length=1, max_length=3500)
 
+class ParseDownloadRequest(BaseModel):
+    filepath: str
+
 
 @app.get("/health")
 def health_check():
@@ -287,6 +290,35 @@ def health_check():
         },
         "vlm_providers": [str(name) for name in settings.VLM_PROVIDER_ORDER.split(",") if str(name).strip()],
     }
+
+@app.post("/parse_download")
+def parse_download(req: ParseDownloadRequest):
+    filepath = req.filepath
+    import os
+    if not os.path.exists(filepath):
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    ext = filepath.lower().split('.')[-1]
+    text = ""
+    try:
+        if ext == "pdf":
+            import pypdf
+            reader = pypdf.PdfReader(filepath)
+            for page in reader.pages:
+                extracted = page.extract_text()
+                if extracted:
+                    text += extracted + "\n"
+        elif ext == "csv":
+            import pandas as pd
+            df = pd.read_csv(filepath)
+            text = df.to_string()
+        else:
+            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                text = f.read()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+        
+    return {"text": text[:20000]}
 
 @app.post("/vision")
 def process_vision(req: VisionRequest):

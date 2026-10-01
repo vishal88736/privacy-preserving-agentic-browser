@@ -153,10 +153,12 @@ Rules for FILL_FORM_PLAN:
 Use a single TYPE only when exactly one field needs a value.
 
 Grounding and arguments:
-- CLICK, CHECK, UNCHECK, TYPE, SELECT, HOVER, and SUBMIT require
+- CLICK, RIGHT_CLICK, CHECK, UNCHECK, TYPE, SELECT, HOVER, and SUBMIT require
   target.element_id from ALLOWED_ELEMENT_IDS and AVAILABLE_ELEMENTS in this
   exact observation. Never invent, reuse stale ids, or substitute a nearby
   control. Include a target label only when it is present in the observation.
+- DRAG_AND_DROP requires BOTH target.element_id (the item to drag) and
+  destination.element_id (where to drop it). Both must be valid and observed.
 - NAVIGATE and OPEN_TAB use target.url. Use only a full http(s) URL supplied
   by the user or present as an observed link destination. NAVIGATE is same-tab;
   OPEN_TAB is only for an explicit request to open a new tab.
@@ -470,13 +472,14 @@ Output only one valid JSON object, with no markdown or surrounding prose:
   "page_understanding": {"page_type": "", "visible_content_summary": ""},
   "grounding": {"relevant_element_ids": [], "resolved_references": {}, "evidence": "Observed evidence only", "ignored": []},
   "current_state": {"accomplished_so_far": "", "expected_state_after_action": "", "verification_result": "SUCCESS | WRONG_PAGE | NO_PROGRESS | NEED_SEARCH"},
-  "action": {"action": "CLICK | TYPE | SELECT | CHECK | UNCHECK | HOVER | SUBMIT | NAVIGATE | SCROLL | WAIT | PRESS_KEY | GO_BACK | GO_FORWARD | OPEN_TAB | EXTRACT | ASK_USER | DONE | UPLOAD | FILL_FORM_PLAN", "target": null, "value": null, "value_source": null, "risk": "LOW", "requires_confirmation": false},
+  "action": {"action": "CLICK | RIGHT_CLICK | TYPE | SELECT | CHECK | UNCHECK | HOVER | SUBMIT | NAVIGATE | SCROLL | WAIT | PRESS_KEY | GO_BACK | GO_FORWARD | OPEN_TAB | EXTRACT | ASK_USER | DONE | UPLOAD | FILL_FORM_PLAN | DRAG_AND_DROP", "target": null, "destination": null, "value": null, "value_source": null, "risk": "LOW", "requires_confirmation": false},
   "is_terminal": false
 }
 
 The `action` is authoritative for execution. `next_step` must describe only
 that action. For targeted actions, replace target null with an object carrying
 the observed element_id; for navigation actions, use target.url. For
+DRAG_AND_DROP, also supply destination with the destination element_id. For
 FILL_FORM_PLAN, put the batch in action.value.fields as shown above. For
 UPLOAD, put the stored document token in action.value_source and target the
 observed file input. For ASK_USER, put {"prompt":"..."} in action.value. For

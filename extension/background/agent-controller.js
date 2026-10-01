@@ -3111,7 +3111,15 @@ export class AgentController {
   }
 
   async _extractDOM(tabId) {
-    const sendExtractionMessage = () => new Promise((resolve) => {
+    const getFrames = () => new Promise(resolve => {
+      if (chrome.webNavigation && chrome.webNavigation.getAllFrames) {
+        chrome.webNavigation.getAllFrames({ tabId }, frames => resolve(frames || []));
+      } else {
+        resolve([{ frameId: 0 }]);
+      }
+    });
+
+    const sendExtractionMessage = (frameId) => new Promise((resolve) => {
       let settled = false;
       let timer = null;
       const finish = (value) => {
@@ -3122,7 +3130,7 @@ export class AgentController {
       };
       timer = setTimeout(() => finish({ success: false, error: 'Page extraction timed out.' }), CHROME_API_TIMEOUT_MS);
       try {
-        chrome.tabs.sendMessage(tabId, { type: MessageType.EXTRACT_DOM }, (response) => {
+        chrome.tabs.sendMessage(tabId, { type: MessageType.EXTRACT_DOM }, { frameId }, (response) => {
           const runtimeError = chrome.runtime.lastError;
           finish(runtimeError
             ? { success: false, error: runtimeError.message }
@@ -3133,20 +3141,54 @@ export class AgentController {
       }
     });
 
-    const initial = await sendExtractionMessage();
-    if (initial?.success || !String(initial?.error || '').includes('Could not establish connection') || !chrome.scripting) {
-      return initial;
-    }
+    // Ensure content scripts are injected everywhere
     try {
       await withTimeout(chrome.scripting.executeScript({
-        target: { tabId },
+        target: { tabId, allFrames: true },
         files: ['content/content.js']
       }), CHROME_API_TIMEOUT_MS, 'Content script injection timed out.');
-      await this.sleep(250);
-      return await sendExtractionMessage();
+      await this.sleep(150);
     } catch (error) {
-      return { success: false, error: error?.message || 'Could not initialize page extraction.' };
+      // Ignore injection errors (some frames might be restricted)
     }
+
+    const frames = await getFrames();
+    const frameIds = frames.length > 0 ? frames.map(f => f.frameId) : [0];
+    
+    const results = await Promise.all(frameIds.map(async id => {
+      const res = await sendExtractionMessage(id);
+      return { frameId: id, result: res };
+    }));
+
+    const mainFrame = results.find(r => r.frameId === 0)?.result;
+    if (!mainFrame || !mainFrame.success || !mainFrame.data) {
+      return mainFrame || { success: false, error: 'Main frame extraction failed' };
+    }
+
+    const finalElements = [...mainFrame.data.elements];
+    const iframeElements = mainFrame.data.elements.filter(e => e.tag === 'iframe');
+
+    for (const res of results) {
+      if (res.frameId === 0 || !res.result.success || !res.result.data) continue;
+      
+      // Naive matching: just use the first iframe's offset for now
+      const offsetBox = iframeElements.length > 0 ? iframeElements[0] : null;
+      const dx = offsetBox && offsetBox.bounds ? offsetBox.bounds[0] : 0;
+      const dy = offsetBox && offsetBox.bounds ? offsetBox.bounds[1] : 0;
+      
+      for (const el of res.result.data.elements) {
+        const newEl = { ...el, element_id: 'f' + res.frameId + '_' + el.element_id };
+        if (newEl.bounds && newEl.bounds.length === 4) {
+          newEl.bounds = [newEl.bounds[0] + dx, newEl.bounds[1] + dy, newEl.bounds[2], newEl.bounds[3]];
+          newEl.center_x += dx;
+          newEl.center_y += dy;
+        }
+        finalElements.push(newEl);
+      }
+    }
+
+    mainFrame.data.elements = finalElements;
+    return mainFrame;
   }
 
   sleep(ms) {

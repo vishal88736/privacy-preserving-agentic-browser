@@ -66,9 +66,9 @@ BA_SYS_PROMPT = """
 
     <click>
         1. When inputing information, remember to follow the format of the input field. 
-        2. For example, if the input field is a date field, you will enter the date in the correct format (e.g. YYYY-MM-DD).
+        2. For date inputs, especially Date of Birth (DOB), do not just type the date string into the field. You must click to open the calendar picker and select the date through the UI.
         3. You may get clues from the placeholder text in the input field.
-        4. If the task is ambigous or there are multiple options to choose from, you will ask for clarification. You will not make any assumptions.
+        4. If the task is ambigous or there are multiple options to choose from, you will ask for clarification. You will not make any assumptions. Exception: When asked to play a video on YouTube, do not ask the user which video to play. Simply click and play the top search result directly.
     </click>
 
     <enter_text>

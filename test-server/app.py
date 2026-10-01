@@ -87,6 +87,16 @@ INDEX_HTML = """<!DOCTYPE html>
       <div class="card-desc">Five injection shapes: ignore-orders, exfiltrate password, reveal Aadhaar, upload docs, dangerous click.</div>
       <span class="tag tag-sec">Validation</span>
     </a>
+    <a href="/page-f-complex-interactions.html" class="card">
+      <div class="card-title">F. Complex Agent Interactions</div>
+      <div class="card-desc">Tests for new capabilities: Drag & Drop Kanban, Right Click Context Menu, Native Alert override, Iframe inputs, and File Downloading.</div>
+      <span class="tag tag-search">New Capabilities</span>
+    </a>
+    <a href="/page-g-multiple-uploads.html" class="card">
+      <div class="card-title">G. Multiple Document Uploads</div>
+      <div class="card-desc">Tests agent mapping semantic document names to the correct file inputs for Aadhaar, PAN, and Invoices.</div>
+      <span class="tag tag-doc">New Capabilities</span>
+    </a>
   </div>
 </body>
 </html>

@@ -50,6 +50,35 @@
 
   log.info('PrivacyAgent', 'Content script initialized.');
 
+  // Override blocking native dialogs (alert, confirm, prompt) to render them as non-blocking DOM elements
+  // This allows the agent to "see" them without the browser freezing the execution thread.
+  const _setupNativeDialogOverrides = () => {
+    try {
+      const script = document.createElement('script');
+      script.textContent = `
+        function _renderAgenticDialog(type, msg) {
+          const div = document.createElement('div');
+          div.id = 'agentic-native-dialog-' + Date.now();
+          div.style.cssText = 'position:fixed; top:10px; right:10px; background:yellow; color:black; padding:10px; z-index:2147483647; border:2px solid red; font-weight:bold;';
+          div.innerText = 'System ' + type + ': ' + msg;
+          const target = document.body || document.documentElement;
+          if (target) {
+            target.appendChild(div);
+            setTimeout(() => div.remove(), 10000);
+          }
+        }
+        window.alert = function(msg) { _renderAgenticDialog('alert', msg); return true; };
+        window.confirm = function(msg) { _renderAgenticDialog('confirm', msg); return true; };
+        window.prompt = function(msg, def) { _renderAgenticDialog('prompt', msg); return def; };
+      `;
+      (document.head || document.documentElement).appendChild(script);
+      script.remove();
+    } catch (e) {
+      log.exception('Content', 'Failed to override native dialogs', e);
+    }
+  };
+  _setupNativeDialogOverrides();
+
   // Time allowed for scrollIntoView + layout shift to settle before the action
   // target is re-resolved. Re-resolving after the scroll (rather than before)
   // is what keeps the highlighted element and the acted-on element identical.
@@ -594,7 +623,7 @@
       // so form fields are never dropped on complex pages even at the cap.
       // DOM order within each pass is preserved.
       const passes = [
-        'input, select, textarea, [role="textbox"], [role="checkbox"], [role="radio"], [role="combobox"], [contenteditable]:not([contenteditable="false"])',
+        'a#video-title, iframe, input, select, textarea, [role="textbox"], [role="checkbox"], [role="radio"], [role="combobox"], [contenteditable]:not([contenteditable="false"])',
         'button, [role="button"], [role="option"]',
         'a, [role="link"], [tabindex]:not([tabindex="-1"])'
       ];
@@ -1186,6 +1215,16 @@
         case 'CLICK':
           return this._executeClick(targetElement, coordinates);
 
+        case 'RIGHT_CLICK':
+          return this._executeRightClick(targetElement, coordinates);
+
+        case 'DRAG_AND_DROP': {
+          const destId = actionPayload.destination?.element_id;
+          if (!destId) throw new Error('DRAG_AND_DROP requires destination.element_id');
+          const destElement = this._resolveTarget(destId);
+          return this._executeDragAndDrop(targetElement, destElement);
+        }
+
         case 'TYPE':
           return this._executeType(targetElement, resolvedValue);
 
@@ -1395,6 +1434,40 @@
       }
 
       throw new Error('Target click element not found');
+    }
+
+    async _executeRightClick(element, coords) {
+      const target = element || (coords && coords.length === 2 ? document.elementFromPoint(coords[0], coords[1]) : null);
+      if (target) {
+        target.focus();
+        const event = new MouseEvent('contextmenu', {
+          bubbles: true,
+          cancelable: true,
+          view: window,
+          button: 2,
+          buttons: 2,
+          clientX: coords ? coords[0] : 0,
+          clientY: coords ? coords[1] : 0
+        });
+        target.dispatchEvent(event);
+        return { success: true };
+      }
+      throw new Error('Target right-click element not found');
+    }
+
+    async _executeDragAndDrop(sourceEl, targetEl) {
+      if (!sourceEl || !targetEl) throw new Error('Drag and drop requires both source and target elements');
+      const dt = new DataTransfer();
+      sourceEl.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: dt }));
+      await this.sleep(50);
+      targetEl.dispatchEvent(new DragEvent('dragenter', { bubbles: true, cancelable: true, dataTransfer: dt }));
+      await this.sleep(50);
+      targetEl.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt }));
+      await this.sleep(50);
+      targetEl.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt }));
+      await this.sleep(50);
+      sourceEl.dispatchEvent(new DragEvent('dragend', { bubbles: true, cancelable: true, dataTransfer: dt }));
+      return { success: true };
     }
 
     /**
