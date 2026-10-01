@@ -18,7 +18,13 @@ const IMAGE_RE = /^data:image\/[^;]+;base64,/i;
 
 function safeString(value, key = '') {
   if (IMAGE_RE.test(value)) return value;
-  if (key === 'value_source' || key === 'element_id' || key === 'id' || key === 'action') {
+  // Correlation and observation identifiers are opaque extension-generated
+  // metadata, not page values. Preserve them exactly so a sanitized prompt
+  // can still be answered after persistence/restart. Their shape is bounded
+  // below, while user/page strings continue through the privacy detectors.
+  if (key === 'value_source' || key === 'element_id' || key === 'id' || key === 'action' ||
+      key === 'taskId' || key === 'requestId' || key === 'confirmationId' ||
+      key === 'snapshotId' || key === 'observation_id' || key === 'observationId') {
     return value.slice(0, 200);
   }
   if (key === 'url' || key === 'href' || key === 'openedUrl' || key === 'navigatedTo') {

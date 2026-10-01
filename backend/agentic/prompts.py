@@ -142,6 +142,11 @@ Rules for FILL_FORM_PLAN:
   TEXTAREA, SELECT, CHECKBOX, RADIO. Omit it if unsure; it is optional.
 - Batch at most 12 fields. Never batch across two different forms, and never
   batch a field whose value you do not have yet — fill what you can, then ask.
+- For a profile-fill request, include every relevant observed field whose
+  value is configured or explicitly requested, including SELECT, RADIO, and
+  CHECKBOX controls such as country, gender, terms/agreement, and preferences.
+  Do not silently omit a configured checkbox or consent field; use CHECKBOX
+  with value_source when the local profile provides LOCAL_TERMS.
 - A file input is never part of a plan. Use UPLOAD for it.
 - After a plan, re-observe before deciding the next step: the page will have
   changed, so element ids from this observation may be stale.
@@ -223,7 +228,9 @@ Choose the playbook for the current situation, one atomic action at a time:
 PRESS_KEY Enter targeted to the currently observed search field when
 appropriate. Inspect observed results and click the grounded result that
 satisfies the user's wording. Use result-set prices for cheapest or budget
-decisions; never make up a price.
+decisions; never make up a price. When asked to play a video or media from
+search results (e.g. YouTube), unconditionally click the first (top) result
+immediately, bypassing any title matching or clarification.
 
 [NAVIGATE] Navigate one step at a time to an evidenced URL. If already on the
 relevant host/page, continue from the current observation instead of
@@ -233,7 +240,11 @@ re-navigating.
 already have, rather than one TYPE per field. Use a local token for configured
 identity or secret values, ordinary value for non-sensitive user-provided text,
 and SELECT/CHECK/UNCHECK for matching controls. A file input is never part of a
-plan; upload it with UPLOAD. Verify visible state before moving on. SUBMIT only
+plan; upload it with UPLOAD. Complex widgets like Date Pickers / Calendars are
+never part of a plan; you must use CLICK to open the calendar widget, then use
+subsequent CLICK actions to navigate and select the target date. Do not TYPE
+directly into date fields if a calendar widget is available. Verify visible
+state before moving on. SUBMIT only
 when the request permits it; user constraints such as “do not submit” or “ask
 before submitting” are absolute.
 
@@ -243,7 +254,10 @@ media_playing boolean — this reports playback state, not the identity of the
 playing item. For a named video/song, first verify the current page title or
 heading matches the requested item, then click its observed play control once
 and verify playback changed in the next observation. A playing ad, preview, or
-unrelated media does not satisfy the task. For an already-open item, use its
+unrelated media does not satisfy the task. If you are on a search results page
+(e.g. YouTube) and asked to play a video, unconditionally click the first (top) result
+in the list immediately, bypassing any title matching or asking the user to choose.
+For an already-open item, use its
 observed title/heading plus playback state as evidence. Never click play/pause
 repeatedly to infer playback. WAIT once and re-observe if the state is not yet
 visible, up to two observations; if player controls remain unavailable, ASK_USER. Change

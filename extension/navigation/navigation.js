@@ -35,7 +35,8 @@ export const COMMON_SITES = Object.freeze({
   duckduckgo: 'https://duckduckgo.com/',
   gmail: 'https://mail.google.com/',
   drive: 'https://drive.google.com/',
-  maps: 'https://www.google.com/maps'
+  maps: 'https://www.google.com/maps',
+  sih: 'https://www.sih.gov.in/'
 });
 
 // Schemes that must never be navigated to / executed.
@@ -75,6 +76,39 @@ export function classifyPageCapability(url) {
   return PageCapability.UNKNOWN;
 }
 
+// User-approved sites from Settings ("My sites"). Plain {label: url} object,
+// persisted by TaskManager. Consulted BEFORE the built-in map so an explicit
+// user entry always wins. Kept as a parameter (never imported here) because
+// this module is chrome-free and deterministic by design.
+export function normalizeSiteLabel(label) {
+  return String(label || '').trim().toLowerCase().replace(/\s+/g, ' ').slice(0, 48);
+}
+
+function mergedSites(extraSites) {
+  const merged = { ...COMMON_SITES };
+  if (extraSites && typeof extraSites === 'object' && !Array.isArray(extraSites)) {
+    for (const [rawLabel, rawUrl] of Object.entries(extraSites)) {
+      const label = normalizeSiteLabel(rawLabel);
+      if (label && typeof rawUrl === 'string' && rawUrl.trim()) merged[label] = rawUrl.trim();
+    }
+  }
+  return merged;
+}
+
+/**
+ * Validate one user-supplied site entry before it is stored.
+ * Returns { valid, label, normalizedUrl, host, reason }.
+ */
+export function validateCustomSite(label, url) {
+  const name = normalizeSiteLabel(label);
+  if (!name || !/^[a-z0-9][a-z0-9 _.-]*$/i.test(name)) {
+    return { valid: false, label: null, normalizedUrl: null, host: null, reason: 'Site name must start with a letter or digit.' };
+  }
+  const check = validateNavigationUrl(url);
+  if (!check.valid) return { valid: false, label: null, normalizedUrl: null, host: null, reason: check.reason };
+  return { valid: true, label: name, normalizedUrl: check.normalizedUrl, host: check.host, reason: null };
+}
+
 /** Strip wrapping quotes/trailing sentence punctuation from a candidate. */
 function cleanCandidate(raw) {
   return String(raw || '').trim().replace(/^["'<]+|["'>.,!?;]+$/g, '').trim();
@@ -85,8 +119,9 @@ function cleanCandidate(raw) {
  * Returns { url, site } or null when the text is not a navigation request
  * with a resolvable destination. Never invents hosts.
  */
-export function resolveNavigationTarget(text) {
+export function resolveNavigationTarget(text, extraSites = {}) {
   if (!text || typeof text !== 'string') return null;
+  const SITES = mergedSites(extraSites);
   let remainder = String(text).trim();
   const verbMatch = remainder.match(/^(?:please\s+)?(?:could\s+you\s+)?(?:open|go\s+to|navigate\s+to|visit|go)\s+(.+)$/i);
   if (!verbMatch) return null;
@@ -95,21 +130,40 @@ export function resolveNavigationTarget(text) {
   const lower = remainder.toLowerCase();
 
   // 1. Bare allowlisted site name: "open youtube"
-  if (COMMON_SITES[lower]) {
-    return { url: COMMON_SITES[lower], site: lower };
+  if (SITES[lower]) {
+    return { url: SITES[lower], site: lower };
   }
   // 2. Site name with noise stripped ("youtube homepage", "the youtube site")
   const siteKey = lower.replace(/^(the\s+)?/, '').replace(/\s+(homepage|website|site|app)$/, '').trim();
-  if (COMMON_SITES[siteKey]) {
-    return { url: COMMON_SITES[siteKey], site: siteKey };
+  if (SITES[siteKey]) {
+    return { url: SITES[siteKey], site: siteKey };
+  }
+  // 2a. A trailing generic noun ("website", "site", "homepage", "portal",
+  // "page") carries no routing information. Strip it before the domain
+  // attempt below: "open sih website" reached that attempt as the single label
+  // "sih", which is not a dotted domain, so the whole task failed to resolve
+  // and the user was told to "open a website first" -- while standing on the
+  // page they had asked the agent to open.
+  const deNoised = lower
+    .replace(/^(the\s+)?/, '')
+    .replace(/\s+(?:website|web\s?site|site|homepage|home\s+page|portal|page|app)$/, '')
+    .trim();
+  if (SITES[deNoised]) {
+    return { url: SITES[deNoised], site: deNoised };
+  }
+  // A single remaining label is an ambiguous name, not a domain. Guessing
+  // "https://sih" would be inventing a destination, so report that we know
+  // what was asked for but not where it lives, and let the planner search.
+  if (deNoised && !deNoised.includes('.') && !deNoised.includes('/') && !/^\d+$/.test(deNoised)) {
+    return { url: null, site: deNoised, needsSearch: true };
   }
 
   // 2b. Compound action: "open youtube and play...", "go to amazon to buy...", "visit github then search..."
   const compoundMatch = lower.match(/^([a-z0-9.-]+)(?:\s+(?:and(?:\s+then)?|to|then|for)\s+.*)?$/i);
   if (compoundMatch) {
     const candidateSite = compoundMatch[1].replace(/^(the\s+)?/, '').trim();
-    if (COMMON_SITES[candidateSite]) {
-      return { url: COMMON_SITES[candidateSite], site: candidateSite };
+    if (SITES[candidateSite]) {
+      return { url: SITES[candidateSite], site: candidateSite };
     }
   }
 
@@ -256,11 +310,11 @@ const NON_NAV_VERBS = /\b(search|find|fill|type|click|tap|play|watch|login|log\s
  * True only for tasks that are JUST navigation ("open youtube").
  * "search youtube for cats" is compound, not pure.
  */
-export function isPureNavigateTask(prompt) {
+export function isPureNavigateTask(prompt, extraSites = {}) {
   if (!prompt || typeof prompt !== 'string') return false;
   const text = prompt.trim();
   if (!/^(?:please\s+)?(?:could\s+you\s+)?(?:open|go\s+to|navigate\s+to|visit|go)\b/i.test(text)) return false;
-  const resolved = resolveNavigationTarget(text);
+  const resolved = resolveNavigationTarget(text, extraSites);
   if (!resolved) return false;
   const remainder = text.replace(/^(?:please\s+)?(?:could\s+you\s+)?(?:open|go\s+to|navigate\s+to|visit|go)\s+/i, '');
   if (NON_NAV_VERBS.test(remainder)) return false;
@@ -268,19 +322,29 @@ export function isPureNavigateTask(prompt) {
 }
 
 /** Homepage for a known site key (used for compound bootstrap navigation). */
-export function getSiteHomepage(site) {
+export function getSiteHomepage(site, extraSites = {}) {
   if (!site || typeof site !== 'string') return null;
-  return COMMON_SITES[site.toLowerCase()] || null;
+  return mergedSites(extraSites)[site.toLowerCase()] || null;
 }
 
 /**
- * Navigation goal for a task: { url, site, isPure } or null when the task
- * is not navigation-led. Reuses deterministic resolution; the caller may
- * additionally consult TaskState.site for compound tasks.
+ * Navigation goal for a task: { url, site, isPure, needsSearch } or null when
+ * the task is not navigation-led. Reuses deterministic resolution; the caller
+ * may additionally consult TaskState.site for compound tasks.
+ *
+ * `needsSearch` is true when the user named a destination we recognise as a
+ * name but cannot resolve to a URL ("open sih website"). The caller must then
+ * fall through to the normal planner path -- which searches -- rather than
+ * guessing a host or refusing the task.
  */
-export function getNavigationGoal(prompt) {
+export function getNavigationGoal(prompt, extraSites = {}) {
   if (!prompt || typeof prompt !== 'string') return null;
-  const resolved = resolveNavigationTarget(prompt);
+  const resolved = resolveNavigationTarget(prompt, extraSites);
   if (!resolved) return null;
-  return { url: resolved.url, site: resolved.site, isPure: isPureNavigateTask(prompt) };
+  return {
+    url: resolved.url || null,
+    site: resolved.site,
+    isPure: isPureNavigateTask(prompt, extraSites),
+    needsSearch: resolved.needsSearch === true
+  };
 }

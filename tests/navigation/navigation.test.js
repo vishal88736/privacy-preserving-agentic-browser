@@ -3,7 +3,9 @@ import assert from 'node:assert';
 import {
   PageCapability,
   classifyPageCapability,
+  normalizeSiteLabel,
   resolveNavigationTarget,
+  validateCustomSite,
   validateNavigationUrl,
   urlsMatchForVerification,
   isPureNavigateTask,
@@ -275,13 +277,19 @@ test('page capability classification', () => {
 });
 
 test('navigation goal resolution is deterministic', () => {
-  assert.deepStrictEqual(getNavigationGoal('open youtube'), { url: 'https://www.youtube.com/', site: 'youtube', isPure: true });
+  assert.deepStrictEqual(getNavigationGoal('open youtube'), { url: 'https://www.youtube.com/', site: 'youtube', isPure: true, needsSearch: false });
+  assert.deepStrictEqual(getNavigationGoal('open sih website'), { url: 'https://www.sih.gov.in/', site: 'sih', isPure: true, needsSearch: false });
   assert.strictEqual(getNavigationGoal('search youtube for cats'), null);
   assert.strictEqual(getNavigationGoal('find the cheapest laptop under 60000'), null);
   assert.strictEqual(isPureNavigateTask('open youtube'), true);
+  assert.strictEqual(isPureNavigateTask('open sih website'), true);
   assert.strictEqual(isPureNavigateTask('search youtube for cats'), false);
-  assert.strictEqual(resolveNavigationTarget('open youtube videos daily'), null);
+  assert.deepStrictEqual(
+    resolveNavigationTarget('open youtube videos daily'),
+    { url: null, site: 'youtube videos daily', needsSearch: true }
+  );
   assert.strictEqual(getSiteHomepage('youtube'), 'https://www.youtube.com/');
+  assert.strictEqual(getSiteHomepage('sih'), 'https://www.sih.gov.in/');
 });
 
 // ---------- 12: navigation timeout is an honest failure ----------
@@ -348,6 +356,137 @@ test('14. a generic search from chrome://newtab does not auto-navigate to Google
     await assert.rejects(() => c.runSingleStep(task), /browser internal page/);
     assert.strictEqual(calls.update.length, 0, 'a provider must not be chosen without user intent');
     assert.strictEqual(calls.executeScript, 0, 'must never inject scripts into an internal page');
+  } finally {
+    restoreChrome();
+  }
+});
+
+// ---------- 15: user "My sites" map beats the built-in list ----------
+
+test('15. custom sites resolve before built-in entries and validate strictly', () => {
+  assert.strictEqual(normalizeSiteLabel('  My Blog  '), 'my blog');
+  const extra = { myblog: 'https://blog.example.com/' };
+  assert.deepStrictEqual(resolveNavigationTarget('open myblog', extra),
+    { url: 'https://blog.example.com/', site: 'myblog' });
+  assert.deepStrictEqual(getNavigationGoal('open myblog website', extra),
+    { url: 'https://blog.example.com/', site: 'myblog', isPure: true, needsSearch: false });
+  assert.strictEqual(getSiteHomepage('myblog', extra), 'https://blog.example.com/');
+  // Without the map the same prompt still needs a search.
+  assert.deepStrictEqual(resolveNavigationTarget('open myblog'),
+    { url: null, site: 'myblog', needsSearch: true });
+  // A user entry overrides a built-in one.
+  assert.strictEqual(
+    resolveNavigationTarget('open youtube', { youtube: 'https://example.com/' }).url,
+    'https://example.com/');
+  // Validation refuses bad names and dangerous URLs.
+  assert.strictEqual(validateCustomSite('', 'https://example.com/').valid, false);
+  assert.strictEqual(validateCustomSite('myblog', 'javascript:alert(1)').valid, false);
+  assert.strictEqual(validateCustomSite('myblog', 'http://192.168.1.1/').valid, false);
+  assert.deepStrictEqual(
+    validateCustomSite('My Blog', 'example.com'),
+    { valid: true, label: 'my blog', normalizedUrl: 'https://example.com/', host: 'example.com', reason: null });
+});
+
+// ---------- 16-19: off-list approval gate ----------
+
+/** Drive runSingleStep until the site-approval prompt appears, then answer it. */
+async function runUntilSiteApproval(c, task, answer) {
+  const pending = c.runSingleStep(task);
+  let guard = 200;
+  while (!taskManager.getTask()?.pendingConfirmation && guard-- > 0) {
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  const prompt = taskManager.getTask()?.pendingConfirmation;
+  assert.ok(prompt, 'site approval prompt must be raised');
+  assert.strictEqual(prompt.siteApproval, true);
+  const accepted = c.handleUserConfirmation({
+    approved: answer.approved,
+    taskId: prompt.taskId,
+    confirmationId: prompt.confirmationId,
+    siteUrl: answer.siteUrl || '',
+    rememberSite: answer.rememberSite === true
+  });
+  assert.strictEqual(accepted, true);
+  return pending;
+}
+
+test('16. off-list site from chrome://newtab asks approval before navigating', async () => {
+  const tabs = { 90: { id: 90, url: 'chrome://newtab', windowId: 1 } };
+  const calls = stubChrome(tabs);
+  try {
+    const c = new AgentController();
+    const task = makeTask('open myblog website', 90);
+    const pending = c.runSingleStep(task);
+    let guard = 200;
+    while (!taskManager.getTask()?.pendingConfirmation && guard-- > 0) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    const prompt = taskManager.getTask()?.pendingConfirmation;
+    assert.ok(prompt, 'approval prompt must be raised');
+    assert.strictEqual(prompt.siteApproval, true);
+    assert.strictEqual(prompt.siteLabel, 'myblog');
+    assert.strictEqual(calls.update.length, 0, 'nothing navigates before the user answers');
+    c.handleUserConfirmation({ approved: false, taskId: prompt.taskId, confirmationId: prompt.confirmationId });
+    const cont = await pending;
+    assert.strictEqual(cont, false);
+    assert.strictEqual(taskManager.getTask().state, 'CANCELLED');
+    assert.strictEqual(calls.update.length, 0, 'declined navigation must not move the tab');
+  } finally {
+    restoreChrome();
+  }
+});
+
+test('17. approving empty-handed runs the pure-search fallback and continues', async () => {
+  const tabs = { 91: { id: 91, url: 'chrome://newtab', windowId: 1 } };
+  const calls = stubChrome(tabs);
+  try {
+    const c = new AgentController();
+    const task = makeTask('open myblog website', 91);
+    const cont = await runUntilSiteApproval(c, task, { approved: true });
+    assert.strictEqual(cont, true, 'search fallback must continue on the results page');
+    assert.strictEqual(calls.update.length, 1);
+    assert.ok(String(calls.update[0][1].url).startsWith('https://www.google.com/search?q='),
+      'must navigate to a Google search, never a guessed host');
+    assert.notStrictEqual(taskManager.getTask().state, 'COMPLETED', 'search is not completion');
+  } finally {
+    restoreChrome();
+  }
+});
+
+test('18. approving with an address opens it directly and remembers it', async () => {
+  const tabs = { 92: { id: 92, url: 'chrome://newtab', windowId: 1 } };
+  const calls = stubChrome(tabs);
+  try {
+    const c = new AgentController();
+    const task = makeTask('open myblog website', 92);
+    const cont = await runUntilSiteApproval(c, task,
+      { approved: true, siteUrl: 'https://blog.example.com/', rememberSite: true });
+    assert.strictEqual(cont, false, 'pure navigation with a user address completes');
+    assert.strictEqual(taskManager.getTask().state, 'COMPLETED');
+    assert.ok(String(calls.update[0][1].url).includes('blog.example.com'));
+    assert.strictEqual(taskManager.settings.customSites['myblog'], 'https://blog.example.com/');
+    // Next time the same label resolves with no approval at all.
+    assert.deepStrictEqual(resolveNavigationTarget('open myblog website', taskManager.settings.customSites),
+      { url: 'https://blog.example.com/', site: 'myblog' });
+  } finally {
+    // Keep later tests hermetic: drop the remembered entry.
+    taskManager.settings.customSites = {};
+    restoreChrome();
+  }
+});
+
+test('19. a rejected address fails the task instead of navigating', async () => {
+  const tabs = { 93: { id: 93, url: 'chrome://newtab', windowId: 1 } };
+  const calls = stubChrome(tabs);
+  try {
+    const c = new AgentController();
+    const task = makeTask('open myblog website', 93);
+    const cont = await runUntilSiteApproval(c, task,
+      { approved: true, siteUrl: 'javascript:alert(1)', rememberSite: true });
+    assert.strictEqual(cont, false);
+    assert.strictEqual(taskManager.getTask().state, 'FAILED');
+    assert.strictEqual(calls.update.length, 0, 'a rejected address must never move the tab');
+    assert.strictEqual(taskManager.settings.customSites['myblog'], undefined);
   } finally {
     restoreChrome();
   }

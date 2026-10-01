@@ -610,11 +610,17 @@ class SidePanelApp {
   confirm(approved) {
     const pending = this.currentConfirmationData || {};
     this.currentConfirmationData = null;
+    // Off-list website answers carry the typed address + remember choice.
+    // Read before closing; ignored for every other confirmation kind.
+    const siteBoxVisible = this.$('confirm-site-box') && this.$('confirm-site-box').hidden === false;
+    const siteUrl = siteBoxVisible ? (this.$('confirm-site-url')?.value || '').trim().slice(0, 500) : '';
+    const rememberSite = siteBoxVisible ? this.$('confirm-site-remember')?.checked === true : false;
     this.closeModal(this.confirmModal);
     this.send(MessageType.USER_CONFIRM_ACTION, {
       approved,
       taskId: pending.taskId,
-      confirmationId: pending.confirmationId
+      confirmationId: pending.confirmationId,
+      ...(siteBoxVisible ? { siteUrl, rememberSite } : {})
     });
   }
 
@@ -953,8 +959,18 @@ class SidePanelApp {
       ? action.value.fields
       : [];
     const upload = action.action === 'UPLOAD' || isDocumentToken(action.value_source);
+    const siteApproval = data.siteApproval === true;
+    // Off-list website approval: reset the address/remember inputs every time
+    // so a previous answer never leaks into the next prompt.
+    const siteBox = this.$('confirm-site-box');
+    const siteUrlInput = this.$('confirm-site-url');
+    const siteRemember = this.$('confirm-site-remember');
+    if (siteBox) siteBox.hidden = !siteApproval;
+    if (siteUrlInput) siteUrlInput.value = '';
+    if (siteRemember) siteRemember.checked = false;
     this.$('confirm-title').textContent = upload
       ? 'Approve document attachment'
+      : siteApproval ? 'Confirm website navigation'
       : fields.length ? 'Review form fill' : 'Confirm Action';
     const fieldNames = [...new Set(fields.map((field) => String(field?.label || field?.semantic_type || '').replace(/\s+/g, ' ').trim().slice(0, 80)).filter(Boolean))];
     const formReview = fields.length
@@ -986,7 +1002,7 @@ class SidePanelApp {
           : 'Values entered into a webpage are visible to that site. Review the page before approving any submission.';
     }
     this.openModal(this.confirmModal);
-    this.$('modal-approve-btn').textContent = upload ? 'Attach document' : fields.length ? 'Fill these fields' : 'Confirm & Proceed';
+    this.$('modal-approve-btn').textContent = upload ? 'Attach document' : fields.length ? 'Fill these fields' : siteApproval ? 'Continue' : 'Confirm & Proceed';
     this.$('modal-approve-btn').focus();
   }
 
@@ -1591,6 +1607,7 @@ class SidePanelApp {
       delete cached.backendToken;
       localStorage.setItem('privagent_settings', JSON.stringify(cached));
     } catch { /* ignore */ }
+    this.lastSettings = { ...(s || {}) };
     this.$('settings-backend').value = s.backendUrl || '';
     this.$('settings-backend-token').value = s.backendToken || '';
     this.$('settings-maxsteps').value = s.maxSteps || '';
@@ -1598,6 +1615,57 @@ class SidePanelApp {
     this.$('settings-confirm').checked = s.alwaysConfirm !== false;
     this.$('settings-debug').checked = !!s.showDebug;
     this.debugPanel.style.display = s.showDebug ? '' : 'none';
+    this.renderCustomSites(s.customSites);
+  }
+
+  renderCustomSites(customSites) {
+    const list = this.$('settings-sites-list');
+    if (!list) return;
+    list.replaceChildren();
+    const entries = customSites && typeof customSites === 'object' && !Array.isArray(customSites)
+      ? Object.entries(customSites)
+      : [];
+    if (!entries.length) {
+      list.appendChild(el('p', 'muted small', 'No saved sites yet. Approve an off-list website and tick “Add to My sites”.'));
+      return;
+    }
+    for (const [name, url] of entries.slice(0, 50)) {
+      const row = el('div', 'about-row');
+      const label = el('span', null, String(name).slice(0, 48));
+      let host = '';
+      try { host = new URL(String(url)).hostname; } catch { host = String(url).slice(0, 60); }
+      const val = el('span', 'about-val', host);
+      const remove = el('button', 'btn btn-secondary', 'Remove');
+      remove.type = 'button';
+      remove.dataset.site = String(name);
+      remove.addEventListener('click', () => this.removeCustomSite(String(name)));
+      row.appendChild(label);
+      row.appendChild(val);
+      row.appendChild(remove);
+      list.appendChild(row);
+    }
+  }
+
+  removeCustomSite(name) {
+    const sites = { ...((this.lastSettings && this.lastSettings.customSites) || {}) };
+    if (!Object.keys(sites).length) {
+      try {
+        const raw = localStorage.getItem('privagent_settings');
+        Object.assign(sites, JSON.parse(raw || '{}').customSites || {});
+      } catch { /* keep empty */ }
+    }
+    delete sites[String(name).toLowerCase()];
+    this.send(MessageType.UPDATE_SETTINGS, { customSites: sites }, (res) => {
+      if (res?.success === false) {
+        const box = this.$('settings-error');
+        if (box) {
+          box.removeAttribute('hidden');
+          box.textContent = res.error || 'Site could not be removed.';
+        }
+        return;
+      }
+      if (res?.settings) this.reflectSettings(res.settings);
+    });
   }
 
   openSettings() {
@@ -1616,7 +1684,10 @@ class SidePanelApp {
       maxSteps: Math.min(50, Math.max(1, parseInt(this.$('settings-maxsteps').value, 10) || 25)),
       alwaysConfirm: this.$('settings-confirm').checked,
       showDebug: this.$('settings-debug').checked,
-      allowRemoteBackend: this.$('settings-allow-remote')?.checked === true
+      allowRemoteBackend: this.$('settings-allow-remote')?.checked === true,
+      // Carried over untouched: the My-sites list is managed via approvals
+      // and per-site Remove buttons, not this form.
+      customSites: { ...((this.lastSettings && this.lastSettings.customSites) || {}) }
     };
     this.reflectSettings(settings);
     this.send(MessageType.UPDATE_SETTINGS, settings, (res) => {

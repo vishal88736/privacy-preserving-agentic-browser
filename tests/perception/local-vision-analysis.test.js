@@ -47,7 +47,7 @@ globalThis.fetch = async () => ({ ok: true, blob: async () => ({}) });
  * Build a LocalVisionEngine whose model + OCR calls are stubbed, so
  * analyzeScreenshot runs its real control flow without needing WASM assets.
  */
-function engineWithStubs({ lines = [], people = [], words = [] } = {}) {
+function engineWithStubs({ lines = [], people = [], faces = [], words = [] } = {}) {
   return import('../../extension/perception/local-vision.js').then(({ LocalVisionEngine }) => {
     const engine = new LocalVisionEngine();
     // Detector returns person boxes; OCR returns the given lines/words.
@@ -57,6 +57,9 @@ function engineWithStubs({ lines = [], people = [], words = [] } = {}) {
       recognize: async () => ({
         data: { lines, text: lines.map((l) => l.text).join('\n') }, words
       })
+    });
+    engine._loadFaceDetector = async () => ({
+      detect: () => ({ detections: faces })
     });
     engine._assetBytes = async () => 1234;
     return engine;

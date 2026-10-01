@@ -195,6 +195,26 @@ function promptAsksPlay(task) {
   return /\b(play|watch|stream)\b/i.test(String(task?.prompt || ''));
 }
 
+/**
+ * Media fast-path: no approval card before a play click.
+ *
+ * Playing a video is reversible (pause/close) and fully visible, so when the
+ * user explicitly asked to play something and the local safety gate itself
+ * rates the click LOW, the planner's advisory requires_confirmation ("if
+ * unsure, ask") is dropped. The gate stays binding: anything it rates HIGH /
+ * CRITICAL or flags requiresConfirmation (a "buy now"-titled video, a form
+ * submit, an upload) still asks exactly as before.
+ */
+export function isConfidentMediaPlay(task, action, riskAssessment, fusedTarget) {
+  if (!action || action.action !== ActionType.CLICK) return false;
+  if (!riskAssessment || riskAssessment.requiresConfirmation) return false;
+  if (riskAssessment.risk !== RiskLevel.LOW) return false;
+  if (!fusedTarget) return false;
+  const intent = String(task?.taskState?.intent || '').toLowerCase();
+  if (intent === 'play') return true;
+  return promptAsksPlay(task);
+}
+
 function actionTargetIds(action) {
   if (Array.isArray(action?.targetIds)) return action.targetIds.filter((id) => typeof id === 'string');
   if (Array.isArray(action?.value?.fields)) {
@@ -384,6 +404,21 @@ function mediaStartedSince(beforeObservation, afterObservation) {
   });
 }
 
+/**
+ * Is any observed player currently playing, regardless of transitions?
+ *
+ * mediaStartedSince misses real playback when ordinal/tag alignment shifts
+ * between observations (results-page preview slot vs watch-page player) or
+ * the arrival observation already shows playing. The click + visible-change
+ * + title conditions in taskGoalStatus still guard against certifying an
+ * unrelated autoplay, so this only widens the transition signal, never the
+ * goal on its own.
+ */
+export function mediaCurrentlyPlaying(observation) {
+  const media = observation?.local_media_state?.media || [];
+  return media.some((item) => Boolean(item) && item.paused === false && item.ended !== true);
+}
+
 function playControlWasClicked(verified) {
   const action = verified?.step?.action;
   if (String(action?.action || '').toUpperCase() !== ActionType.CLICK) return false;
@@ -447,7 +482,8 @@ export function taskGoalStatus(task, fusedObservation, verificationContext = nul
     const verified = verifiedStep(task, fusedObservation, verificationContext);
     if (verified && playControlWasClicked(verified) &&
         verified.verification.visible_state_changed === true &&
-        mediaStartedSince(verified.beforeObservation, fusedObservation) &&
+        (mediaStartedSince(verified.beforeObservation, fusedObservation) ||
+          mediaCurrentlyPlaying(fusedObservation)) &&
         requestedMediaMatchesPage(task, fusedObservation)) {
       return { satisfied: true, message: 'The requested media is now playing.' };
     }
@@ -571,6 +607,10 @@ export class AgentController {
     this.listeners = new Set();
     this.pendingUserConfirmationResolver = null;
     this.pendingUserInputResolver = null;
+    // Raw payload of the most recent approval answer (site address +
+    // remember choice). Read once by the off-list navigation gate; the
+    // boolean approval itself still travels through the resolver.
+    this.lastConfirmationResponse = null;
     this.runToken = 0;
     this.pauseResolver = null;
     if (this._pauseExpiryTimer) { clearTimeout(this._pauseExpiryTimer); this._pauseExpiryTimer = null; }
@@ -642,6 +682,7 @@ export class AgentController {
     if (this.pendingUserConfirmationResolver) {
       const staleResolve = this.pendingUserConfirmationResolver;
       this.pendingUserConfirmationResolver = null;
+      this.lastConfirmationResponse = null;
       staleResolve(false);
     }
     if (this.pendingUserInputResolver) {
@@ -1648,11 +1689,16 @@ export class AgentController {
       return false;
     }
 
-    // Settings can force confirmation for high-risk actions even if the model disagrees
-    const needsConfirm = riskAssessment.requiresConfirmation ||
+    // Settings can force confirmation for high-risk actions even if the model disagrees.
+    // The media fast-path runs first: an explicit play request whose click the
+    // gate rates LOW never takes an approval card, even when the planner set
+    // requires_confirmation out of caution. Gate-demanded confirmations are
+    // untouched (see isConfidentMediaPlay).
+    const mediaFastPath = isConfidentMediaPlay(task, proposedAction, riskAssessment, fusedTarget);
+    const needsConfirm = !mediaFastPath && (riskAssessment.requiresConfirmation ||
       proposedAction.requires_confirmation ||
       ((taskManager.settings?.alwaysConfirm !== false) &&
-        (riskAssessment.risk === RiskLevel.HIGH || riskAssessment.risk === RiskLevel.CRITICAL));
+        (riskAssessment.risk === RiskLevel.HIGH || riskAssessment.risk === RiskLevel.CRITICAL)));
 
     if (needsConfirm) {
       // Explain WHY approval is needed: the safety gate's reason when it
@@ -2218,9 +2264,22 @@ export class AgentController {
     // "the first", "the top", "any of them": the model is describing a
     // pick-one decision, so the local ranking is the answer to it.
     const defersChoice = /\b(?:first|top|any|one\s+of|either)\b/i.test(prompt);
+    // Fungible media picks: on an explicit play request ("play isro video")
+    // any topically-matching result completes the goal — choosing between
+    // equally-scored ISRO videos carries no identity, credential, or purchase
+    // consequence, so a near-tie is not evidence the user must choose. The
+    // best-ranked candidate (the same ranking the planner clicks unaided)
+    // wins without the margin requirement. Every other guard on this path —
+    // the credential/OTP/sign-in exclusions, the clickability join, the
+    // positive-score floor — still applies.
+    const playIntent = normalizedIntent(task);
+    const taskWantsPlay = playIntent === 'PLAY' || taskRequires(task, 'PLAY') ||
+      (!playIntent && promptAsksPlay(task));
+    const isYouTube = (task.pageState?.site || '').toLowerCase() === 'youtube' || /\byoutube\b/i.test(task.prompt || '');
+    const mediaChoice = (taskWantsPlay || isYouTube) && /\b(?:play|watch|video|song|music|result)\b/i.test(prompt);
     // Otherwise the best candidate must actually stand out. A near-tie means the
     // model was right that the choice belongs to the user.
-    if (!defersChoice && runnerUp && Number.isFinite(best.score) && Number.isFinite(runnerUp.score) &&
+    if (!defersChoice && !mediaChoice && runnerUp && Number.isFinite(best.score) && Number.isFinite(runnerUp.score) &&
         best.score - runnerUp.score < 3) {
       return null;
     }
@@ -2325,9 +2384,15 @@ export class AgentController {
    */
   async _maybeHandleNavigationBootstrap(task, currentTab, capability, token = task.runToken) {
     const notHandled = { handled: false, shouldContinue: true };
+    // User-approved shortcuts ("My sites") resolve before the built-in map.
+    const customSites = taskManager.settings?.customSites &&
+      typeof taskManager.settings.customSites === 'object' &&
+      !Array.isArray(taskManager.settings.customSites)
+      ? taskManager.settings.customSites
+      : {};
     let goal = null;
     try {
-      goal = getNavigationGoal(task.prompt);
+      goal = getNavigationGoal(task.prompt, customSites);
     } catch {
       goal = null;
     }
@@ -2378,7 +2443,7 @@ export class AgentController {
     // Compound task stranded on a non-automatable page or starting on another site:
     // hop to the task's site homepage (if deterministically known), then re-observe.
     const site = task.taskState?.site;
-    let home = site ? getSiteHomepage(site) : null;
+    let home = site ? getSiteHomepage(site, customSites) : null;
     const currentHost = (() => { try { return new URL(currentTab?.url || '').hostname.toLowerCase(); } catch { return ''; } })();
     const targetSiteHost = site?.toLowerCase();
 
@@ -2400,7 +2465,118 @@ export class AgentController {
       }, token));
     }
 
+    // Stranded on a non-automatable page (new tab, browser internal) with a
+    // navigation request no site list resolves ("open <unknown> website").
+    // The built-in list is intentionally small and stays that way: an
+    // off-list destination needs the user's eyes, not a silent guess. Ask for
+    // approval to search instead, with the option to give the exact address
+    // and store it in "My sites" for next time. Non-navigation tasks still
+    // fail via the capability gate below.
+    if (capability !== PageCapability.AUTOMATABLE_WEB && capability !== PageCapability.EXTENSION_INTERNAL) {
+      const wantsNavigation = goal?.needsSearch === true ||
+        (goal && !goal.url) ||
+        /^(?:please\s+)?(?:could\s+you\s+)?(?:open|go\s+to|navigate\s+to|visit|go)\b/i.test(String(task.prompt || ''));
+      const query = String(task.prompt || '')
+        .replace(/^(?:please\s+)?(?:could\s+you\s+)?(?:open|go\s+to|navigate\s+to|visit|go)\s+/i, '')
+        .trim().slice(0, 200);
+      if (wantsNavigation && query) {
+        const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
+        const validation = validateNavigationUrl(searchUrl);
+        if (validation.valid) {
+          return await this._awaitOwned(task, token, this._approveOffListNavigation(task, {
+            siteLabel: String(goal?.site || query).slice(0, 80),
+            query,
+            searchUrl: validation.normalizedUrl,
+            isPure: goal?.isPure === true
+          }, token));
+        }
+      }
+    }
+
     return notHandled;
+  }
+
+  /**
+   * Approval gate for destinations outside every site list.
+   *
+   * The panel shows a confirmation with the proposed Google search plus an
+   * optional address field and an "Add to my sites" toggle. Approving with an
+   * address navigates there directly (and stores it when asked); approving
+   * empty-handed runs the pure-search fallback; declining stops the task.
+   * Returns the same { handled, shouldContinue } contract as the bootstrap.
+   */
+  async _approveOffListNavigation(task, { siteLabel, query, searchUrl, isPure }, token = task.runToken) {
+    const stopped = { handled: true, shouldContinue: false };
+    const confirmationId = globalThis.crypto?.randomUUID?.() || `confirm_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    const navAction = {
+      action: ActionType.NAVIGATE,
+      target: { url: searchUrl },
+      risk: RiskLevel.LOW,
+      requires_confirmation: true
+    };
+    const reason = `"${siteLabel}" is not in the known-sites list, so it needs your call: continue to a Google search for it, or type its exact address to open it directly (optionally adding it to My sites for next time).`;
+    taskManager.setPendingConfirmation(navAction, reason, {
+      confirmationId, taskId: task.id, siteApproval: true, siteLabel, candidateUrl: searchUrl
+    }, task);
+    this.notify('STATE_CHANGED', { state: AgentState.WAITING_FOR_USER });
+    this.notify('CONFIRMATION_REQUIRED', {
+      confirmationId,
+      taskId: task.id,
+      action: { ...navAction, risk: RiskLevel.LOW },
+      reason,
+      siteApproval: true,
+      siteLabel,
+      candidateUrl: searchUrl,
+      privacySummary: {
+        dataKeptLocal: 'No secrets disclosed',
+        dataSharedWithServer: 'Sanitized task request and page context; saved profile values stay local'
+      }
+    });
+    const approved = await this._awaitOwned(task, token, new Promise((resolve) => {
+      this.pendingUserConfirmationResolver = resolve;
+    }));
+    taskManager.clearPendingConfirmation(task);
+    const response = this.lastConfirmationResponse;
+    this.lastConfirmationResponse = null;
+    if (!approved) {
+      taskManager.cancelTask(task);
+      this.clearOverlays(task.tabId);
+      this.notify('TASK_CANCELLED', { reason: `Navigation to "${siteLabel}" was declined. It was not added to the sites list.` });
+      return stopped;
+    }
+    // An exact address from the user beats the search: validate it like any
+    // other navigation target, never trust it blindly.
+    const userUrl = String(response?.siteUrl || '').trim();
+    if (userUrl) {
+      const direct = validateNavigationUrl(userUrl);
+      if (!direct.valid) {
+        taskManager.failTask(`That website address was rejected: ${direct.reason}`, task);
+        this.clearOverlays(task.tabId);
+        this.notify('TASK_FAILED', { error: taskManager.getTask()?.error, hint: taskManager.getTask()?.hint });
+        return stopped;
+      }
+      if (response?.rememberSite === true) {
+        try {
+          const current = taskManager.settings?.customSites || {};
+          await taskManager.updateSettings({
+            customSites: { ...current, [siteLabel.toLowerCase()]: direct.normalizedUrl }
+          });
+          log.info('NAVIGATION', { phase: 'site-remembered', site: siteLabel, host: direct.host });
+        } catch (error) {
+          log.warn('Could not remember the approved site; continuing without storing it.', { error: String(error?.message || error).slice(0, 160) });
+        }
+      }
+      return await this._awaitOwned(task, token, this._executeBootstrapNavigation(task, null, direct.normalizedUrl, {
+        pure: isPure,
+        thought: `Open "${siteLabel}" at ${direct.host} (approved by the user).`
+      }, token));
+    }
+    // Approved empty-handed: pure-search fallback, not a direct open, so the
+    // loop continues on the results page instead of completing.
+    return await this._awaitOwned(task, token, this._executeBootstrapNavigation(task, null, searchUrl, {
+      pure: false,
+      thought: `The destination is not in the sites list (approved to search), so search for "${String(query || siteLabel).slice(0, 120)}" first, then continue the task on the results page.`
+    }, token));
   }
 
   /**
@@ -2837,6 +3013,10 @@ export class AgentController {
     const resolve = this.pendingUserConfirmationResolver;
     this.pendingUserConfirmationResolver = null;
     if (resolve) {
+      // Stash the raw answer before resolving: the off-list site gate reads
+      // the typed address / remember choice from here (the resolver itself
+      // only carries the boolean, unchanged for every other caller).
+      this.lastConfirmationResponse = { ...(payload || {}) };
       resolve(Boolean(payload.approved));
       return true;
     }

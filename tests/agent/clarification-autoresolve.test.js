@@ -76,6 +76,74 @@ test('a near-tie is left to the user when the question does not defer the choice
   );
 });
 
+test('a near-tie between videos resolves on an explicit play request', () => {
+  // The screenshot case: "Please click on the ISRO video you want to play"
+  // with equally-scored ISRO results. Any topically-matching result completes
+  // a play goal, so the best-ranked candidate wins without asking the user
+  // to do the agent's own job.
+  const task = {
+    prompt: 'open youtube and play isro video',
+    pageState: {
+      ranked_candidates: [candidate('el_3', 9), candidate('el_4', 8)],
+      elements: [{ id: 'el_3', is_clickable: true }, { id: 'el_4', is_clickable: true }]
+    }
+  };
+  const action = controller._resolveAgentDoableClarification(
+    ask('Please click on the ISRO video you want to play from the search results.'),
+    {},
+    task
+  );
+  assert.equal(action.action, 'CLICK');
+  assert.equal(action.target.element_id, 'el_3');
+  assert.equal(action.requires_confirmation, false);
+});
+
+test('the media exception needs both a play task and a media question', () => {
+  const mediaTask = (prompt) => ({
+    prompt,
+    pageState: {
+      ranked_candidates: [candidate('el_3', 9), candidate('el_4', 8)],
+      elements: [{ id: 'el_3', is_clickable: true }, { id: 'el_4', is_clickable: true }]
+    }
+  });
+  // Play task, but the question is not about media: still asks.
+  assert.equal(
+    controller._resolveAgentDoableClarification(
+      ask('Which account should I click to continue?'),
+      {},
+      mediaTask('open youtube and play isro video')
+    ),
+    null
+  );
+  // Media-flavored question, but no play task: still asks.
+  assert.equal(
+    controller._resolveAgentDoableClarification(
+      ask('Please click on the ISRO video you want to play.'),
+      {},
+      mediaTask('find the cheapest laptop under 60000')
+    ),
+    null
+  );
+});
+
+test('sign-in still wins over the media exception', () => {
+  const task = {
+    prompt: 'open youtube and play isro video',
+    pageState: {
+      ranked_candidates: [candidate('el_3', 20)],
+      elements: [{ id: 'el_3', is_clickable: true }]
+    }
+  };
+  assert.equal(
+    controller._resolveAgentDoableClarification(
+      ask('Please sign in to play this video with your own account.'),
+      {},
+      task
+    ),
+    null
+  );
+});
+
 test('a clearly leading candidate resolves even without a deferring phrase', () => {
   const action = resolve('Please open the matching result and continue.', [candidate('el_3', 22), candidate('el_4', 4)]);
   assert.equal(action.action, 'CLICK');

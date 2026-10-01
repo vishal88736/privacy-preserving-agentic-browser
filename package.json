@@ -34,6 +34,7 @@
   "license": "ISC",
   "dependencies": {
     "@huggingface/transformers": "^4.3.0",
+    "@mediapipe/tasks-vision": "^1.0.1",
     "pdfjs-dist": "4.10.38",
     "tesseract.js": "^7.0.0"
   },

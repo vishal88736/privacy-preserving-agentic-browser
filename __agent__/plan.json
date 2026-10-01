@@ -2,18 +2,22 @@
   "schema_version": 1,
   "items": [
     {
-      "title": "Review current changes for remaining defects",
+      "title": "Compare BrowserOS agentic architecture with this extension",
       "status": "done"
     },
     {
-      "title": "Run final static and regression checks",
+      "title": "Identify the highest-value missing agentic capabilities",
       "status": "done"
     },
     {
-      "title": "Report remaining errors and improvements",
+      "title": "Implement compatible agentic improvements safely",
+      "status": "done"
+    },
+    {
+      "title": "Run regression and browser validation",
       "status": "done"
     }
   ],
-  "updated_at": "2026-10-01T15:01:14.615Z",
+  "updated_at": "2026-10-01T15:25:22.973Z",
   "session_id": "01a0f3db-7c8a-7218-b84a-2c597132f6b2"
 }

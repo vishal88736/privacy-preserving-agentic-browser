@@ -501,6 +501,19 @@
         <span id="confirm-note-text">Review what the page can receive before approving.</span>
       </div>
 
+      <!-- Off-list website approval: exact address + remember toggle.
+           Shown only for siteApproval confirmations (see app.js). -->
+      <div id="confirm-site-box" hidden>
+        <label class="vault-field">
+          <span>Website address (optional — open directly instead of searching)</span>
+          <input id="confirm-site-url" inputmode="url" autocomplete="off" placeholder="https://example.com">
+        </label>
+        <label class="user-input-save-vault">
+          <input type="checkbox" id="confirm-site-remember" class="user-input-save-vault-check">
+          <span>Add to My sites list for next time</span>
+        </label>
+      </div>
+
       <div class="modal-actions">
         <button id="modal-reject-btn" class="btn btn-secondary">Cancel</button>
         <button id="modal-approve-btn" class="btn btn-primary btn-confirm-primary">Confirm &amp; Proceed</button>
@@ -846,6 +859,12 @@
             and detected PII are redacted before anything is written.
           </p>
         </div>
+      </div>
+
+      <div class="settings-section">
+        <h4 class="settings-section-title">My sites</h4>
+        <p class="muted small">Websites you approved and kept. Used before the built-in list.</p>
+        <div id="settings-sites-list"></div>
       </div>
 
       <div class="settings-section settings-about">

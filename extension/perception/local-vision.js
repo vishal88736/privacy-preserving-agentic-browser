@@ -9,6 +9,7 @@ import { createLogger } from '../shared/logger.js';
 import { PerceptionProvider } from './perception-provider.js';
 import { PackagedOnnxRuntime, TransformersOnnxInferenceProvider } from '../runtime/model-runtime.js';
 import { getPackagedOcrWorker } from './ocr/local-ocr.js';
+import { FaceDetector, FilesetResolver } from '../vendor/mediapipe/vision_bundle.mjs';
 
 const log = createLogger({ scope: 'LocalVision', surface: 'sidepanel' });
 
@@ -177,6 +178,7 @@ export class LocalVisionEngine extends PerceptionProvider {
     this.detectorPromise = null;
     this.backendUsed = null;
     this.ocrPromise = null;
+    this.faceDetectorPromise = null;
     this.assetBytesPromise = null;
     this.inferenceProvider = inferenceProvider || new TransformersOnnxInferenceProvider(
       new PackagedOnnxRuntime({ api })
@@ -212,6 +214,29 @@ export class LocalVisionEngine extends PerceptionProvider {
     return this.ocrPromise;
   }
 
+  async _loadFaceDetector() {
+    if (!this.faceDetectorPromise) {
+      this.faceDetectorPromise = (async () => {
+        const vision = await FilesetResolver.forVisionTasks(
+          this.api.runtime.getURL('vendor/mediapipe')
+        );
+        return FaceDetector.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath: this.api.runtime.getURL('models/mediapipe/blaze_face_short_range.tflite'),
+            delegate: 'CPU'
+          },
+          runningMode: 'IMAGE',
+          minDetectionConfidence: 0.5
+        });
+      })().catch(err => {
+        this.faceDetectorPromise = null;
+        log.warn('Packaged face detector could not initialize.', { error_type: err?.name || 'Error' });
+        throw err;
+      });
+    }
+    return this.faceDetectorPromise;
+  }
+
   async _assetBytes() {
     if (!this.assetBytesPromise) {
       this.assetBytesPromise = fetch(this.api.runtime.getURL('models/local-vision-assets.json'))
@@ -232,13 +257,19 @@ export class LocalVisionEngine extends PerceptionProvider {
       if (!imageWidth || !imageHeight) throw new Error('The captured screenshot has no readable pixels.');
 
       const loadStarted = performance.now();
-      const [detector, ocr] = await Promise.all([this._loadDetector(), this._loadOcr()]);
+      const [detector, ocr, faceDetector] = await Promise.all([
+        this._loadDetector(), 
+        this._loadOcr(), 
+        this._loadFaceDetector()
+      ]);
       const modelLoadMs = performance.now() - loadStarted;
 
       const detectorStarted = performance.now();
-      const [objects, ocrResult] = await Promise.all([
+      const [objects, ocrResult, faceResult] = await Promise.all([
         detector(screenshotDataUrl, { threshold: PERSON_THRESHOLD }),
-        ocr.recognize(screenshotDataUrl)
+        ocr.recognize(screenshotDataUrl),
+        // Mediapipe needs the image bitmap, not the data URL
+        faceDetector.detect(bitmap)
       ]);
       const inferenceMs = performance.now() - detectorStarted;
 
@@ -255,7 +286,20 @@ export class LocalVisionEngine extends PerceptionProvider {
         };
       })
       .filter((item) => item.bbox.every(Number.isFinite) && item.bbox[2] > 0 && item.bbox[3] > 0);
-    const people = objectDetections.filter((item) => item.label.toLowerCase() === 'person');
+    
+    const faces = (faceResult?.detections || []).map((det) => {
+      const box = det.boundingBox;
+      return {
+        label: 'person',
+        bbox: asBox(box.originX, box.originY, box.originX + box.width, box.originY + box.height, scaleX, scaleY),
+        confidence: Number(det.categories[0].score.toFixed(3))
+      };
+    });
+
+    const people = [
+      ...objectDetections.filter((item) => item.label.toLowerCase() === 'person'),
+      ...faces
+    ];
 
     const ocrLines = ocrResult?.data?.lines || [];
     const { regions: piiRegions, unableToLocateSensitiveText: missingBoxes } = boxesForSpans(

@@ -12,6 +12,7 @@ const langDir = path.join(extension, 'models', 'lang');
 const transformerDir = path.join(extension, 'vendor', 'transformers');
 const ortDir = path.join(extension, 'vendor', 'onnxruntime-web');
 const tesseractDir = path.join(extension, 'vendor', 'tesseract');
+const mediapipeDir = path.join(extension, 'vendor', 'mediapipe');
 
 async function copy(source, destination) {
   await mkdir(path.dirname(destination), { recursive: true });
@@ -48,6 +49,7 @@ await mkdir(langDir, { recursive: true });
 await mkdir(transformerDir, { recursive: true });
 await mkdir(ortDir, { recursive: true });
 await mkdir(tesseractDir, { recursive: true });
+await mkdir(mediapipeDir, { recursive: true });
 
 const npm = (relative) => path.join(root, 'node_modules', ...relative.split('/'));
 // Only the assets the extension actually loads are staged. ort.all.bundle.min.mjs
@@ -67,7 +69,10 @@ await Promise.all([
   copy(npm('onnxruntime-web/dist/ort.all.bundle.min.mjs'), path.join(ortDir, 'ort.all.bundle.min.mjs')),
   copy(npm('tesseract.js/dist/tesseract.esm.min.js'), path.join(tesseractDir, 'tesseract.esm.min.js')),
   copy(npm('tesseract.js/dist/worker.min.js'), path.join(tesseractDir, 'worker.min.js')),
-  copy(npm('tesseract.js-core/tesseract-core-simd-lstm.wasm.js'), path.join(tesseractDir, 'tesseract-core-simd-lstm.wasm.js'))
+  copy(npm('tesseract.js-core/tesseract-core-simd-lstm.wasm.js'), path.join(tesseractDir, 'tesseract-core-simd-lstm.wasm.js')),
+  copy(npm('@mediapipe/tasks-vision/vision_bundle.mjs'), path.join(mediapipeDir, 'vision_bundle.mjs')),
+  copy(npm('@mediapipe/tasks-vision/wasm/vision_wasm_internal.js'), path.join(mediapipeDir, 'vision_wasm_internal.js')),
+  copy(npm('@mediapipe/tasks-vision/wasm/vision_wasm_internal.wasm'), path.join(mediapipeDir, 'vision_wasm_internal.wasm'))
 ]);
 
 // Older builds staged these two before the manifest above was narrowed. Drop
@@ -96,6 +101,10 @@ await download(hf('onnx/model_q4.onnx'), path.join(onnxDir, 'model_q4.onnx'), {
 await download(
   'https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng/4.0.0_best_int/eng.traineddata.gz',
   path.join(langDir, 'eng.traineddata.gz')
+);
+await download(
+  'https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite',
+  path.join(extension, 'models', 'mediapipe', 'blaze_face_short_range.tflite')
 );
 
 const allFiles = [

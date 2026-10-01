@@ -153,9 +153,9 @@ export function parseTaskSemantics(rawPrompt) {
     gmail: 'Gmail', drive: 'Drive', maps: 'Maps', facebook: 'Facebook',
     twitter: 'Twitter', instagram: 'Instagram', linkedin: 'LinkedIn', reddit: 'Reddit',
     ebay: 'eBay', spotify: 'Spotify', netflix: 'Netflix', wikipedia: 'Wikipedia',
-    booking: 'Booking', irctc: 'IRCTC'
+    booking: 'Booking', irctc: 'IRCTC', sih: 'SIH'
   };
-  const siteMatch = positiveLower.match(/\b(youtube|google|amazon|flipkart|bing|duckduckgo|github|stackoverflow|gmail|drive|maps|facebook|twitter|instagram|linkedin|reddit|ebay|spotify|netflix|wikipedia|booking|irctc|x\.com)\b/i);
+  const siteMatch = positiveLower.match(/\b(youtube|google|amazon|flipkart|bing|duckduckgo|github|stackoverflow|gmail|drive|maps|facebook|twitter|instagram|linkedin|reddit|ebay|spotify|netflix|wikipedia|booking|irctc|sih|x\.com)\b/i);
   const siteKey = siteMatch ? siteMatch[1].toLowerCase() : null;
   let site = siteKey === 'x.com' ? 'X' : (SITE_NAMES[siteKey] || null);
   if (!site) {

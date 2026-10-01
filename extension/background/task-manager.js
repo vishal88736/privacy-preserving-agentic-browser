@@ -5,6 +5,7 @@
  */
 
 import { AgentState } from '../shared/constants.js';
+import { normalizeSiteLabel, validateNavigationUrl } from '../navigation/navigation.js';
 import {
   BACKEND_TOKEN_STORAGE_KEY,
   deleteEncryptedSecret,
@@ -21,6 +22,10 @@ export const DEFAULT_SETTINGS = Object.freeze({
   maxSteps: 25,
   alwaysConfirm: true,
   showDebug: false,
+  // User-approved website shortcuts ("My sites"), { label: normalizedUrl }.
+  // Consulted before the built-in COMMON_SITES map, so an explicit user entry
+  // always wins. Labels/URLs are validated on write (see updateSettings).
+  customSites: Object.freeze({}),
   // The backend URL is the single largest egress surface in the extension: it
   // decides where the sanitized-but-still-sensitive page context is sent. This
   // project is loopback-only by design (the Python side forces HOST to
@@ -236,6 +241,27 @@ export class TaskManager {
       });
       if (!check.valid) throw new Error(check.reason);
       this.settings.backendUrl = check.url;
+    }
+    // User-approved site shortcuts. Re-validated on every write (storage is
+    // local but untrusted input must never become a navigation destination
+    // without passing the same scheme/host checks as any other URL).
+    if (patch && patch.customSites !== undefined) {
+      if (!patch.customSites || typeof patch.customSites !== 'object' || Array.isArray(patch.customSites)) {
+        throw new Error('Custom sites must be a name-to-URL map.');
+      }
+      const entries = Object.entries(patch.customSites);
+      if (entries.length > 50) throw new Error('Too many custom sites (maximum 50).');
+      const cleaned = {};
+      for (const [rawLabel, rawUrl] of entries) {
+        const label = normalizeSiteLabel(rawLabel);
+        if (!label || !/^[a-z0-9][a-z0-9 _.-]*$/i.test(label)) {
+          throw new Error(`Invalid site name: "${String(rawLabel || '').slice(0, 40)}".`);
+        }
+        const check = validateNavigationUrl(rawUrl);
+        if (!check.valid) throw new Error(`Invalid URL for "${label}": ${check.reason}`);
+        cleaned[label] = check.normalizedUrl;
+      }
+      this.settings.customSites = cleaned;
     }
     try {
       if (typeof chrome !== 'undefined' && chrome.storage?.local) {

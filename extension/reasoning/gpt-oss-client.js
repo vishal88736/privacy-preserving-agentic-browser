@@ -227,11 +227,23 @@ export class GPTOSSClient {
       }
       return { ...data, remoteCallAttempted };
     } catch (err) {
-      log.exception('interpretTask failed; reporting unknown intent', err);
+      // An unreachable backend is an ordinary, expected condition (the user may
+      // simply not have started it yet). Logging it as an ERROR puts a red entry
+      // in chrome://extensions for something the next step reports properly and
+      // actionably, which trains people to ignore this panel. Keep the detail --
+      // it is the fastest way to diagnose a misconfigured backendUrl -- but at
+      // warn level. Privacy violations stay at error, since those are real.
+      const isPrivacyBlock = err?.name === 'OutboundPolicyViolationError';
+      const detail = String(err?.message || err || 'unknown error').slice(0, 200);
+      if (isPrivacyBlock) {
+        log.error(`Interpret blocked by the outbound privacy policy: ${detail}`);
+      } else {
+        log.warn(`Interpret unavailable (${detail}); continuing with unknown intent.`);
+      }
       return {
         ...UNKNOWN_INTERPRETATION,
         remoteCallAttempted,
-        privacyBlocked: err?.name === 'OutboundPolicyViolationError',
+        privacyBlocked: isPrivacyBlock,
         // PolicyEngine messages contain only a safe category/reason, never
         // the matched value. Preserve that diagnostic for the task UI.
         ...(err?.name === 'OutboundPolicyViolationError'

@@ -40,6 +40,25 @@ MAX_VISIBLE_TEXT_CHARS = 1500
 MAX_HEADINGS = 8
 
 
+# Element-id pattern for the extension's per-observation registry (el_1, el_2,
+# ...). Ids are reassigned on every extraction, so any id quoted outside its
+# own observation — history summaries, previous plan text — is stale by
+# definition and must never be shown to the planner as a reusable handle.
+STALE_ID_PATTERN = re.compile(r"\bel_\d+\b")
+
+# Placeholder that replaces a stale id where prose must stay readable. It is
+# deliberately not a valid target shape, so the grounding-repair guard can
+# never mistake it for an executable element.
+STALE_ID_PLACEHOLDER = "[stale-id]"
+
+
+def scrub_stale_ids(text: str) -> str:
+    """Replace observation-scoped element ids with an unusable placeholder."""
+    if not isinstance(text, str) or not text:
+        return text if isinstance(text, str) else ""
+    return STALE_ID_PATTERN.sub(STALE_ID_PLACEHOLDER, text)
+
+
 def summarize_history(task_history: Optional[List[Dict[str, Any]]]) -> str:
     """Compress step history into a short loop-memory string.
 
@@ -48,6 +67,14 @@ def summarize_history(task_history: Optional[List[Dict[str, Any]]]) -> str:
     same signal the circuit breakers use), the latest critic feedback, and
     any extracted answer text. Older steps collapse into counts — their full
     detail already had its chance to influence earlier calls.
+
+    Element ids are NEVER repeated here, not even the last step's target:
+    the extension reassigns every id on each observation, so a quoted id is
+    always stale, and the planner copies what it sees — emitting the stale
+    id, taking a grounding-repair WAIT, re-observing, and repeating until
+    the stuck-loop breaker fails the task. The per-step verification block
+    already carries the target outcome (present / state-changed) without
+    naming an unusable handle.
     """
     history = [s for s in (task_history or []) if isinstance(s, dict)]
     if not history:
@@ -64,21 +91,21 @@ def summarize_history(task_history: Optional[List[Dict[str, Any]]]) -> str:
     last_action = last.get("action")
     if isinstance(last_action, dict):
         last_action = last_action.get("action")
-    target = last.get("target")
-    if isinstance(target, dict):
-        target = target.get("element_id") or target.get("label")
     if last.get("success") is False:
-        last_outcome = f"FAILED ({str(last.get('error') or 'unknown error')[:160]})"
+        last_outcome = f"FAILED ({scrub_stale_ids(str(last.get('error') or 'unknown error'))[:160]})"
     else:
         last_outcome = "succeeded"
     parts = [
         f"steps={len(history)} (succeeded={successes}, failed={failures}, "
         f"consecutive_failures={consecutive_failures})",
-        f"last_step: {last_action or '?'} on {target or '?'} -> {last_outcome}",
+        # No target id: it belongs to a previous observation (see docstring).
+        f"last_step: {last_action or '?'} -> {last_outcome}",
     ]
     feedback = last.get("planner_feedback")
     if isinstance(feedback, str) and feedback.strip():
-        parts.append(f"latest_critic_feedback: {feedback.strip()[:300]}")
+        # Critic feedback quotes previous plans, ids included — scrub the
+        # stale handles so only the reasoning survives.
+        parts.append(f"latest_critic_feedback: {scrub_stale_ids(feedback.strip())[:300]}")
     extracted = last.get("extracted_text")
     if isinstance(extracted, str) and extracted.strip():
         parts.append(f"last_extracted_text: {extracted.strip()[:300]}")

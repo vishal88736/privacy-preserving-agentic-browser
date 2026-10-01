@@ -339,6 +339,28 @@ class CompactContextTests(unittest.TestCase):
         # Older steps collapse: their detail must not ride along verbatim.
         self.assertNotIn("stale target", summary)
 
+    def test_summary_never_repeats_observation_scoped_element_ids(self):
+        # Regression: ids reassign every extraction, so quoting last step's
+        # target anchored the planner to a stale id -> grounding-repair WAIT
+        # x3 -> stuck-loop FAIL (YouTube play tasks died at step ~7).
+        history = [
+            {"action": "CLICK", "target": {"element_id": "el_7"}, "success": True},
+        ]
+        summary = summarize_history(history)
+        self.assertIn("last_step: CLICK -> succeeded", summary)
+        self.assertNotIn("el_7", summary)
+
+    def test_summary_scrubs_stale_ids_from_feedback_and_errors(self):
+        history = [
+            {"action": "CLICK", "target": {"element_id": "el_3"}, "success": False,
+             "error": "Target element el_3 became stale after observation.",
+             "planner_feedback": "Next: click el_3 again once visible."},
+        ]
+        summary = summarize_history(history)
+        self.assertNotIn("el_3", summary)
+        self.assertIn("[stale-id]", summary)
+        self.assertIn("became stale after observation", summary)
+
     def test_summary_counts_consecutive_failures_like_the_breakers(self):
         history = [
             {"action": "CLICK", "target": "el_1", "success": True},
