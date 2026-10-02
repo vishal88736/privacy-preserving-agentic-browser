@@ -50,34 +50,6 @@
 
   log.info('PrivacyAgent', 'Content script initialized.');
 
-  // Override blocking native dialogs (alert, confirm, prompt) to render them as non-blocking DOM elements
-  // This allows the agent to "see" them without the browser freezing the execution thread.
-  const _setupNativeDialogOverrides = () => {
-    try {
-      const script = document.createElement('script');
-      script.textContent = `
-        function _renderAgenticDialog(type, msg) {
-          const div = document.createElement('div');
-          div.id = 'agentic-native-dialog-' + Date.now();
-          div.style.cssText = 'position:fixed; top:10px; right:10px; background:yellow; color:black; padding:10px; z-index:2147483647; border:2px solid red; font-weight:bold;';
-          div.innerText = 'System ' + type + ': ' + msg;
-          const target = document.body || document.documentElement;
-          if (target) {
-            target.appendChild(div);
-            setTimeout(() => div.remove(), 10000);
-          }
-        }
-        window.alert = function(msg) { _renderAgenticDialog('alert', msg); return true; };
-        window.confirm = function(msg) { _renderAgenticDialog('confirm', msg); return true; };
-        window.prompt = function(msg, def) { _renderAgenticDialog('prompt', msg); return def; };
-      `;
-      (document.head || document.documentElement).appendChild(script);
-      script.remove();
-    } catch (e) {
-      log.exception('Content', 'Failed to override native dialogs', e);
-    }
-  };
-  _setupNativeDialogOverrides();
 
   // Time allowed for scrollIntoView + layout shift to settle before the action
   // target is re-resolved. Re-resolving after the scroll (rather than before)
@@ -421,7 +393,7 @@
           : String(element.innerText || '').replace(/\s+/g, ' ').trim();
         if (value) text = text.split(value).join('[FORM_FIELD]');
       }
-      return text.slice(0, 4000);
+      return text.slice(0, 20000);
     }
 
     parsePrice(text) {
@@ -638,7 +610,7 @@
         }
       }
 
-      const MAX_ELEMENTS = 120;
+      const MAX_ELEMENTS = 400;
       const extracted = [];
       let elementLimitReached = false;
       // Bound the WORK, not just the output. A `continue` for a non-rendered
@@ -810,7 +782,7 @@
       const main = document.querySelector('main, [role="main"], #content, .content') || document.body;
       const normalizedMainText = String(main?.innerText || '').replace(/\s+/g, ' ').trim();
       const visible_text = this.getVisiblePageText(main);
-      const visibleTextComplete = normalizedMainText.length <= 4000;
+      const visibleTextComplete = normalizedMainText.length <= 20000;
       const interactiveElementsComplete = !elementLimitReached;
 
       return {
@@ -871,8 +843,8 @@
       // no meaningful area, and treating it as an opaque surface withheld the
       // screenshot on virtually every modern page (every page has an analytics
       // pixel), which silently removed all visual grounding.
-      const MIN_OPAQUE_AREA_PX = 4000; // ~63x63
-      const MIN_OPAQUE_FRACTION = 0.02; // ...or 2% of the viewport
+      const MIN_OPAQUE_AREA_PX = 100000; // ~316x316
+      const MIN_OPAQUE_FRACTION = 0.15; // 15% of the viewport
       const viewportArea = Math.max(1, window.innerWidth * window.innerHeight);
       for (const el of document.querySelectorAll('canvas, video, iframe')) {
         const rect = el.getBoundingClientRect();
@@ -1190,16 +1162,21 @@
       }
 
       if (targetElement) {
-        const smoothOk = !(typeof window !== 'undefined' && window.matchMedia &&
-          window.matchMedia('(prefers-reduced-motion: reduce)').matches);
-        targetElement.scrollIntoView({ behavior: smoothOk ? 'smooth' : 'auto', block: 'center', inline: 'nearest' });
+        const rect = targetElement.getBoundingClientRect();
+        const isFullyVisible = rect.top >= 0 && rect.left >= 0 &&
+          rect.bottom <= (window.innerHeight || document.documentElement.clientHeight) &&
+          rect.right <= (window.innerWidth || document.documentElement.clientWidth);
+
+        if (!isFullyVisible) {
+          const smoothOk = !(typeof window !== 'undefined' && window.matchMedia &&
+            window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+          targetElement.scrollIntoView({ behavior: smoothOk ? 'smooth' : 'auto', block: 'center', inline: 'nearest' });
+          // Let the scroll settle, then re-resolve.
+          await this.sleep(SCROLL_SETTLE_MS);
+        }
+
         visualOverlay.highlightElement(targetElement);
-        // Let the scroll settle, then re-resolve. Resolving before the scroll
-        // and using that result afterwards meant the highlight could sit on one
-        // element while the click landed on another: scrollIntoView is
-        // fire-and-forget, so layout, sticky headers and lazy images all shift
-        // underneath during the animation.
-        await this.sleep(SCROLL_SETTLE_MS);
+
         const settled = registry.getElement(target.element_id);
         if (settled && settled.isConnected) targetElement = settled;
         // Re-check after the scroll. The scroll itself mutates the document, so
@@ -1400,6 +1377,10 @@
     async _executeClick(element, coords) {
       if (element) {
         element.focus();
+        const link = element.closest ? element.closest('a[href]') : null;
+        const targetHref = link && link.href && link.href.startsWith('http') ? link.href : null;
+        const originalUrl = window.location.href;
+
         // .click() ALONE. HTMLElement.click() synthesises the whole
         // pointerdown -> mousedown -> pointerup -> mouseup -> click sequence
         // itself, so dispatching the first three by hand and then calling
@@ -1408,6 +1389,21 @@
         // are extremely common) saw two toggles and netted out to no change at
         // all, which looks exactly like a dead page.
         element.click();
+
+        if (targetHref && targetHref !== originalUrl) {
+          // Give the SPA router a moment to push state. If it ignores untrusted
+          // synthetic clicks (like YouTube Polymer), force the navigation natively.
+          // This must be fire-and-forget so we don't delay sendResponse() and cause
+          // a "message port closed" error if the page tears down.
+          setTimeout(() => {
+            // YouTube's SPA navigation is already successful once the URL
+            // changes. Reload only when the click left the page at its original URL.
+            if (window.location.href === originalUrl) {
+              log.info('Content', 'Forcing native navigation for SPA click fallback.');
+              window.location.assign(targetHref);
+            }
+          }, 150);
+        }
         // Report BEFORE waiting. A click that navigates commits within a few
         // milliseconds, which tears down this document along with every pending
         // timer in it -- so an await here means sendResponse() never runs and
@@ -1418,6 +1414,33 @@
         // did NOT tear the page down.
         if (!this._clickMayNavigate(element)) {
           await this._waitForFieldSettle(element);
+          // Autoplay policy: a synthetic element.click() carries NO user
+          // activation (isTrusted=false), so Chrome blocks audible
+          // video.play() with NotAllowedError and a YouTube watch page loads
+          // paused. After clicking a play control, drive the <video> directly
+          // with a muted fallback so "play the video" actually plays.
+          if (this._isPlayControl(element)) {
+            try {
+              const playback = await this._ensureMediaPlaying(element);
+              if (playback) {
+                if (playback.playing && !playback.muted_fallback) {
+                  return { success: true, media_playback: playback };
+                }
+                if (playback.playing && playback.muted_fallback) {
+                  return {
+                    success: true,
+                    media_playback: playback,
+                    warning: 'Autoplay with sound was blocked by the browser (no user gesture yet). Video is playing muted — use the page volume/unmute control to restore sound.'
+                  };
+                }
+                return {
+                  success: false,
+                  error: 'The browser blocked both audible and muted programmatic playback. Report playback as blocked; do not ask the user to click the same visible control.',
+                  media_playback: playback
+                };
+              }
+            } catch {}
+          }
         }
         return { success: true };
       }
@@ -1425,7 +1448,21 @@
       if (coords && coords.length === 2) {
         const el = document.elementFromPoint(coords[0], coords[1]);
         if (el) {
+          const link = el.closest ? el.closest('a[href]') : null;
+          const targetHref = link && link.href && link.href.startsWith('http') ? link.href : null;
+          const originalUrl = window.location.href;
+
           el.click();
+
+          if (targetHref && targetHref !== originalUrl) {
+            setTimeout(() => {
+              if (window.location.href === originalUrl) {
+                log.info('Content', 'Forcing native navigation for coordinate SPA click fallback.');
+                window.location.assign(targetHref);
+              }
+            }, 150);
+          }
+
           if (!this._clickMayNavigate(el)) {
             await this._waitForFieldSettle(el);
           }
@@ -1434,6 +1471,134 @@
       }
 
       throw new Error('Target click element not found');
+    }
+
+    /**
+     * True when this element is a media play/pause control.
+     *
+     * Covers native <video>/<audio>, YouTube's ytp-play-button
+     * (aria-label "Play (k)" / "Pause (k)"), video.js / generic players,
+     * and plain "Play" buttons. Used only to decide whether a CLICK should
+     * also drive <video>.play() directly (synthetic clicks carry no user
+     * activation, so audible autoplay would otherwise stay blocked).
+     */
+    _isPlayControl(element) {
+      if (!element || typeof element !== 'object') return false;
+      try {
+        const tag = String(element.tagName || '').toLowerCase();
+        if (tag === 'video' || tag === 'audio') return true;
+        const aria = String(element.getAttribute?.('aria-label') || '').toLowerCase();
+        if (/^\s*(play|pause|resume)\b/.test(aria)) return true;
+        const title = String(element.title || element.getAttribute?.('title') || '').toLowerCase();
+        if (/^\s*(play|pause|resume)\b/.test(title)) return true;
+        let cls = '';
+        try {
+          cls = String(element.className?.baseVal ?? element.className ?? element.getAttribute?.('class') ?? '').toLowerCase();
+        } catch { cls = ''; }
+        if (cls.includes('ytp-play-button') || cls.includes('play-button') ||
+            cls.includes('vjs-play') || cls.includes('jw-display') ||
+            cls.includes('html5-video-player') || cls.includes('html5-video-container')) return true;
+        const text = String(element.innerText ?? element.textContent ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+        if (text && text.length <= 24 && /^(play|pause|resume)(\s+(the\s+)?(video|media|playback|button))?[\s.!…]*$/.test(text)) return true;
+      } catch { /* non-element: not a play control */ }
+      return false;
+    }
+
+    /** Visible <video>/<audio> elements, clicked target first. */
+    _findPlayableMedia(preferredElement) {
+      let all = [];
+      try {
+        // queryAllDeep lives on the DOMExtractor instance (BrowserExecutor has
+        // no such method). Fall back to a direct document query so media
+        // playback never silently degrades to "no media found".
+        if (typeof domExtractor?.queryAllDeep === 'function') {
+          all = domExtractor.queryAllDeep('video, audio');
+        } else if (typeof document !== 'undefined' && document.querySelectorAll) {
+          all = Array.from(document.querySelectorAll('video, audio'));
+        }
+      } catch { all = []; }
+      const visible = [];
+      for (const media of all) {
+        try {
+          if (!media || media.isConnected === false) continue;
+          const tag = String(media.tagName || '').toLowerCase();
+          if (tag !== 'video' && tag !== 'audio') continue;
+          if (tag === 'video') {
+            let rect = null;
+            try { rect = media.getBoundingClientRect?.(); } catch { rect = null; }
+            if (rect && !(rect.width > 0 && rect.height > 0)) continue;
+          }
+          visible.push(media);
+        } catch { /* skip unreadable node */ }
+      }
+      if (preferredElement) {
+        const tag = String(preferredElement.tagName || '').toLowerCase();
+        if ((tag === 'video' || tag === 'audio') && visible.includes(preferredElement)) {
+          return [preferredElement, ...visible.filter((m) => m !== preferredElement)];
+        }
+      }
+      return visible;
+    }
+
+    /**
+     * Drive paused media with video.play(), falling back to muted playback.
+     *
+     * Returns null when there is no playable media (caller keeps the normal
+     * CLICK success path), otherwise { attempted, playing, muted_fallback }.
+     * Never throws: a rejected play() is reported, not propagated.
+     */
+    async _ensureMediaPlaying(clickedElement) {
+      const candidates = this._findPlayableMedia(clickedElement);
+      if (!candidates.length) return null;
+      let attempted = false;
+      let playing = false;
+      let mutedFallback = false;
+      let blockedError = null;
+      for (const media of candidates) {
+        try {
+          if (media.ended === true) continue;
+          if (media.paused === false) { playing = true; continue; }
+          if (typeof media.play !== 'function') continue;
+          attempted = true;
+          try {
+            const result = media.play();
+            if (result && typeof result.then === 'function') await result;
+            if (media.paused === false) { playing = true; continue; }
+          } catch (playError) {
+            const name = String(playError?.name || '');
+            const message = String(playError?.message || '');
+            const isAutoplayBlock = name === 'NotAllowedError' ||
+              /not allowed|user.*gesture|interact|activation/i.test(message);
+            if (!isAutoplayBlock) { blockedError = playError; continue; }
+            // Audible autoplay needs a user gesture the synthetic click does
+            // not provide. Muted playback is always allowed — take it so the
+            // task visibly progresses, and tell the user how to restore sound.
+            let wasMuted = false;
+            try {
+              wasMuted = Boolean(media.muted);
+              try { media.muted = true; } catch {}
+              const mutedResult = media.play();
+              if (mutedResult && typeof mutedResult.then === 'function') await mutedResult;
+              if (media.paused === false) {
+                playing = true;
+                mutedFallback = true;
+              } else {
+                try { media.muted = wasMuted; } catch {}
+                blockedError = playError;
+              }
+            } catch (mutedError) {
+              try { media.muted = wasMuted; } catch {}
+              blockedError = mutedError;
+            }
+          }
+        } catch (mediaError) {
+          blockedError = mediaError;
+        }
+      }
+      if (!attempted && !playing) return null;
+      const out = { attempted, playing, muted_fallback: mutedFallback };
+      if (blockedError) out.error = String(blockedError?.message || blockedError).slice(0, 200);
+      return out;
     }
 
     async _executeRightClick(element, coords) {

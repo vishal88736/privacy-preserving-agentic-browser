@@ -195,6 +195,46 @@ function promptAsksPlay(task) {
   return /\b(play|watch|stream)\b/i.test(String(task?.prompt || ''));
 }
 
+function explicitlyRequestsYouTubeShorts(task) {
+  const prompt = String(task?.prompt || task?.taskState?.original_query || '');
+  return /\b(?:youtube\s+)?shorts\b|\byoutube\s+short\b|\bshort[- ]form\s+(?:video|content)\b/i.test(prompt);
+}
+
+function isYouTubeUrl(value) {
+  try {
+    return /(^|\.)youtube\.com$/i.test(new URL(String(value)).hostname);
+  } catch {
+    return /youtube\.com/i.test(String(value || ''));
+  }
+}
+
+function isYouTubeShortsUrl(value) {
+  try {
+    const url = new URL(String(value));
+    return isYouTubeUrl(url.href) && /^\/shorts(?:\/|$)/i.test(url.pathname);
+  } catch {
+    return /youtube\.com\/shorts(?:\/|[?#]|$)/i.test(String(value || ''));
+  }
+}
+
+function isFullLengthYouTubeVideoUrl(value) {
+  try {
+    const url = new URL(String(value));
+    return isYouTubeUrl(url.href) && /^\/watch\/?$/i.test(url.pathname) && url.searchParams.has('v');
+  } catch {
+    return /youtube\.com\/watch(?:\?|$)/i.test(String(value || ''));
+  }
+}
+
+function wantsFullLengthYouTubeVideo(task, observation) {
+  const intent = normalizedIntent(task);
+  const wantsMedia = intent === 'PLAY' || taskRequires(task, 'PLAY') ||
+    (!intent && promptAsksPlay(task));
+  if (!wantsMedia || explicitlyRequestsYouTubeShorts(task)) return false;
+  const pageUrl = observation?.page?.url || task?.pageState?.url || '';
+  return isYouTubeUrl(pageUrl) || /\byoutube\b/i.test(String(task?.prompt || ''));
+}
+
 /**
  * Media fast-path: no approval card before a play click.
  *
@@ -434,8 +474,16 @@ function playControlWasClicked(verified) {
     target?.dom?.text,
     target?.dom?.title
   ].filter((value) => typeof value === 'string');
-  const playControlLabel = /^\s*(?:play|resume)(?:\s+(?:(?:the\s+)?video|media|playback|button))?[\s.!…]*$/i;
-  if (targetId && labels.some((label) => playControlLabel.test(label))) return true;
+  const playControlLabel = /^\s*(?:play|resume)(?:\s+(?:(?:the\s+)?video|media|playback|button|trailer|episode))?[\s.!…]*$/i;
+  // YouTube and most HTML5 players append the keyboard shortcut to the
+  // accessible name ("Play (k)", "Pause (k)", "Play [k]"). The strict label
+  // regex rejects the parentheses, so a click on the real Play button was
+  // never recognized as a play trigger and PLAY tasks could never complete
+  // from the watch page. Strip one trailing "(…)" / "[…]" hint before matching.
+  const normalizePlayControlLabel = (value) => String(value || '')
+    .replace(/\s*[[(].*?[\])]\s*$/, '')
+    .trim();
+  if (targetId && labels.some((label) => playControlLabel.test(normalizePlayControlLabel(label)))) return true;
   // Also treat clicking a video link, thumbnail, or media item on a video site as a play trigger
   const tag = String(target?.tag || target?.dom?.tag || '').toLowerCase();
   const role = String(target?.role || target?.dom?.role || '').toLowerCase();
@@ -479,6 +527,11 @@ export function taskGoalStatus(task, fusedObservation, verificationContext = nul
   // a playback transition after that click, and a page identity matching the
   // requested item. A pre-existing ad/background player is not enough.
   if (intent === 'PLAY' || taskRequires(task, 'PLAY') || (!intent && promptAsksPlay(task))) {
+    // A YouTube Short does not satisfy a request to play a video unless the
+    // user specifically asked for Shorts. Let the planner return to results
+    // and choose a regular watch-page result instead of completing here.
+    if (wantsFullLengthYouTubeVideo(task, fusedObservation) &&
+        isYouTubeShortsUrl(fusedObservation?.page?.url)) return null;
     const verified = verifiedStep(task, fusedObservation, verificationContext);
     if (verified && playControlWasClicked(verified) &&
         verified.verification.visible_state_changed === true &&
@@ -1017,15 +1070,31 @@ export class AgentController {
 
     let rawDOM = domResponse.data;
     // A nearly-empty interactive surface usually means the page is mid-SPA
-    // transition (blank frame between routes). Wait briefly and re-extract
-    // once before planning against a stale or empty view.
+    // transition (blank frame between routes). Wait and re-extract up to a few
+    // times, keeping the fullest snapshot, before planning against a stale or
+    // empty view. Planning against a single blank frame makes the planner
+    // emit NAVIGATE for a page that is already loading; each NAVIGATE reloads
+    // the tab, so the next observation is blank again and the task can never
+    // progress past navigation (seen on YouTube).
     if (isSparsePageSnapshot(rawDOM)) {
-      await this._awaitOwned(task, token, measureStage(task, 'dom_retry_wait_ms', () => this.sleep(500)));
-      const reextract = await this._awaitOwned(task, token, measureStage(task, 'dom_retry_ms', () => this._extractDOM(task.tabId)));
-      if (reextract?.success && Array.isArray(reextract.data?.elements) &&
-          reextract.data.elements.length > rawDOM.elements.length) {
-        rawDOM = reextract.data;
+      for (let attempt = 0; attempt < 6 && isSparsePageSnapshot(rawDOM); attempt++) {
+        await this._awaitOwned(task, token, measureStage(task, 'dom_retry_wait_ms', () => this.sleep(600)));
+        const reextract = await this._awaitOwned(task, token, measureStage(task, 'dom_retry_ms', () => this._extractDOM(task.tabId)));
+        if (reextract?.success && Array.isArray(reextract.data?.elements) &&
+            reextract.data.elements.length > (rawDOM.elements || []).length) {
+          rawDOM = reextract.data;
+        }
       }
+    }
+    // The tab URL from chrome.tabs is authoritative for which page this is. A
+    // mid-load extraction can report about:blank with no elements for a tab
+    // that is really still loading its site; planning against the blank URL
+    // reads as "nowhere yet" and triggers another NAVIGATE (and another
+    // reload). Backfill the known tab URL so the planner sees a loading
+    // YouTube page and waits instead of re-navigating.
+    if ((!rawDOM.url || rawDOM.url === 'about:blank') && currentUrl &&
+        !/^(about|chrome|edge|moz-extension|chrome-extension):/i.test(currentUrl)) {
+      rawDOM = { ...rawDOM, url: currentUrl };
     }
     const expectedSensitiveCounts = defaultDOMSanitizer.getUnlocatedSensitiveCounts(rawDOM);
     const visualNeed = visualEvidenceNeed(task, rawDOM);
@@ -1557,6 +1626,37 @@ export class AgentController {
     // user's to answer.
     const autoResolved = this._resolveAgentDoableClarification(proposedAction, fusedObservation, task);
     if (autoResolved) proposedAction = autoResolved;
+
+    // PLAY tasks on YouTube default to full watch-page videos. If the planner
+    // targets a Shorts URL, pick the highest-ranked observed /watch result; if
+    // none is visible yet, advance the results page instead of opening Shorts.
+    const fullLengthVideoAction = this._avoidYouTubeShorts(proposedAction, fusedObservation, task);
+    if (fullLengthVideoAction) proposedAction = fullLengthVideoAction;
+
+    // Same-host NAVIGATE guard: the planner emits NAVIGATE for a page that is
+    // still loading (empty observation on the right host). Executing it
+    // reloads the tab and resets the load, so the next observation is empty
+    // again and the task loops NAVIGATE forever (seen as repeated "Open
+    // youtube.com" steps). When already on the destination host, WAIT for the
+    // load and re-observe instead of reloading.
+    if (proposedAction?.action === ActionType.NAVIGATE) {
+      const navTarget = proposedAction.target?.url || proposedAction.value;
+      const currentPageUrl = rawDOM.url || currentUrl;
+      if (typeof navTarget === 'string' && navTarget && currentPageUrl &&
+          urlsMatchForVerification(navTarget, currentPageUrl)) {
+        log.info('NAVIGATE skipped: already on destination host; waiting for the page to load.', {
+          target: String(navTarget).slice(0, 120),
+          current: String(currentPageUrl).slice(0, 120)
+        });
+        proposedAction = {
+          action: ActionType.WAIT,
+          duration: 2500,
+          risk: RiskLevel.LOW,
+          requires_confirmation: false,
+          thought: `Already on ${currentPageUrl}; waiting for the page to finish loading instead of reloading it.`
+        };
+      }
+    }
 
     // The Critique's stop decision is authoritative only when paired with its
     // final answer. The backend coerces a bare termination flag to false; this
@@ -2244,6 +2344,57 @@ export class AgentController {
       return null;
     }
 
+    // Models sometimes still ask the user to click Play even though the
+    // watch-page control is present in the grounded DOM. Resolve that narrow
+    // case locally: require an explicit PLAY task, a video page, a matching
+    // requested title, paused media, and a visible/enabled observed control.
+    // The resulting CLICK still passes through the normal semantic and risk
+    // gates, including the LOW-risk media fast path.
+    const mediaPlayIntent = normalizedIntent(task);
+    const wantsMediaPlayback = mediaPlayIntent === 'PLAY' || taskRequires(task, 'PLAY') ||
+      (!mediaPlayIntent && promptAsksPlay(task));
+    const currentUrl = String(fusedObservation?.page?.url || task.pageState?.url || '');
+    const pageType = String(task.pageState?.page_type || '').toUpperCase();
+    const isVideoPage = pageType === 'VIDEO_PAGE' || /\/(?:watch|shorts|embed|video)(?:\/|\?|$)/i.test(currentUrl);
+    if (wantsMediaPlayback && isVideoPage && !mediaCurrentlyPlaying(fusedObservation) &&
+        requestedMediaMatchesPage(task, fusedObservation) &&
+        /\b(?:play\s+button|click\s+(?:the\s+)?play|press\s+(?:the\s+)?play|start\s+playback)\b/i.test(prompt)) {
+      const normalizeLabel = (value) => String(value || '')
+        .replace(/\s*[[(].*?[\])]\s*$/, '')
+        .trim();
+      const playControlPattern = /^\s*(?:play|resume)(?:\s+(?:(?:the\s+)?video|media|playback|button))?[\s.!…]*$/i;
+      const playControl = (fusedObservation.elements || []).find((element) => {
+        if (!element || element.visible === false || element.enabled === false ||
+            element.disabled === true || element.interaction?.clickable !== true) return false;
+        const tag = String(element.dom?.tag || element.tag || '').toLowerCase();
+        const role = String(element.dom?.role || element.role || '').toLowerCase();
+        const semantic = String(element.semantics?.semantic_type || element.semantic_action_type || '').toUpperCase();
+        const isButton = tag === 'button' || role === 'button' || semantic === 'PLAY';
+        if (!isButton) return false;
+        const labels = [
+          element.accessible_name, element.label, element.text, element.title,
+          element.dom?.accessible_name, element.dom?.ariaLabel,
+          element.dom?.label, element.dom?.text, element.dom?.title
+        ];
+        return labels.some((label) => typeof label === 'string' &&
+          playControlPattern.test(normalizeLabel(label)));
+      });
+      if (playControl?.id) {
+        const label = String(playControl.accessible_name || playControl.label || 'Play').slice(0, 80);
+        log.info('Resolved a play-control clarification using the observed player button.', {
+          acted_on: playControl.id,
+          label
+        });
+        return {
+          action: ActionType.CLICK,
+          risk: RiskLevel.LOW,
+          requires_confirmation: false,
+          target: { element_id: playControl.id, label },
+          thought: `Clicking the observed ${label} control to start the requested video.`
+        };
+      }
+    }
+
     // `is_clickable` is NOT on ranked_candidates. task-grounding.js builds that
     // list and never emits the flag; page-state-modeler.js computes it, but onto
     // pageState.elements -- a different array. Filtering on it here therefore
@@ -2300,6 +2451,81 @@ export class AgentController {
       requires_confirmation: false,
       target: { element_id: best.element_id, label },
       thought: `Proceeding with the best match on this page (${label}) rather than asking the user to choose.`
+    };
+  }
+
+  _avoidYouTubeShorts(action, fusedObservation, task) {
+    if (!wantsFullLengthYouTubeVideo(task, fusedObservation)) return null;
+    const currentUrl = String(fusedObservation?.page?.url || task.pageState?.url || '');
+    const currentlyOnShort = isYouTubeShortsUrl(currentUrl);
+    const navigationTarget = action?.action === ActionType.NAVIGATE
+      ? (action.target?.url || action.value)
+      : '';
+    const targetId = action?.target?.element_id || action?.targetId || '';
+    let selected = targetId ? observationElement(fusedObservation, targetId) : null;
+    if (!selected && targetId.startsWith('item_')) {
+      const item = (fusedObservation?.result_items || []).find((candidate) => candidate.id === targetId);
+      selected = item?.primary_action_id
+        ? observationElement(fusedObservation, item.primary_action_id)
+        : null;
+    }
+    const selectedUrl = action?.action === ActionType.NAVIGATE
+      ? String(navigationTarget || '')
+      : String(selected?.href || selected?.dom?.href || '');
+    const targetingShort = isYouTubeShortsUrl(selectedUrl);
+    const targetingFullLengthVideo = isFullLengthYouTubeVideoUrl(selectedUrl);
+
+    // An explicit route to search results or a grounded full video is already
+    // moving toward the user's requested content. Let it proceed.
+    if (currentlyOnShort && (targetingFullLengthVideo ||
+        (action?.action === ActionType.NAVIGATE && !targetingShort) ||
+        action?.action === ActionType.GO_BACK)) return null;
+    if (!currentlyOnShort && !targetingShort) return null;
+
+    const rankedScores = new Map((task.pageState?.ranked_candidates || [])
+      .map((candidate) => [candidate?.element_id, Number(candidate?.score)]));
+    const fullLengthCandidates = (fusedObservation?.elements || [])
+      .filter((element) => element && element.visible !== false && element.enabled !== false &&
+        element.disabled !== true && element.interaction?.clickable === true &&
+        isFullLengthYouTubeVideoUrl(element.href || element.dom?.href || ''))
+      .sort((a, b) => {
+        const scoreA = rankedScores.get(a.id);
+        const scoreB = rankedScores.get(b.id);
+        const safeA = Number.isFinite(scoreA) ? scoreA : -Infinity;
+        const safeB = Number.isFinite(scoreB) ? scoreB : -Infinity;
+        return safeA === safeB ? 0 : safeB > safeA ? 1 : -1;
+      });
+    const best = fullLengthCandidates[0];
+    if (best?.id) {
+      const label = String(best.accessible_name || best.label || best.text || 'Full video').slice(0, 100);
+      log.info('Skipped a YouTube Short and selected an observed full video.', {
+        acted_on: best.id,
+        label
+      });
+      return {
+        action: ActionType.CLICK,
+        risk: action?.risk || RiskLevel.LOW,
+        requires_confirmation: action?.requires_confirmation === true,
+        target: { element_id: best.id, label },
+        thought: `Skipping the Shorts result and opening the best-ranked full video (${label}).`
+      };
+    }
+
+    if (currentlyOnShort) {
+      return {
+        action: ActionType.GO_BACK,
+        risk: RiskLevel.LOW,
+        requires_confirmation: false,
+        thought: 'Leaving YouTube Shorts to return to the video results and find a full video.'
+      };
+    }
+    log.info('Skipped a YouTube Shorts result; scrolling to look for a full video.', {});
+    return {
+      action: ActionType.SCROLL,
+      deltaY: 650,
+      risk: RiskLevel.LOW,
+      requires_confirmation: false,
+      thought: 'Skipping the Shorts result and looking farther down for a full video.'
     };
   }
 
@@ -2426,7 +2652,8 @@ export class AgentController {
       const currentHost = (() => { try { return new URL(currentTab?.url || '').hostname.toLowerCase(); } catch { return ''; } })();
       const targetHost = validation.host?.toLowerCase() || '';
       if (currentHost && targetHost && (currentHost === targetHost || currentHost.endsWith('.' + targetHost))) {
-        if (task.taskState?.getActiveSubgoal()?.toLowerCase()?.startsWith('open ')) {
+        const subgoal = task.taskState?.getActiveSubgoal()?.toLowerCase() || '';
+        if (subgoal.startsWith('open ') || subgoal.startsWith('navigate ')) {
           try { task.taskState.advanceSubgoal?.(); } catch {}
         }
         return notHandled;
@@ -2450,7 +2677,8 @@ export class AgentController {
     // If already on that site, do not navigate again
     if (home && currentHost && targetSiteHost && (currentHost === targetSiteHost || currentHost.includes(targetSiteHost))) {
       home = null;
-      if (task.taskState?.getActiveSubgoal()?.toLowerCase()?.startsWith('open ')) {
+      const subgoal = task.taskState?.getActiveSubgoal()?.toLowerCase() || '';
+      if (subgoal.startsWith('open ') || subgoal.startsWith('navigate ')) {
         try { task.taskState.advanceSubgoal?.(); } catch {}
       }
     }
@@ -2667,7 +2895,8 @@ export class AgentController {
     }
 
     try {
-      if (task.taskState?.getActiveSubgoal()?.toLowerCase()?.startsWith('open ')) {
+      const subgoal = task.taskState?.getActiveSubgoal()?.toLowerCase() || '';
+      if (subgoal.startsWith('open ') || subgoal.startsWith('navigate ')) {
         task.taskState.advanceSubgoal?.();
       }
     } catch {}

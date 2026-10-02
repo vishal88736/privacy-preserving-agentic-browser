@@ -216,6 +216,53 @@ test('PLAY completes when the player is already playing on arrival', () => {
   }
 });
 
+test('PLAY completes after clicking the watch-page Play (k) button', () => {
+  // YouTube labels its player control "Play (k)" / "Pause (k)". The strict
+  // play-label regex rejected the "(k)" shortcut hint, so the click was never
+  // recognized as a play trigger and PLAY tasks failed on the watch page even
+  // after playback visibly started.
+  const previousTask = taskManager.currentTask;
+  const task = taskManager.createTask('play the ISRO video', 7);
+  task.taskState = new TaskState(task.prompt);
+  task.taskState.updateFromModel(localInterpretTask(task.prompt));
+  task.taskState.search_query = 'ISRO video';
+  task.taskState.target = { type: 'video', entity: 'ISRO video' };
+  taskManager.recordStep({
+    thought: 'Click Play on the watch page',
+    action: { action: 'CLICK', target: { element_id: 'el_play' } },
+    success: true
+  }, task);
+  const title = 'ISRO launches new rocket - YouTube';
+  const beforeObservation = {
+    observation_id: 'obs-before',
+    page: { url: 'https://www.youtube.com/watch?v=abc123', title },
+    headings: [],
+    visible_text: 'watch page paused',
+    elements: [{ id: 'el_play', tag: 'button', label: 'Play (k)' }],
+    local_media_state: { visible_count: 1, media: [{ ordinal: 0, tag: 'video', paused: true, ended: false }] }
+  };
+  const fusedObservation = {
+    observation_id: 'obs-after',
+    page: { url: 'https://www.youtube.com/watch?v=abc123', title },
+    headings: [{ text: title }],
+    visible_text: 'watch page playing',
+    elements: [{ id: 'el_play', tag: 'button', label: 'Pause (k)' }],
+    local_media_state: { visible_count: 1, media: [{ ordinal: 0, tag: 'video', paused: false, ended: false }] }
+  };
+  const verificationContext = {
+    stepNumber: 1,
+    execution: { success: true },
+    beforeObservation,
+    verification: { verified: true, observation_id: 'obs-after', visible_state_changed: true }
+  };
+  try {
+    const status = taskGoalStatus(task, fusedObservation, verificationContext);
+    assert.deepEqual(status, { satisfied: true, message: 'The requested media is now playing.' });
+  } finally {
+    taskManager.currentTask = previousTask;
+  }
+});
+
 test('PLAY still waits when nothing is playing or the title mismatches', () => {
   const paused = { ordinal: 0, tag: 'video', paused: true, ended: false };
   const ctxPaused = playGoalFixture({

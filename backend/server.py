@@ -7,8 +7,11 @@ Exposes strict endpoints:
 - GET /health: Healthcheck and status
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse as FastAPIJSONResponse
 from pydantic import BaseModel, Field
 from typing import Dict, Any, List, Optional
 import re
@@ -40,6 +43,26 @@ app = FastAPI(
     version="1.0.0",
     description="VLM Perception & GPT-OSS 120B Reasoning API"
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def _log_validation_error(request: Request, exc: RequestValidationError):
+    # 422s used to be invisible: FastAPI's default handler returns them with
+    # no server-side record, so a client/server contract drift (e.g. an
+    # oversized screenshot field) could only be diagnosed by guessing. Log the
+    # failing location and error type plus input LENGTHS only — never values,
+    # which may carry page content.
+    try:
+        summary = []
+        for err in exc.errors():
+            loc = ".".join(str(part) for part in err.get("loc", ()))
+            inp = err.get("input")
+            size = len(inp) if isinstance(inp, (str, list, dict)) else type(inp).__name__
+            summary.append({"loc": loc, "type": err.get("type"), "input_size": size})
+        logger.warning("Request validation failed for %s: %s", request.url.path, summary)
+    except Exception:
+        logger.warning("Request validation failed for %s", request.url.path)
+    return FastAPIJSONResponse(status_code=422, content={"detail": jsonable_encoder(exc.errors())})
 
 # The legacy backend-driven browser loop is intentionally not mounted. It
 # captured raw screenshots and auto-proceeded through high-risk actions, so it
@@ -239,7 +262,11 @@ class RedactionAudit(BaseModel):
 
 class VisionRequest(BaseModel):
     task_id: str = Field(min_length=1, max_length=128)
-    sanitized_screenshot: str = Field(min_length=1, max_length=1_600_000)
+    # captureVisibleTab PNG data URLs grow with viewport × devicePixelRatio; a
+    # dense page at 2x DPR exceeds the old 1.6M budget and every /vision call
+    # 422d (seen on YouTube), silently dropping the task to DOM-only vision.
+    # Stays under the 5 MiB request-body cap enforced by RequestGuardMiddleware.
+    sanitized_screenshot: str = Field(min_length=1, max_length=4_500_000)
     sanitized_dom: Dict[str, Any] = Field(max_length=128)
     # Keep the attestation beside the image as well as inside metadata. The
     # extension currently sends both; modelling the top-level copy prevents a

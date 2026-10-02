@@ -171,6 +171,16 @@ export class ActionExecutor {
         throw new Error(`Navigation blocked: ${validation.reason}`);
       }
       const targetUrl = validation.normalizedUrl;
+      
+      const currentTab = await chrome.tabs.get(tabId);
+      const isSameUrl = currentTab?.url && 
+        currentTab.url.replace(/\/$/, '') === targetUrl.replace(/\/$/, '');
+
+      if (isSameUrl) {
+        log.info('Already at target URL, skipping navigation to prevent reload', { targetUrl });
+        return { success: true, navigatedTo: currentTab.url };
+      }
+
       await withTimeout(chrome.tabs.update(tabId, { url: targetUrl }));
 
       // Wait for navigation and document load

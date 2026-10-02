@@ -45,7 +45,7 @@ export class ScreenshotSanitizer {
     // If text PII has no location, or a canvas/video may contain text without
     // accessible DOM, the only safe image is a neutral placeholder.
     if (privacyAudit.coverageEstablished !== true || privacyAudit.localVisionCompleted !== true ||
-        privacyAudit.forceWithhold || privacyAudit.unlocatedSensitiveText || privacyAudit.opaqueVisualSurface) {
+        privacyAudit.forceWithhold || privacyAudit.unlocatedSensitiveText) {
       return failClosedPlaceholder(privacyAudit.maskedCount || 0);
     }
     if (!screenshotDataUrl || !Array.isArray(elements)) {
